@@ -1,0 +1,67 @@
+# AI-Investment-Bot
+
+개인용 퀀트 리서치 비서. 펀더멘털 분석 + 거시 지표 + 다운사이드 리스크 + 뉴스 센티먼트를 통합해 LLM이 자연어로 답해주는 챗봇.
+
+## 철학
+
+- **레이 달리오**: 자산 간 상관관계가 낮은 포트폴리오. 주식 / 채권 / 금 / 원자재 / 암호화폐를 한 화면에서 동시에 본다.
+- **에드워드 소프**: 악재가 터졌을 때 통계적으로 얼마나 떨어질 수 있는지 사전에 계산. VaR / MDD / 시나리오 분석.
+- **모듈 분리**: 데이터, 분석, 리스크, UI를 각각 독립된 모듈로. 한 파일 안에 다 욱여넣지 않는다.
+
+## 폴더 구조
+
+```
+AI-Investment-Bot/
+├── README.md              # 이 파일
+├── .gitignore             # git이 무시할 파일들
+├── .env.example           # API 키 템플릿 (실제 .env는 절대 커밋 안 함)
+├── requirements.txt       # 파이썬 패키지 목록
+│
+├── src/                   # 핵심 코드
+│   ├── __init__.py
+│   ├── config.py          # 환경변수 로딩, 공통 설정
+│   ├── data_fetcher.py    # 주가/재무제표/거시지표/암호화폐 수집 전담
+│   ├── macro_analyzer.py  # 자산간 상관관계, 시장 국면 분석
+│   ├── risk_engine.py     # VaR, MDD, 시나리오 다운사이드 분석
+│   └── bot_interface.py   # 챗봇 인터페이스 (Streamlit/CLI)
+│
+├── scripts/               # 실행 가능한 스크립트
+│   └── hello_world.py     # ★ 가장 먼저 실행해볼 스크립트 ★
+│
+├── notebooks/             # 탐색·실험용 주피터 노트북
+│
+├── data/                  # 캐시된 데이터 (git 무시)
+│
+└── tests/                 # 테스트 코드
+    └── __init__.py
+```
+
+## 첫 실행 (Quick Start)
+
+```bash
+# 1. 가상환경 만들기 (한 번만)
+python3 -m venv .venv
+
+# 2. 가상환경 켜기 (터미널 켤 때마다)
+source .venv/bin/activate
+
+# 3. 패키지 설치 (한 번만, 또는 requirements.txt 바뀔 때)
+pip install -r requirements.txt
+
+# 4. 환경변수 파일 만들기
+cp .env.example .env
+# 그리고 .env 파일 열어서 API 키들 채워넣기
+
+# 5. 첫 스크립트 실행
+python scripts/hello_world.py
+```
+
+## 개발 단계 (Roadmap)
+
+- [x] Phase 0 — 폴더 구조 + Hello World
+- [ ] Phase 1 — `data_fetcher.py` 완성 (yfinance + FRED + CoinGecko)
+- [ ] Phase 2 — `macro_analyzer.py` 상관관계 매트릭스
+- [ ] Phase 3 — `risk_engine.py` VaR / MDD 모듈
+- [ ] Phase 4 — LLM 통합 (Claude API tool calling)
+- [ ] Phase 5 — 뉴스 인테이크 + 센티먼트
+- [ ] Phase 6 — Streamlit 챗 UI

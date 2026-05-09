@@ -1,0 +1,38 @@
+# 환경변수 (API 키) — 절대 커밋 금지
+.env
+.env.local
+.env.*.local
+
+# 파이썬
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# 데이터 캐시 (커지면 무겁고 민감할 수 있어 무시)
+data/*.csv
+data/*.parquet
+data/*.db
+data/*.sqlite
+!data/.gitkeep
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 로그
+*.log
+logs/
