@@ -6,7 +6,7 @@ scripts/check_korea.py
 한국은 글로벌 IT 하드웨어/반도체 공급망의 핵심이라, 한국 수출 둔화는
 반도체 사이클의 '탄광 속 카나리아' 역할을 합니다.
 
-실행 (FRED 키만 있으면 됨, UNIPASS 키 불필요):
+실행 (FRED 키만 있으면 됨):
     source .venv/bin/activate
     python scripts/check_korea.py
 """
@@ -64,9 +64,6 @@ def main() -> None:
     print("\n해석 힌트:")
     print("  · 수출 YoY 가 마이너스면 글로벌 수요 둔화 신호 — NVDA·반도체株 주의")
     print("  · 수출 YoY 가 +20% 넘으면 IT 사이클 호황 진입 신호")
-    print()
-    print("(더 빠른 잠정치/HS코드별 데이터가 필요하시면 관세청 UNIPASS 키 발급 후")
-    print(" src.data_fetcher.fetch_korea_exports_unipass() 사용)")
 
 
 if __name__ == "__main__":

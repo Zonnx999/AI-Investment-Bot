@@ -29,7 +29,6 @@ class Settings:
     fred_api_key: str = os.getenv("FRED_API_KEY", "")
     fmp_api_key: str = os.getenv("FMP_API_KEY", "")
     news_api_key: str = os.getenv("NEWS_API_KEY", "")
-    unipass_api_key: str = os.getenv("UNIPASS_API_KEY", "")
 
     # 경로
     project_root: Path = PROJECT_ROOT

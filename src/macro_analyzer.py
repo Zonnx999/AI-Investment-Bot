@@ -95,6 +95,47 @@ def cumulative_returns(prices: pd.DataFrame) -> pd.Series:
     return (last / first - 1) * 100
 
 
+def rolling_correlation(
+    prices: pd.DataFrame,
+    asset_a: str,
+    asset_b: str,
+    window: int = 60,
+) -> pd.Series:
+    """두 자산 간 N일 이동 상관계수.
+
+    스냅샷 상관계수는 평균만 보여주지만, 롤링 상관계수는 '시점에 따라
+    상관관계가 어떻게 바뀌는지' 보여줍니다. 폭락장에서 상관계수가 1 로
+    수렴하는 (분산 효과 붕괴) 현상을 포착하려면 이 함수가 필요합니다.
+    """
+    returns = daily_returns(prices)
+    return returns[asset_a].rolling(window).corr(returns[asset_b])
+
+
+def current_drawdown(prices: pd.DataFrame) -> pd.Series:
+    """각 자산의 현재 낙폭 (기간 중 최고점 대비, %).
+
+    예: -8.3 = 지금 가격이 기간 내 최고점 대비 8.3% 낮음.
+    """
+    peak = prices.cummax()
+    return ((prices - peak) / peak).iloc[-1] * 100
+
+
+def sharpe_ratio(
+    prices: pd.DataFrame,
+    risk_free_rate: float = 0.04,
+    periods_per_year: int = 252,
+) -> pd.Series:
+    """연환산 샤프 비율 = (수익률 − 무위험금리) / 변동성.
+
+    1.0 이상이면 우수, 2.0 이상이면 매우 우수 (학계 기준).
+    risk_free_rate 기본값 4% 는 미국 단기국채 근사치 (필요하면 수정).
+    """
+    returns = daily_returns(prices)
+    daily_rf = risk_free_rate / periods_per_year
+    excess = returns.mean() - daily_rf
+    return excess / returns.std() * np.sqrt(periods_per_year)
+
+
 # ----------------------------------------------------------------------
 # 시장 국면 분류기 (규칙 기반)
 # ----------------------------------------------------------------------
@@ -228,7 +269,7 @@ def classify_regime() -> RegimeReport:
 
 
 def market_summary(period: str = "6mo") -> dict:
-    """패널 + 상관관계 + 변동성 + 국면을 한 dict 으로 묶어서 반환."""
+    """패널 + 상관관계 + 변동성 + 낙폭 + 샤프 + 국면을 한 dict 으로 묶어서 반환."""
     prices = fetch_cross_asset_panel(period=period)
     return {
         "period": period,
@@ -236,5 +277,7 @@ def market_summary(period: str = "6mo") -> dict:
         "cumulative_returns_pct": cumulative_returns(prices),
         "correlation": correlation_matrix(prices),
         "annualized_vol_pct": annualized_volatility(prices) * 100,
+        "current_drawdown_pct": current_drawdown(prices),
+        "sharpe_ratio": sharpe_ratio(prices),
         "regime": classify_regime(),
     }

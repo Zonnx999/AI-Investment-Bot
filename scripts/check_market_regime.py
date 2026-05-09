@@ -56,13 +56,23 @@ def main() -> None:
     print("  해석: 1.00 에 가까울수록 같은 방향, -1.00 은 반대 방향, 0 은 무관.")
     print("  포트폴리오는 음의/낮은 상관 자산을 섞을수록 분산 효과가 커집니다.")
 
-    # ----- 3. 변동성 -----
-    print("\n[3] 연환산 변동성 (위험 크기)")
+    # ----- 3. 변동성 + 샤프 + 현재 낙폭 (한 표로) -----
+    print("\n[3] 위험·수익 요약  (변동성 / 샤프비율 / 현재 낙폭)")
     print("-" * 78)
-    vol = summary["annualized_vol_pct"].sort_values(ascending=False)
-    for asset, v in vol.items():
-        bar = "█" * max(0, int(v / 5))
-        print(f"  {asset:<18} {v:>6.2f}%   {bar}")
+    print(f"  {'자산':<18} {'변동성':>10} {'샤프':>8} {'현재낙폭':>10}")
+    vol = summary["annualized_vol_pct"]
+    sharpe = summary["sharpe_ratio"]
+    dd = summary["current_drawdown_pct"]
+    for asset in vol.sort_values(ascending=False).index:
+        print(
+            f"  {asset:<18} "
+            f"{vol[asset]:>9.2f}% "
+            f"{sharpe[asset]:>8.2f} "
+            f"{dd[asset]:>9.2f}%"
+        )
+    print()
+    print("  · 샤프 1.0 이상 = 우수, 2.0 이상 = 매우 우수")
+    print("  · 현재낙폭이 -10% 넘는 자산은 변동성 국면 진입 가능성")
 
     # ----- 4. 시장 국면 -----
     print("\n[4] 거시 지표 기반 시장 국면")

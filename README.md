@@ -99,6 +99,5 @@ from src.data_fetcher import (
     fetch_macro_dashboard,   # FRED 여러 지표 한 번에
     fetch_crypto,            # CoinGecko 코인 시계열
     fetch_korea_trade,       # 한국 월간 수출/수입/무역수지 (FRED 경유)
-    fetch_korea_exports_unipass,  # 관세청 일별·HS코드별 (UNIPASS 키 필요)
 )
 ```
