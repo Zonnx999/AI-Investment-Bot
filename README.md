@@ -26,9 +26,11 @@ AI-Investment-Bot/
 │   └── bot_interface.py   # 챗봇 인터페이스 (Streamlit/CLI)
 │
 ├── scripts/               # 실행 가능한 스크립트
-│   ├── hello_world.py     # 주식 + 암호화폐 + 금 종가
-│   ├── check_macro.py     # FRED 거시 지표 대시보드
-│   └── check_crypto.py    # 비트코인 · 이더리움 동향
+│   ├── hello_world.py         # 주식 + 암호화폐 + 금 종가
+│   ├── check_macro.py         # FRED 거시 지표 대시보드
+│   ├── check_crypto.py        # 비트코인 · 이더리움 동향
+│   ├── check_korea.py         # 한국 수출/수입/무역수지
+│   └── check_market_regime.py # ★ 매일 아침 시장 조망 ★
 │
 ├── notebooks/             # 탐색·실험용 주피터 노트북
 │
@@ -61,8 +63,8 @@ python scripts/hello_world.py
 ## 개발 단계 (Roadmap)
 
 - [x] Phase 0 — 폴더 구조 + Hello World
-- [x] Phase 1 — `data_fetcher.py` 완성 (yfinance + FRED + CoinGecko)
-- [ ] Phase 2 — `macro_analyzer.py` 상관관계 매트릭스
+- [x] Phase 1 — `data_fetcher.py` 완성 (yfinance + FRED + CoinGecko + 한국 무역통계)
+- [x] Phase 2 — `macro_analyzer.py` 상관관계 + 시장 국면 분류
 - [ ] Phase 3 — `risk_engine.py` VaR / MDD 모듈
 - [ ] Phase 4 — LLM 통합 (Claude API tool calling)
 - [ ] Phase 5 — 뉴스 인테이크 + 센티먼트
@@ -79,6 +81,12 @@ python scripts/check_crypto.py
 
 # 거시 대시보드 (FRED 키 필요 — .env 에 FRED_API_KEY 설정)
 python scripts/check_macro.py
+
+# 한국 수출입 통계 (FRED 키 사용)
+python scripts/check_korea.py
+
+# 시장 조망 (Phase 2): 자산군 + 상관관계 + 변동성 + 국면
+python scripts/check_market_regime.py
 ```
 
 `data_fetcher.py` API:
@@ -90,5 +98,7 @@ from src.data_fetcher import (
     fetch_macro,             # FRED 단일 시계열
     fetch_macro_dashboard,   # FRED 여러 지표 한 번에
     fetch_crypto,            # CoinGecko 코인 시계열
+    fetch_korea_trade,       # 한국 월간 수출/수입/무역수지 (FRED 경유)
+    fetch_korea_exports_unipass,  # 관세청 일별·HS코드별 (UNIPASS 키 필요)
 )
 ```

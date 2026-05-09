@@ -182,6 +182,94 @@ def fetch_crypto(coin_id: str = "bitcoin", days: int = 180) -> pd.DataFrame:
     return df
 
 
-# TODO(Phase 1 마무리):
-# - fetch_korea_exports()  : 관세청 월간 수출 (특히 반도체)
-# - SQLite 캐시 레이어 추가 (같은 데이터 두 번 안 부르도록)
+# ----------------------------------------------------------------------
+# 한국 수출입 통계
+# ----------------------------------------------------------------------
+#
+# 두 가지 경로:
+#  (A) FRED — OECD가 한국 월간 통계를 그대로 호스팅. 받으신 FRED 키만 있으면 즉시 동작.
+#  (B) UNIPASS (관세청) — 일별/HS코드별/국가별 세분화된 데이터. 별도 가입 필요.
+#       https://unipass.customs.go.kr/openapi/ 에서 인증키 발급.
+# ----------------------------------------------------------------------
+
+
+# FRED 에 등록된 한국 무역통계 시리즈 (OECD 출처, USD 기준 월별)
+KOREA_TRADE_SERIES = {
+    "수출(금액, USD)":     "XTEXVA01KRM664S",
+    "수입(금액, USD)":     "XTIMVA01KRM664S",
+    "무역수지(USD)":       "XTNTVA01KRM664S",
+}
+
+
+def fetch_korea_trade(start: str | None = None) -> pd.DataFrame:
+    """FRED 기반 한국 월간 수출/수입/무역수지 (USD).
+
+    OECD가 정리해둔 데이터라 관세청 원본보다 1~2개월 지연이 있지만,
+    매크로 조망용으로는 충분합니다. 더 빠른 잠정치가 필요하면 UNIPASS 함수 사용.
+    """
+    frames = {}
+    for label, series_id in KOREA_TRADE_SERIES.items():
+        try:
+            frames[label] = fetch_macro(series_id, start=start)
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠️  {label} ({series_id}) 실패: {e}")
+    return pd.DataFrame(frames)
+
+
+def fetch_korea_exports_unipass(
+    start_yyyymm: str,
+    end_yyyymm: str,
+    hs_code: str | None = None,
+) -> pd.DataFrame:
+    """관세청 UNIPASS OpenAPI 로 한국 수출 통계 조회 (선택, 인증키 필요).
+
+    Parameters
+    ----------
+    start_yyyymm, end_yyyymm : str
+        조회 시작/종료 월. 예: "202401", "202504".
+    hs_code : str | None
+        HS 코드(품목분류). 예: "8542" (집적회로 = 반도체).
+        None 이면 전체 합계.
+
+    .env 필요:
+        UNIPASS_API_KEY=...
+
+    참고:
+        실제 서비스명/엔드포인트는 가입 후 받는 인증서별 명세서를 따르세요.
+        (관세청은 서비스 단위로 별도 인증을 줍니다 — 예: trrTotInfoQry 등)
+        아래 URL 과 파라미터 키는 사용자께서 받으신 명세서대로 수정 필요.
+    """
+    import xml.etree.ElementTree as ET
+
+    import requests
+
+    api_key = settings.require("unipass_api_key")
+
+    # ⚠️  아래 URL/서비스명은 발급받으신 서비스에 맞게 교체하세요.
+    base_url = "https://unipass.customs.go.kr:38010/ext/rest/trrTotInfoQry/getTrrTotInfoQryList"
+    params = {
+        "crkyCn": api_key,                # 인증키
+        "strtYymm": start_yyyymm,         # 시작 연월
+        "endYymm": end_yyyymm,            # 종료 연월
+    }
+    if hs_code:
+        params["hsSgn"] = hs_code         # HS 코드
+
+    response = requests.get(base_url, params=params, timeout=30)
+    response.raise_for_status()
+    root = ET.fromstring(response.content)
+
+    rows = []
+    for item in root.findall(".//item"):
+        row = {child.tag: child.text for child in item}
+        rows.append(row)
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+    return df
+
+
+# TODO(다음 Phase 1.5 — 선택 사항):
+# - SQLite 캐시 레이어 (같은 데이터 두 번 안 부르도록 src/storage.py 신설)
