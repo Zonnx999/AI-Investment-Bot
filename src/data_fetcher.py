@@ -54,6 +54,38 @@ def fetch_prices(ticker: str, period: str = "1y", interval: str = "1d") -> pd.Da
     return df
 
 
+def fetch_financials_yf(
+    ticker: str,
+    statement: str = "income",
+) -> pd.DataFrame:
+    """yfinance 기반 재무제표 (FMP 무료 티어가 막혔을 때 fallback).
+
+    Parameters
+    ----------
+    statement : str
+        "income"   : 손익계산서  (income_stmt)
+        "balance"  : 재무상태표  (balance_sheet)
+        "cashflow" : 현금흐름표  (cashflow)
+
+    yfinance 는 4년치 연간 데이터를 컬럼으로 반환. 이 함수는 그것을
+    행=날짜 순서로 뒤집어 FMP 와 비슷한 모양으로 맞춰줍니다.
+    """
+    t = yf.Ticker(ticker)
+    table = {
+        "income": t.income_stmt,
+        "balance": t.balance_sheet,
+        "cashflow": t.cashflow,
+    }.get(statement)
+
+    if table is None or table.empty:
+        return pd.DataFrame()
+
+    df = table.T.sort_index()  # 행=날짜, 열=항목
+    df.index = pd.to_datetime(df.index)
+    df.index.name = "date"
+    return df
+
+
 def fetch_fundamentals(ticker: str) -> dict:
     """기업 펀더멘털 요약. yfinance .info 의 핵심 키만 추려서 dict 로 반환.
 
@@ -206,6 +238,115 @@ def fetch_korea_trade(start: str | None = None) -> pd.DataFrame:
         except Exception as e:  # noqa: BLE001
             print(f"  ⚠️  {label} ({series_id}) 실패: {e}")
     return pd.DataFrame(frames)
+
+
+# ----------------------------------------------------------------------
+# FMP (Financial Modeling Prep) — 재무제표 시계열
+# ----------------------------------------------------------------------
+#
+# 2025-08-31 이후 가입한 계정은 무조건 /stable/ 엔드포인트를 사용해야 합니다.
+# /api/v3/* 는 그 이전 가입자 전용 레거시이고, 신규 사용자에겐 403 을 줍니다.
+# 형식 차이:
+#     /api/v3/income-statement/CPNG?period=annual&limit=5         (옛날)
+#     /stable/income-statement?symbol=CPNG&period=annual&limit=5  (현재)
+#
+# 무료 플랜: US 주식 일부, 호출 한도 있음
+# Starter+ : 모든 종목 + 풍부한 시계열
+# ----------------------------------------------------------------------
+
+FMP_BASE_URL = "https://financialmodelingprep.com/stable"
+
+
+def _fmp_get(endpoint: str, params: dict | None = None) -> list:
+    """FMP stable API GET 헬퍼.
+
+    `endpoint` 는 마지막 path 한 조각만 (예: "income-statement").
+    티커는 params 안에 `"symbol": "CPNG"` 형태로 넣어주세요.
+    """
+    import requests
+
+    api_key = settings.require("fmp_api_key")
+    p = dict(params or {})
+    p["apikey"] = api_key
+    response = requests.get(f"{FMP_BASE_URL}/{endpoint}", params=p, timeout=30)
+    response.raise_for_status()
+    return response.json()
+
+
+def fetch_financial_statements(
+    ticker: str,
+    statement: str = "income-statement",
+    period: str = "annual",
+    limit: int = 5,
+) -> pd.DataFrame:
+    """FMP 재무제표 시계열 (각 행 = 한 회계기간).
+
+    Parameters
+    ----------
+    ticker : str
+        예: "CPNG", "NVDA", "AAPL".
+    statement : str
+        "income-statement"          : 손익계산서
+        "balance-sheet-statement"   : 재무상태표
+        "cash-flow-statement"       : 현금흐름표
+    period : str
+        "annual" 또는 "quarter".
+    limit : int
+        과거 몇 기간을 가져올지 (annual 기준 보통 5~10).
+    """
+    data = _fmp_get(
+        statement,
+        {"symbol": ticker, "period": period, "limit": limit},
+    )
+    if not data:
+        return pd.DataFrame()
+    df = pd.DataFrame(data)
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.sort_values("date").set_index("date")
+    return df
+
+
+def fetch_key_metrics(
+    ticker: str,
+    period: str = "annual",
+    limit: int = 5,
+) -> pd.DataFrame:
+    """ROE, ROA, 부채비율, P/E, P/FCF 등 핵심 비율 시계열."""
+    data = _fmp_get(
+        "key-metrics",
+        {"symbol": ticker, "period": period, "limit": limit},
+    )
+    if not data:
+        return pd.DataFrame()
+    df = pd.DataFrame(data)
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.sort_values("date").set_index("date")
+    return df
+
+
+def fetch_ratios(
+    ticker: str,
+    period: str = "annual",
+    limit: int = 5,
+) -> pd.DataFrame:
+    """수익성·유동성·레버리지 비율 시계열 (key_metrics 와 일부 중복, 더 광범위).
+
+    참고: stable 에서는 `ratios` 와 `metrics-ratios` 둘 다 존재 — 후자가 약간 더 풍부.
+    여기선 호환성 위해 `ratios` 사용.
+    """
+    data = _fmp_get(
+        "ratios",
+        {"symbol": ticker, "period": period, "limit": limit},
+    )
+    if not data:
+        return pd.DataFrame()
+    df = pd.DataFrame(data)
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.sort_values("date").set_index("date")
+    return df
 
 
 # TODO(다음 Phase 1.5 — 선택 사항):

@@ -30,6 +30,7 @@ AI-Investment-Bot/
 │   ├── check_macro.py         # FRED 거시 지표 대시보드
 │   ├── check_crypto.py        # 비트코인 · 이더리움 동향
 │   ├── check_korea.py         # 한국 수출/수입/무역수지
+│   ├── check_fundamentals.py  # FMP 5년 재무제표 추세 (FMP 키 필요)
 │   └── check_market_regime.py # ★ 매일 아침 시장 조망 ★
 │
 ├── notebooks/             # 탐색·실험용 주피터 노트북
@@ -85,6 +86,10 @@ python scripts/check_macro.py
 # 한국 수출입 통계 (FRED 키 사용)
 python scripts/check_korea.py
 
+# 종목 5년 재무제표 추세 (FMP 키 필요)
+python scripts/check_fundamentals.py CPNG
+python scripts/check_fundamentals.py NVDA
+
 # 시장 조망 (Phase 2): 자산군 + 상관관계 + 변동성 + 국면
 python scripts/check_market_regime.py
 ```
@@ -99,5 +104,8 @@ from src.data_fetcher import (
     fetch_macro_dashboard,   # FRED 여러 지표 한 번에
     fetch_crypto,            # CoinGecko 코인 시계열
     fetch_korea_trade,       # 한국 월간 수출/수입/무역수지 (FRED 경유)
+    fetch_financial_statements,  # FMP 손익/재무/현금흐름 시계열
+    fetch_key_metrics,           # FMP P/E, ROE, 부채비율 등
+    fetch_ratios,                # FMP 광범위한 재무 비율
 )
 ```
