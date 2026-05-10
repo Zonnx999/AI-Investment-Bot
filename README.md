@@ -31,6 +31,7 @@ AI-Investment-Bot/
 │   ├── check_crypto.py        # 비트코인 · 이더리움 동향
 │   ├── check_korea.py         # 한국 수출/수입/무역수지
 │   ├── check_fundamentals.py  # FMP 5년 재무제표 추세 (FMP 키 필요)
+│   ├── check_risk.py          # ★ 종목 리스크 리포트 (Phase 3) ★
 │   └── check_market_regime.py # ★ 매일 아침 시장 조망 ★
 │
 ├── notebooks/             # 탐색·실험용 주피터 노트북
@@ -66,7 +67,7 @@ python scripts/hello_world.py
 - [x] Phase 0 — 폴더 구조 + Hello World
 - [x] Phase 1 — `data_fetcher.py` 완성 (yfinance + FRED + CoinGecko + 한국 무역통계)
 - [x] Phase 2 — `macro_analyzer.py` 상관관계 + 시장 국면 분류
-- [ ] Phase 3 — `risk_engine.py` VaR / MDD 모듈
+- [x] Phase 3 — `risk_engine.py` VaR / MDD / Monte Carlo / Scenario
 - [ ] Phase 4 — LLM 통합 (Claude API tool calling)
 - [ ] Phase 5 — 뉴스 인테이크 + 센티먼트
 - [ ] Phase 6 — Streamlit 챗 UI
@@ -92,6 +93,10 @@ python scripts/check_fundamentals.py NVDA
 
 # 시장 조망 (Phase 2): 자산군 + 상관관계 + 변동성 + 국면
 python scripts/check_market_regime.py
+
+# 종목 리스크 리포트 (Phase 3): VaR / MDD / Monte Carlo / 시나리오
+python scripts/check_risk.py CPNG
+python scripts/check_risk.py NVDA --days 60
 ```
 
 `data_fetcher.py` API:
