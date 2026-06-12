@@ -21,7 +21,19 @@ import pandas as pd
 
 from src.data_fetcher import fetch_macro, fetch_prices
 from src.exceptions import ConfigError, DataFetchError
-from src.utils import close_series
+from src.utils import TRADING_DAYS_PER_YEAR, close_series
+
+# ----------------------------------------------------------------------
+# 국면 분류 임계값 (7단계: 매직 넘버 → 상수. 튜닝/테스트 지점)
+# ----------------------------------------------------------------------
+YIELD_CURVE_LOOKBACK_DAYS = 60     # 장단기 금리차 비교 구간
+YIELD_CURVE_CAUTION_DROP = 0.2     # 60일 평균 대비 이만큼(%p) 하락하면 '주의'
+HY_SPREAD_LOOKBACK_DAYS = 252      # 하이일드 스프레드 1년 분포 구간
+HY_SPREAD_STRESS_QUANTILE = 0.9    # 이 분위수 초과 = 신용 경색
+HY_SPREAD_CAUTION_RATIO = 1.1      # 1년 중간값 대비 이 배율 초과 = 주의
+JOBLESS_LOOKBACK_WEEKS = 52        # 실업수당 청구 1년(주간) 구간
+JOBLESS_Z_BAD = 1.5                # z-score 가 이 이상이면 노동시장 악화
+JOBLESS_Z_GOOD = -1.0              # z-score 가 이 이하면 고용 강세
 from src.logger import get_logger
 
 logger = get_logger(__name__)
@@ -84,7 +96,9 @@ def correlation_matrix(prices: pd.DataFrame) -> pd.DataFrame:
     return daily_returns(prices).corr()
 
 
-def annualized_volatility(prices: pd.DataFrame, periods_per_year: int = 252) -> pd.Series:
+def annualized_volatility(
+    prices: pd.DataFrame, periods_per_year: int = TRADING_DAYS_PER_YEAR
+) -> pd.Series:
     """자산별 연환산 변동성(표준편차).
 
     주식 기준으로 1년 = 252 거래일을 가정. 암호화폐는 365 가 더 정확하지만
@@ -134,7 +148,7 @@ def current_drawdown(prices: pd.DataFrame) -> pd.Series:
 def sharpe_ratio(
     prices: pd.DataFrame,
     risk_free_rate: float = 0.04,
-    periods_per_year: int = 252,
+    periods_per_year: int = TRADING_DAYS_PER_YEAR,
 ) -> pd.Series:
     """연환산 샤프 비율 = (수익률 − 무위험금리) / 변동성.
 
@@ -195,7 +209,7 @@ class RegimeReport:
 
 def _eval_yield_curve() -> IndicatorOutcome:
     """장단기 금리차 (T10Y2Y) — 음수면 경기침체 경고."""
-    s = fetch_macro("T10Y2Y").tail(60)
+    s = fetch_macro("T10Y2Y").tail(YIELD_CURVE_LOOKBACK_DAYS)
     latest = float(s.iloc[-1])
     avg_60d = float(s.mean())
 
@@ -205,7 +219,7 @@ def _eval_yield_curve() -> IndicatorOutcome:
             f"장단기 금리차 {latest:+.2f}%p 로 역전 상태 — 침체 경고 (-1)",
             latest,
         )
-    if latest < avg_60d - 0.2:
+    if latest < avg_60d - YIELD_CURVE_CAUTION_DROP:
         return IndicatorOutcome(
             "T10Y2Y", 0,
             f"장단기 금리차 {latest:+.2f}%p, 60일 평균 대비 하락 — 주의 (0)",
@@ -220,10 +234,10 @@ def _eval_yield_curve() -> IndicatorOutcome:
 
 def _eval_hy_spread() -> IndicatorOutcome:
     """하이일드 스프레드 — 급등하면 신용 경색."""
-    s = fetch_macro("BAMLH0A0HYM2").tail(252)
+    s = fetch_macro("BAMLH0A0HYM2").tail(HY_SPREAD_LOOKBACK_DAYS)
     latest = float(s.iloc[-1])
     median_1y = float(s.median())
-    p90 = float(s.quantile(0.9))
+    p90 = float(s.quantile(HY_SPREAD_STRESS_QUANTILE))
 
     if latest > p90:
         return IndicatorOutcome(
@@ -231,7 +245,7 @@ def _eval_hy_spread() -> IndicatorOutcome:
             f"하이일드 스프레드 {latest:.2f}%, 1년 90분위 초과 — 신용 경색 (-1)",
             latest,
         )
-    if latest > median_1y * 1.1:
+    if latest > median_1y * HY_SPREAD_CAUTION_RATIO:
         return IndicatorOutcome(
             "BAMLH0A0HYM2", 0,
             f"하이일드 스프레드 {latest:.2f}%, 중간값 대비 상승 — 주의 (0)",
@@ -246,19 +260,19 @@ def _eval_hy_spread() -> IndicatorOutcome:
 
 def _eval_jobless_claims() -> IndicatorOutcome:
     """주간 신규 실업수당 청구 — 급등하면 노동시장 악화."""
-    s = fetch_macro("ICSA").tail(52)
+    s = fetch_macro("ICSA").tail(JOBLESS_LOOKBACK_WEEKS)
     latest = float(s.iloc[-1])
     mean_1y = float(s.mean())
     std_1y = float(s.std())
     z = (latest - mean_1y) / std_1y if std_1y > 0 else 0
 
-    if z > 1.5:
+    if z > JOBLESS_Z_BAD:
         return IndicatorOutcome(
             "ICSA", -1,
             f"신규 실업수당 청구 {int(latest):,}건, z={z:+.1f} — 노동시장 악화 (-1)",
             latest,
         )
-    if z < -1:
+    if z < JOBLESS_Z_GOOD:
         return IndicatorOutcome(
             "ICSA", 1,
             f"신규 실업수당 청구 {int(latest):,}건, z={z:+.1f} — 고용 강세 (+1)",

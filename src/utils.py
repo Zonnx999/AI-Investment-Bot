@@ -13,6 +13,9 @@ import pandas as pd
 
 from src.exceptions import DataValidationError
 
+# 연환산 기준 거래일 수. 암호화폐(365일 거래)도 혼합 패널 일관성을 위해 동일 적용.
+TRADING_DAYS_PER_YEAR = 252
+
 
 def close_series(df: pd.DataFrame) -> pd.Series:
     """OHLCV DataFrame 에서 종가 시리즈 추출.

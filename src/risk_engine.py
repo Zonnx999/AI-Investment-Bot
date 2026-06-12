@@ -11,7 +11,12 @@ risk_engine.py
   3. Monte Carlo       — N일 후 가격 분포 시뮬레이션 (GBM)
   4. Scenario Analysis — "매출 -10%, 마진 -2%p" 같은 충격을 가격에 환산
 
-Phase 4 에서 LLM 이 이 함수들을 tool 로 호출해 자연어 답변을 만듭니다.
+Phase 5 (Signal Engine) 의 알림 룰이 이 함수들의 출력을 입력으로 사용할 예정.
+
+규약 (7단계 리팩토링): VaR/ES 함수는 **일별 수익률 시리즈**를 받습니다.
+가격 시리즈는 ``returns_from_prices()`` 로 명시 변환 후 전달하세요.
+(과거의 "값이 다 양수면 가격으로 간주" 자동 판별은 페니스톡/저변동
+수익률에서 오작동할 수 있어 제거됨.)
 """
 
 from __future__ import annotations
@@ -22,17 +27,40 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from src.exceptions import AnalysisError, InsufficientDataError
+from src.utils import TRADING_DAYS_PER_YEAR
+
 # ======================================================================
-# 0. 유틸
+# 0. 상수 & 유틸
 # ======================================================================
 
+MIN_RETURN_POINTS = 20        # VaR/ES 통계가 의미를 갖는 최소 표본 수
+_PRICE_LIKE_RATIO = 0.5       # |값|>1 비율이 이 이상이면 가격 시리즈 오입력으로 판정
 
-def _clean_returns(returns_or_prices: pd.Series) -> pd.Series:
-    """가격이 들어와도 자동으로 일별 수익률로 변환."""
-    s = returns_or_prices.dropna().squeeze()
-    # 모든 값이 양수면 가격으로 간주 → 수익률로 변환
-    if (s > 0).all() and s.min() > 0.01:
-        return s.pct_change().dropna()
+
+def returns_from_prices(prices: pd.Series) -> pd.Series:
+    """가격 시리즈 → 일별 단순 수익률. (구 `_clean_returns` 의 암묵 변환을 명시 API 로)"""
+    p = prices.dropna().squeeze()
+    return p.pct_change().dropna()
+
+
+def _validate_returns(returns: pd.Series, min_points: int = MIN_RETURN_POINTS) -> pd.Series:
+    """수익률 시리즈 검증: 표본 수 + '가격을 잘못 넣은' 실수 감지.
+
+    일별 수익률은 ±1.0 (±100%) 을 넘는 값이 드뭅니다. 절반 이상이 |값|>1 이면
+    가격 시리즈를 잘못 넣었을 가능성이 압도적 → 조용히 오답을 내는 대신 raise.
+    """
+    s = returns.dropna().squeeze()
+    if len(s) < min_points:
+        raise InsufficientDataError(
+            f"수익률 표본 {len(s)}개 — 최소 {min_points}개 필요",
+            n_points=len(s), required=min_points,
+        )
+    if (s.abs() > 1.0).mean() > _PRICE_LIKE_RATIO:
+        raise AnalysisError(
+            "수익률이 아니라 가격 시리즈로 보입니다 — "
+            "returns_from_prices(prices) 로 변환 후 호출하세요."
+        )
     return s
 
 
@@ -46,9 +74,7 @@ def historical_var(returns: pd.Series, confidence: float = 0.95) -> float:
 
     confidence=0.95 면 하위 5% 분위수를 반환. 결과는 음수 (손실).
     """
-    r = _clean_returns(returns)
-    if r.empty:
-        raise ValueError("수익률 시리즈가 비어있습니다.")
+    r = _validate_returns(returns)
     return float(np.quantile(r, 1 - confidence))
 
 
@@ -59,7 +85,7 @@ def parametric_var(returns: pd.Series, confidence: float = 0.95) -> float:
     """
     from scipy.stats import norm
 
-    r = _clean_returns(returns)
+    r = _validate_returns(returns)
     mu = r.mean()
     sigma = r.std()
     return float(mu - sigma * norm.ppf(confidence))
@@ -70,7 +96,7 @@ def expected_shortfall(returns: pd.Series, confidence: float = 0.95) -> float:
 
     VaR 가 하한선이라면 ES 는 그 너머 평균 깊이. fat-tail 자산일수록 VaR 와 ES 차이가 큽니다.
     """
-    r = _clean_returns(returns)
+    r = _validate_returns(returns)
     var = historical_var(r, confidence)
     tail = r[r <= var]
     return float(tail.mean()) if len(tail) > 0 else var
@@ -102,7 +128,7 @@ def max_drawdown(prices: pd.Series) -> DrawdownInfo:
     """최대 낙폭의 크기 + 기간 + 회복 여부를 한 번에 반환."""
     p = prices.dropna().squeeze()
     if p.empty:
-        raise ValueError("가격 시리즈가 비어있습니다.")
+        raise InsufficientDataError("가격 시리즈가 비어있습니다.", n_points=0, required=1)
 
     dd = drawdown_series(p)
     trough_date = dd.idxmin()
@@ -163,18 +189,26 @@ def monte_carlo_simulation(
     """GBM 기반 가격 경로 시뮬레이션.
 
     가정: log-수익률이 i.i.d. 정규분포 (실제로는 fat-tail 이라 P5 가 너무 낙관적일 수 있음).
+
+    RNG 는 격리된 Generator 사용 — 글로벌 np.random 상태를 오염시키지 않음
+    (7단계: 구버전은 np.random.seed() 로 글로벌 시드를 바꿔서 같은 프로세스의
+    다른 random 연산까지 결정론화시키는 부작용이 있었음).
     """
     p = prices.dropna().squeeze()
     log_returns = np.log(p / p.shift(1)).dropna()
+    if len(log_returns) < MIN_RETURN_POINTS:
+        raise InsufficientDataError(
+            f"GBM 파라미터 추정에 수익률 {len(log_returns)}개 — 최소 {MIN_RETURN_POINTS}개 필요",
+            n_points=len(log_returns), required=MIN_RETURN_POINTS,
+        )
     mu = float(log_returns.mean())
     sigma = float(log_returns.std())
     last_price = float(p.iloc[-1])
 
-    if seed is not None:
-        np.random.seed(seed)
+    rng = np.random.default_rng(seed)  # seed=None 이면 비결정적
 
     drift = mu - 0.5 * sigma * sigma
-    shocks = sigma * np.random.standard_normal((n_paths, days_forward))
+    shocks = sigma * rng.standard_normal((n_paths, days_forward))
     log_increments = drift + shocks
     cumulative = np.cumsum(log_increments, axis=1)
     paths = last_price * np.exp(cumulative)
@@ -271,13 +305,13 @@ def risk_report(
 
     df = fetch_prices(ticker, period=period)
     prices = close_series(df)
-    returns = prices.pct_change().dropna()
+    returns = returns_from_prices(prices)
 
     return {
         "ticker": ticker,
         "period": period,
         "current_price": float(prices.iloc[-1]),
-        "annualized_vol_pct": float(returns.std() * np.sqrt(252) * 100),
+        "annualized_vol_pct": float(returns.std() * np.sqrt(TRADING_DAYS_PER_YEAR) * 100),
         # VaR / CVaR (일별, %)
         "var_95_hist_pct": historical_var(returns, 0.95) * 100,
         "var_99_hist_pct": historical_var(returns, 0.99) * 100,

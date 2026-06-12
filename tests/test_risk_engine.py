@@ -6,12 +6,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from src.exceptions import AnalysisError, InsufficientDataError
 from src.risk_engine import (
     expected_shortfall,
     historical_var,
     max_drawdown,
     monte_carlo_simulation,
     parametric_var,
+    returns_from_prices,
     scenario_impact,
 )
 
@@ -38,9 +40,31 @@ def test_parametric_var_reasonably_close_to_historical(price_series):
     assert abs(hist - param) < 0.01
 
 
-def test_historical_var_empty_raises():
-    with pytest.raises(ValueError):
-        historical_var(pd.Series(dtype=float))
+def test_historical_var_too_few_points_raises():
+    with pytest.raises(InsufficientDataError):
+        historical_var(pd.Series([0.01, -0.02, 0.005]))
+
+
+def test_var_rejects_price_series(price_series):
+    # 7단계 보장: 가격 시리즈를 실수로 넣으면 조용한 오답 대신 raise
+    with pytest.raises(AnalysisError):
+        historical_var(price_series)
+
+
+def test_returns_from_prices(price_series):
+    r = returns_from_prices(price_series)
+    assert len(r) == len(price_series) - 1
+    expected = price_series.iloc[1] / price_series.iloc[0] - 1
+    assert r.iloc[0] == pytest.approx(expected)
+
+
+def test_monte_carlo_does_not_pollute_global_rng(price_series):
+    # 7단계 보장: MC 가 글로벌 np.random 상태를 건드리지 않음
+    np.random.seed(123)
+    before = np.random.get_state()[1][:5].copy()
+    monte_carlo_simulation(price_series, days_forward=10, n_paths=100, seed=42)
+    after = np.random.get_state()[1][:5]
+    assert np.array_equal(before, after)
 
 
 def test_max_drawdown_known_path():
