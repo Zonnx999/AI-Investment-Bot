@@ -19,13 +19,10 @@ scripts/check_risk.py
 from __future__ import annotations
 
 import argparse
-import sys
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.logger import get_logger  # noqa: E402
-from src.risk_engine import risk_report, scenario_impact  # noqa: E402
+from src.logger import get_logger
+from src.risk_engine import risk_report, scenario_impact
 
 logger = get_logger(__name__)
 

@@ -10,14 +10,10 @@ CoinGecko 무료 API 로 비트코인·이더리움 최근 6개월 가격을 받
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from src.data_fetcher import fetch_crypto  # noqa: E402
-from src.exceptions import DataFetchError  # noqa: E402
-from src.logger import get_logger  # noqa: E402
+from src.data_fetcher import fetch_crypto
+from src.exceptions import DataFetchError
+from src.logger import get_logger
 
 logger = get_logger(__name__)
 

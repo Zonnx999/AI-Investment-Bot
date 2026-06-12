@@ -13,15 +13,11 @@ scripts/check_korea.py
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import pandas as pd
 
-import pandas as pd  # noqa: E402
-
-from src.data_fetcher import fetch_korea_trade  # noqa: E402
-from src.logger import get_logger  # noqa: E402
+from src.data_fetcher import fetch_korea_trade
+from src.logger import get_logger
 
 logger = get_logger(__name__)
 

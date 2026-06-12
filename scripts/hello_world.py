@@ -13,16 +13,11 @@ CPNG / NVDA / 비트코인 / 금의 최근 6개월 종가를 받아와 콘솔에
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 
-# 프로젝트 루트를 import 경로에 추가 (scripts/ 에서 src/ 를 부르려고)
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from src.data_fetcher import fetch_fundamentals, fetch_prices  # noqa: E402
-from src.exceptions import DataFetchError  # noqa: E402
-from src.logger import get_logger  # noqa: E402
-from src.utils import close_series  # noqa: E402
+from src.data_fetcher import fetch_fundamentals, fetch_prices
+from src.exceptions import DataFetchError
+from src.logger import get_logger
+from src.utils import close_series
 
 logger = get_logger(__name__)
 

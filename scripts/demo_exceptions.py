@@ -14,17 +14,14 @@ scripts/demo_exceptions.py
 from __future__ import annotations
 
 import os
-import sys
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # 깨끗한 데모 상태 보장
 for k in ("FRED_API_KEY", "FMP_API_KEY"):
     os.environ.pop(k, None)
 
-from src.config import settings  # noqa: E402
-from src.exceptions import (  # noqa: E402
+from src.config import settings
+from src.exceptions import (
     ConfigError,
     DataFetchError,
     DataValidationError,
@@ -32,7 +29,7 @@ from src.exceptions import (  # noqa: E402
     QuantBotError,
     RateLimitError,
 )
-from src.logger import get_logger  # noqa: E402
+from src.logger import get_logger
 
 log = get_logger("demo.exceptions")
 

@@ -23,15 +23,13 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.logger import get_logger  # noqa: E402
-from src.screener import (  # noqa: E402
+from src.logger import get_logger
+from src.screener import (
     KR_WATCHLIST,
     US_WATCHLIST,
     screen_crypto,

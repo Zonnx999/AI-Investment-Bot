@@ -1,0 +1,52 @@
+# 5단계 리팩토링: requirements.txt → pyproject.toml 전환.
+# 설치:  pip install -e ".[dev]"   (editable — src/ 수정이 즉시 반영)
+#
+# 참고: import 이름이 `src` 인 것은 기존 코드/문서와의 호환을 위한 선택.
+# 배포용 패키지가 아니라 개인 프로젝트의 editable install 전용이므로 허용.
+# 추후 외부 배포가 필요해지면 `quantbot` 등으로 rename 검토.
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-investment-bot"
+version = "0.5.0"
+description = "개인용 퀀트 리서치 자동화 봇 (결정론적 신호 생성 + 자동 알림)"
+requires-python = ">=3.10"
+dependencies = [
+    # 데이터 수집
+    "yfinance>=0.2.40",
+    "fredapi>=0.5.2",
+    "pycoingecko>=3.1.0",
+    "requests>=2.31.0",
+    "python-dotenv>=1.0.1",
+    # 분석
+    "pandas>=2.2.0",
+    "numpy>=1.26.0",
+    "scipy>=1.13.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "jupyter>=1.0.0",
+    "ipykernel>=6.29.0",
+]
+viz = [
+    "matplotlib>=3.8.0",
+    "plotly>=5.20.0",
+]
+llm = [
+    "anthropic>=0.40.0",  # Phase 8+ (선택적 LLM 레이어)
+]
+ui = [
+    "streamlit>=1.36.0",  # Phase 11 (선택)
+]
+
+[tool.setuptools]
+packages = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

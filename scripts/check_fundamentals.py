@@ -15,24 +15,22 @@ yfinance 의 .info 가 스냅샷이라면, 이 스크립트는 '시간에 따른
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import pandas as pd  # noqa: E402
+import pandas as pd
 
-from src.data_fetcher import (  # noqa: E402
+from src.data_fetcher import (
     fetch_financial_statements,
     fetch_financials_yf,
     fetch_key_metrics,
 )
-from src.exceptions import (  # noqa: E402
+from src.exceptions import (
     ApiAuthError,
     ApiAuthorizationError,
     DataFetchError,
 )
-from src.logger import get_logger  # noqa: E402
-from src.utils import pick_first as pick  # noqa: E402
+from src.logger import get_logger
+from src.utils import pick_first as pick
 
 logger = get_logger(__name__)
 

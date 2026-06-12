@@ -14,15 +14,11 @@ FRED 에서 주요 거시 지표 5종을 받아와 가장 최근 값과 1년 전
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-import pandas as pd  # noqa: E402
+import pandas as pd
 
 from src.data_fetcher import FRED_SERIES, fetch_macro_dashboard  # noqa: E402, F401
-from src.logger import get_logger  # noqa: E402
+from src.logger import get_logger
 
 logger = get_logger(__name__)
 

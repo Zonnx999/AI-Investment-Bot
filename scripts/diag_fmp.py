@@ -11,16 +11,12 @@ FMP 키가 어떤 엔드포인트에 접근 가능한지 진단.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import requests
 
-import requests  # noqa: E402
-
-from src.config import settings  # noqa: E402
-from src.http import get_http_session, mask_secrets  # noqa: E402
-from src.logger import get_logger  # noqa: E402
+from src.config import settings
+from src.http import get_http_session, mask_secrets
+from src.logger import get_logger
 
 logger = get_logger(__name__)
 

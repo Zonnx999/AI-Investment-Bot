@@ -15,25 +15,22 @@ scripts/demo_http.py
 
 from __future__ import annotations
 
-import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import requests  # noqa: E402
+import requests
 
-from src.config import settings  # noqa: E402
-from src.http import (  # noqa: E402
+from src.config import settings
+from src.http import (
     REDACTED,
     build_session,
     get_http_session,
     is_timeout,
     mask_secrets,
 )
-from src.logger import get_logger, setup_logging  # noqa: E402
+from src.logger import get_logger, setup_logging
 
 log = get_logger("demo.http")
 

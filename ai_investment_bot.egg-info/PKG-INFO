@@ -1,0 +1,24 @@
+Metadata-Version: 2.4
+Name: ai-investment-bot
+Version: 0.5.0
+Summary: 개인용 퀀트 리서치 자동화 봇 (결정론적 신호 생성 + 자동 알림)
+Requires-Python: >=3.10
+Requires-Dist: yfinance>=0.2.40
+Requires-Dist: fredapi>=0.5.2
+Requires-Dist: pycoingecko>=3.1.0
+Requires-Dist: requests>=2.31.0
+Requires-Dist: python-dotenv>=1.0.1
+Requires-Dist: pandas>=2.2.0
+Requires-Dist: numpy>=1.26.0
+Requires-Dist: scipy>=1.13.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0; extra == "dev"
+Requires-Dist: jupyter>=1.0.0; extra == "dev"
+Requires-Dist: ipykernel>=6.29.0; extra == "dev"
+Provides-Extra: viz
+Requires-Dist: matplotlib>=3.8.0; extra == "viz"
+Requires-Dist: plotly>=5.20.0; extra == "viz"
+Provides-Extra: llm
+Requires-Dist: anthropic>=0.40.0; extra == "llm"
+Provides-Extra: ui
+Requires-Dist: streamlit>=1.36.0; extra == "ui"
