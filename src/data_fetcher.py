@@ -8,6 +8,8 @@ data_fetcher.py
 FMP (재무제표 시계열/시세/프로필 — /stable/ 엔드포인트).
 
 HTTP 정책 (retry/timeout/키 마스킹) 은 src/http.py 의 표준 세션이 담당.
+캐싱 (Phase 4): 모든 fetch 함수는 src/storage.py 의 SQLite 캐시를 투명하게
+사용 — 소스별 TTL 은 아래 TTL_* 상수, 제어는 QUANT_BOT_CACHE (on/off/refresh).
 
 빈 데이터 컨벤션 (8단계 통일)
 -----------------------------
@@ -36,6 +38,8 @@ from datetime import datetime, timedelta
 import pandas as pd
 import yfinance as yf
 
+from src.storage import cached
+
 from src.config import settings
 from src.exceptions import (
     ApiAuthError,
@@ -52,7 +56,19 @@ from src.logger import get_logger
 
 logger = get_logger(__name__)
 
+# ----------------------------------------------------------------------
+# 캐시 TTL (Phase 4) — 소스별 갱신 주기에 맞춤. QUANT_BOT_CACHE 로 제어.
+# ----------------------------------------------------------------------
+TTL_PRICES = timedelta(hours=6)        # 일별 시세 — 같은 날 재호출 방지
+TTL_MACRO = timedelta(hours=12)        # FRED — 일/주 단위 갱신
+TTL_CRYPTO = timedelta(hours=1)        # 암호화폐 — 변동 빠름
+TTL_QUOTE = timedelta(minutes=30)      # FMP 실시간 시세
+TTL_STATEMENTS = timedelta(days=7)     # 재무제표 — 분기에 한 번 바뀜 (FMP 한도 보호 핵심)
+TTL_PROFILE = timedelta(days=30)       # 회사 프로필 — 거의 불변
+TTL_SNAPSHOT = timedelta(hours=6)      # yfinance .info 스냅샷
 
+
+@cached("prices", TTL_PRICES, "dataframe")
 def fetch_prices(ticker: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
     """야후파이낸스에서 OHLCV 데이터 가져오기.
 
@@ -99,6 +115,7 @@ def fetch_prices(ticker: str, period: str = "1y", interval: str = "1d") -> pd.Da
     return df
 
 
+@cached("financials_yf", TTL_STATEMENTS, "dataframe")
 def fetch_financials_yf(
     ticker: str,
     statement: str = "income",
@@ -131,6 +148,7 @@ def fetch_financials_yf(
     return df
 
 
+@cached("fundamentals_yf", TTL_SNAPSHOT, "json")
 def fetch_fundamentals(ticker: str) -> dict:
     """기업 펀더멘털 '스냅샷' (yfinance .info, API 키 불필요).
 
@@ -167,6 +185,7 @@ FRED_SERIES = {
 }
 
 
+@cached("macro", TTL_MACRO, "series")
 def fetch_macro(series_id: str, start: str | None = None) -> pd.Series:
     """FRED 에서 단일 시계열 가져오기.
 
@@ -260,8 +279,12 @@ def _coingecko_client():
     return cg
 
 
+@cached("crypto", TTL_CRYPTO, "dataframe")
 def fetch_crypto(coin_id: str = "bitcoin", days: int = 180) -> pd.DataFrame:
     """CoinGecko 에서 암호화폐 일별 가격·거래량 가져오기.
+
+    인덱스는 자정으로 정규화된 DatetimeIndex (Phase 4: 캐시 직렬화
+    호환을 위해 datetime.date 객체에서 변경 — 소비처는 iloc 기반이라 무영향).
 
     Raises
     ------
@@ -296,7 +319,7 @@ def fetch_crypto(coin_id: str = "bitcoin", days: int = 180) -> pd.DataFrame:
             "volume": [v[1] for v in raw["total_volumes"]],
             "market_cap": [m[1] for m in raw["market_caps"]],
         },
-        index=pd.to_datetime([p[0] for p in raw["prices"]], unit="ms").date,
+        index=pd.to_datetime([p[0] for p in raw["prices"]], unit="ms").normalize(),
     )
     df.index.name = "date"
     return df
@@ -425,6 +448,7 @@ def _fmp_to_dataframe(data: list) -> pd.DataFrame:
     return df
 
 
+@cached("fmp_statements", TTL_STATEMENTS, "dataframe")
 def fetch_financial_statements(
     ticker: str,
     statement: str = "income-statement",
@@ -453,6 +477,7 @@ def fetch_financial_statements(
     return _fmp_to_dataframe(data)
 
 
+@cached("fmp_key_metrics", TTL_STATEMENTS, "dataframe")
 def fetch_key_metrics(
     ticker: str,
     period: str = "annual",
@@ -466,6 +491,7 @@ def fetch_key_metrics(
     return _fmp_to_dataframe(data)
 
 
+@cached("fmp_quote", TTL_QUOTE, "json")
 def fetch_quote(ticker: str) -> dict:
     """FMP /stable/quote — 단일 종목의 실시간 시세 + 시가총액.
 
@@ -482,6 +508,7 @@ def fetch_quote(ticker: str) -> dict:
     return data[0] if isinstance(data, list) else data
 
 
+@cached("fmp_profile", TTL_PROFILE, "json")
 def fetch_profile(ticker: str) -> dict:
     """FMP /stable/profile — 회사 프로필 (산업, 섹터, 배당, 시총)."""
     data = _fmp_get("profile", {"symbol": ticker})
@@ -492,6 +519,7 @@ def fetch_profile(ticker: str) -> dict:
     return data[0] if isinstance(data, list) else data
 
 
+@cached("crypto_top", TTL_CRYPTO, "json")
 def fetch_crypto_top(top_n: int = 50) -> list[dict]:
     """CoinGecko 시가총액 상위 N개 암호화폐 목록.
 
@@ -521,6 +549,7 @@ def fetch_crypto_top(top_n: int = 50) -> list[dict]:
     return data
 
 
+@cached("fmp_ratios", TTL_STATEMENTS, "dataframe")
 def fetch_ratios(
     ticker: str,
     period: str = "annual",

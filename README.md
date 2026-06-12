@@ -36,6 +36,7 @@ AI-Investment-Bot/
 │   ├── macro_analyzer.py  # 자산 간 상관관계, 시장 국면 분류
 │   ├── risk_engine.py     # VaR / MDD / Monte Carlo / 시나리오
 │   ├── screener.py        # 가치주 스크리너
+│   ├── storage.py         # SQLite 캐시 — 같은 데이터 하루 두 번 안 부름
 │   └── utils.py           # 공용 헬퍼 (종가 추출, 컬럼 후보 선택)
 │
 ├── scripts/               # 실행 스크립트
@@ -83,6 +84,10 @@ python scripts/hello_world.py
 ## 사용법
 
 ```bash
+# ★ 매일 아침 1회 — 모든 데이터 수집 + 캐시 워밍 (이후 다른 스크립트는 캐시 적중)
+python scripts/daily_update.py
+python scripts/daily_update.py --refresh   # 캐시 무시하고 새로 수집
+
 # 주식 + 암호화폐 + 금 (API 키 불필요)
 python scripts/hello_world.py
 
@@ -132,7 +137,7 @@ from src.data_fetcher import (
 
 ## 로드맵
 
-현재 위치: **Phase 0–3 + 가치주 스크리너 + 리팩토링 8단계 전체 완료. 다음은 Phase 4 (Storage).**
+현재 위치: **Phase 0–4 + 가치주 스크리너 + 리팩토링 8단계 완료. 다음은 Phase 5 (Signal Engine).**
 
 - [x] Phase 0 — 폴더 구조 + Hello World
 - [x] Phase 1 — `data_fetcher.py` (yfinance + FRED + CoinGecko + 한국 무역통계)
@@ -140,7 +145,7 @@ from src.data_fetcher import (
 - [x] Phase 3 — `risk_engine.py` VaR / MDD / Monte Carlo / 시나리오
 - [x] Side Quest — 가치주 스크리너 + HTML 대시보드
 - [x] 리팩토링 1–8단계 — 로깅 → 예외 → HTTP → DRY → 패키지화 → 테스트 → 결정론 → API 정합성
-- [ ] Phase 4 — Storage & Daily Pipeline (SQLite 캐시 + 일일 오케스트레이터)
+- [x] Phase 4 — Storage & Daily Pipeline (SQLite 캐시 + `daily_update.py` 오케스트레이터)
 - [ ] Phase 5 — Signal Engine (스크리닝 룰 + 알림 룰 + 팩터 신호)
 - [ ] Phase 6 — 대체 데이터 & 예측 모델 (M2→BTC, 한국 수출→반도체 등)
 - [ ] Phase 7 — Telegram/Discord 알림 봇 (매일 아침 7시 KST 자동 push)

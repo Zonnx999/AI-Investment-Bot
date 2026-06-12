@@ -72,11 +72,12 @@
 
 ## 3. 본격 개발 로드맵 (리팩토링 완료 후)
 
-### Phase 4 — Storage & Daily Pipeline
-- `src/storage.py` 신설: SQLite 캐시 레이어
-- 매일 한 번 모든 데이터 받아 DB 에 저장하는 오케스트레이터
-- 같은 데이터 두 번 안 부르도록 (속도·비용 양면 개선)
-- API 호출 한도 내에서 매일 운영 가능한 구조
+### Phase 4 — Storage & Daily Pipeline — 🛠 구현 완료 (2026-06-13), 사인오프 대기
+- ✅ `src/storage.py`: SQLite 캐시 레이어 (TTL, best-effort, @cached 데코레이터)
+- ✅ `scripts/daily_update.py`: 매일 한 번 모든 데이터 수집 오케스트레이터
+- ✅ 같은 데이터 두 번 안 부름 — 콜드 12s → 웜 2s 측정
+- ✅ FMP 한도 보호: 재무제표 TTL 7일, 시세 30분
+- 사인오프 후 다음: **Phase 5 (Signal Engine)**
 
 ### Phase 5 — Signal Engine ⭐ (친구 C 봇의 진화 버전)
 - **스크리닝 룰**: "P/E < 업종 중간값, FCF 양수, ROE > 10%" 같은 필터로 종목 발굴

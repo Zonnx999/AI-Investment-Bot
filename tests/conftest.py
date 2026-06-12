@@ -11,6 +11,15 @@ from src.config import settings
 _KEY_ATTRS = ("fred_api_key", "fmp_api_key", "anthropic_api_key", "news_api_key")
 
 
+@pytest.fixture(autouse=True)
+def _cache_off(monkeypatch):
+    """모든 테스트에서 SQLite 캐시 비활성화 — 결과가 캐시 상태에 좌우되지 않도록.
+
+    캐시 자체를 검증하는 test_storage.py 는 이 fixture 를 명시적으로 override.
+    """
+    monkeypatch.setenv("QUANT_BOT_CACHE", "off")
+
+
 def _set_keys(values: dict[str, str]):
     """frozen dataclass 우회 setter (demo_exceptions.py 와 같은 패턴)."""
     for k, v in values.items():

@@ -26,8 +26,9 @@ AI-Investment-Bot/
 │   ├── config.py              # Settings dataclass + load_dotenv
 │   ├── logger.py              # TZFormatter (KST+0900) + setup_logging + get_logger
 │   ├── exceptions.py          # 도메인 예외 계층
-│   ├── http.py                # ★ NEW — 표준 HTTP 세션 (retry/timeout/키 마스킹)
-│   ├── data_fetcher.py        # 모든 외부 API 호출
+│   ├── http.py                # 표준 HTTP 세션 (retry/timeout/키 마스킹)
+│   ├── storage.py             # ★ NEW — SQLite 캐시 + @cached 데코레이터 (Phase 4)
+│   ├── data_fetcher.py        # 모든 외부 API 호출 (전 함수 투명 캐싱)
 │   ├── macro_analyzer.py      # cross-asset + regime classifier
 │   ├── risk_engine.py         # VaR / MDD / MC / Scenario
 │   ├── screener.py            # 가치주 스크리너 (Side Quest)
@@ -42,8 +43,9 @@ AI-Investment-Bot/
 │   ├── check_fundamentals.py  # FMP 5년 재무제표 (FMP 실패시 yfinance fallback)
 │   ├── check_risk.py          # 종목 종합 리스크 리포트
 │   ├── diag_fmp.py            # FMP 엔드포인트 접근 진단
+│   ├── daily_update.py        # ★ NEW — 일일 수집 오케스트레이터 (Phase 4, cron 진입점)
 │   ├── demo_exceptions.py     # 예외 체계 검증 데모 (2단계 결과물)
-│   ├── demo_http.py           # ★ NEW — HTTP 견고성 검증 데모 (3단계 결과물)
+│   ├── demo_http.py           # HTTP 견고성 검증 데모 (3단계 결과물)
 │   └── screen_value.py        # ★ NEW — 가치주 스크리너 실행 (Side Quest)
 │
 ├── dashboard/                 # ★ NEW
@@ -175,6 +177,24 @@ QuantBotError
 ---
 
 ## 3. 가장 최근 완료 작업
+
+### Phase 4 — Storage & Daily Pipeline — 🛠 구현 완료 (2026-06-13), 사인오프 대기
+- `src/storage.py` 신설 — SQLite 캐시 (`data/quant_bot.db`, gitignore):
+  - `Storage` 클래스: (namespace, key) → DataFrame/Series/JSON, TTL 기반
+  - **캐시는 best-effort** — 읽기/쓰기 실패는 경고 후 무시, 파이프라인 절대 안 막음
+  - 빈 결과는 캐시 안 함 (8단계 빈 데이터 컨벤션 보호)
+  - `@cached(namespace, ttl, kind)` 데코레이터 — 시그니처 바인딩으로 키 정규화
+  - 직렬화: JSON `orient="table"` (pickle/pyarrow 회피). **datetime 은 항상 ns 로 복원**
+    (pandas 3.x 에서 date_range 기본이 us 로 바뀜 — 캐시 적중/미적중 간 dtype 비결정성 차단)
+- `data_fetcher` 전 fetch 함수에 투명 캐싱 적용. TTL: 재무제표 7일(FMP 한도 보호 핵심),
+  가격 6h, 거시 12h, 크립토 1h, 시세 30분, 프로필 30일
+- `QUANT_BOT_CACHE` env: on(기본)/off/refresh, `QUANT_BOT_DB_PATH` 로 DB 경로 변경
+- `fetch_crypto` 인덱스: datetime.date 객체 → 자정 정규화 DatetimeIndex (직렬화 호환,
+  소비처는 iloc 만 사용해 무영향)
+- `scripts/daily_update.py` 오케스트레이터 — 국면/거시/한국무역/크립토/리스크(+옵션 스크리너)
+  를 한 번에 수집, 섹션별 실패 격리, 실패 시 exit 1 (Phase 7 cron 의 진입점)
+- 테스트 54개 (storage 14개 추가). 기존 테스트는 autouse fixture 로 캐시 off 격리
+- **측정**: daily_update 콜드 12.0s → 웜 2.0s (네트워크 섹션 전부 0.0s)
 
 ### 리팩토링 5–8단계 일괄 완료 (2026-06-13, 스피드 모드 — 사용자 승인 하에 phase-gate 한시 해제)
 
