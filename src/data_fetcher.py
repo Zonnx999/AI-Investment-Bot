@@ -9,6 +9,19 @@ FMP (재무제표 시계열/시세/프로필 — /stable/ 엔드포인트).
 
 HTTP 정책 (retry/timeout/키 마스킹) 은 src/http.py 의 표준 세션이 담당.
 
+빈 데이터 컨벤션 (8단계 통일)
+-----------------------------
+1. **단일 대상 fetch** — fetch_prices / fetch_macro / fetch_crypto /
+   fetch_quote / fetch_profile / fetch_crypto_top:
+   빈 응답 = 잘못된 입력 또는 소스 장애 → ``DataValidationError`` raise.
+2. **폴백 전제 시계열** — fetch_financial_statements / fetch_key_metrics /
+   fetch_ratios / fetch_financials_yf:
+   빈 응답 → **빈 DataFrame 반환**. 호출부가 ``df.empty`` 로 폴백 판단
+   (check_fundamentals 의 FMP → yfinance 폴백이 이 컨벤션에 의존).
+3. **배치 fetch** — fetch_macro_dashboard / fetch_korea_trade:
+   개별 시리즈 실패는 경고 로그 + 스킵, **부분 DataFrame 반환**
+   (일일 배치에서 한 시리즈 장애가 전체를 막지 않도록).
+
 사용 예::
 
     from src.data_fetcher import fetch_prices, fetch_key_metrics

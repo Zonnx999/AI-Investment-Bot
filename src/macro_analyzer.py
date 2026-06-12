@@ -15,6 +15,7 @@ Phase 4 에서 LLM 이 이 모듈의 함수들을 tool 로 호출하게 됩니�
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TypedDict
 
 import numpy as np
 import pandas as pd
@@ -346,7 +347,20 @@ def classify_regime() -> RegimeReport:
 # ----------------------------------------------------------------------
 
 
-def market_summary(period: str = "6mo") -> dict:
+class MarketSummary(TypedDict):
+    """market_summary() 의 반환 스키마 (런타임은 일반 dict)."""
+
+    period: str
+    prices: pd.DataFrame
+    cumulative_returns_pct: pd.Series
+    correlation: pd.DataFrame
+    annualized_vol_pct: pd.Series
+    current_drawdown_pct: pd.Series
+    sharpe_ratio: pd.Series
+    regime: RegimeReport
+
+
+def market_summary(period: str = "6mo") -> MarketSummary:
     """패널 + 상관관계 + 변동성 + 낙폭 + 샤프 + 국면을 한 dict 으로 묶어서 반환."""
     prices = fetch_cross_asset_panel(period=period)
     return {

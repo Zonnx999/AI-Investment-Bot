@@ -30,7 +30,7 @@ JSON 스키마 (dashboard/index.html 호환)
 
 from __future__ import annotations
 
-from typing import Iterable
+from typing import Iterable, TypedDict
 
 from src.data_fetcher import (
     fetch_crypto_top,
@@ -178,7 +178,23 @@ def calculate_crypto_scores(coin: dict) -> dict:
 # ----------------------------------------------------------------------
 
 
-def screen_one(ticker: str) -> dict | None:
+class ScreenedStock(TypedDict):
+    """screen_one() 의 반환 스키마 — dashboard/index.html 의 JSON 필드와 1:1."""
+
+    symbol: str
+    company_name: str
+    price: float
+    dividend: float
+    market_cap: float
+    health_score: int
+    value_score: int
+    total_score: int
+    roe: float
+    ev_to_sales: float
+    net_debt_to_ebitda: float
+
+
+def screen_one(ticker: str) -> ScreenedStock | None:
     """한 종목의 데이터를 받아 dashboard 호환 dict 으로 반환.
 
     실패 시 None (호출자가 skip). 광범위 except 는 호출자 루프에서 처리.
@@ -225,9 +241,9 @@ def screen_one(ticker: str) -> dict | None:
 
 def screen_watchlist(
     tickers: Iterable[str], country_label: str = "미국"
-) -> list[dict]:
+) -> list[ScreenedStock]:
     """워치리스트 일괄 스크리닝. 실패 종목은 skip + 로그."""
-    results: list[dict] = []
+    results: list[ScreenedStock] = []
     tickers_list = list(tickers)
     logger.info("[%s] 스크리닝 시작 — %d 종목", country_label, len(tickers_list))
 
