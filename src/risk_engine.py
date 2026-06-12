@@ -264,13 +264,13 @@ def risk_report(
 ) -> dict[str, Any]:
     """종합 리스크 리포트. 한 종목의 모든 리스크 통계를 한 dict 으로 반환.
 
-    Phase 4 에서 LLM 이 이 dict 을 받아 자연어 답변을 만듭니다.
+    Phase 5 (Signal Engine) 의 알림 룰이 이 dict 을 입력으로 사용할 예정.
     """
     from src.data_fetcher import fetch_prices
+    from src.utils import close_series
 
     df = fetch_prices(ticker, period=period)
-    close_col = "Adj Close" if "Adj Close" in df.columns else "Close"
-    prices = df[close_col].squeeze()
+    prices = close_series(df)
     returns = prices.pct_change().dropna()
 
     return {

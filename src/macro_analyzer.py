@@ -21,6 +21,7 @@ import pandas as pd
 
 from src.data_fetcher import fetch_macro, fetch_prices
 from src.exceptions import ConfigError, DataFetchError
+from src.utils import close_series
 from src.logger import get_logger
 
 logger = get_logger(__name__)
@@ -64,8 +65,7 @@ def fetch_cross_asset_panel(
                 "Cross-asset panel: '%s' (%s) 스킵 — %s", label, ticker, e
             )
             continue
-        close = df["Adj Close"] if "Adj Close" in df.columns else df["Close"]
-        frames[label] = close.squeeze()
+        frames[label] = close_series(df)
     return pd.DataFrame(frames).dropna(how="all")
 
 

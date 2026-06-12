@@ -36,7 +36,7 @@ AI-Investment-Bot/
 │   ├── macro_analyzer.py  # 자산 간 상관관계, 시장 국면 분류
 │   ├── risk_engine.py     # VaR / MDD / Monte Carlo / 시나리오
 │   ├── screener.py        # 가치주 스크리너
-│   └── bot_interface.py   # ⚠️ deprecated — 4단계 리팩토링에서 삭제 예정
+│   └── utils.py           # 공용 헬퍼 (종가 추출, 컬럼 후보 선택)
 │
 ├── scripts/               # 실행 스크립트
 │   ├── hello_world.py         # 주식 + 암호화폐 + 금 종가

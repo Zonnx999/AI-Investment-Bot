@@ -3,15 +3,17 @@ data_fetcher.py
 ===============
 모든 외부 데이터 소스에서 가격/재무/거시 데이터를 가져오는 전담 모듈.
 
-Phase 1 단계에서 가장 먼저 채울 모듈입니다. 지금은 yfinance 기반의
-가장 단순한 함수 두 개만 들어있고, 앞으로 FRED · CoinGecko · FMP 함수가
-순차적으로 추가될 예정입니다.
+다른 모듈은 외부 API 를 직접 부르지 않고 반드시 여기를 거칩니다.
+소스: yfinance (가격/재무), FRED (거시/한국무역), CoinGecko (암호화폐),
+FMP (재무제표 시계열/시세/프로필 — /stable/ 엔드포인트).
+
+HTTP 정책 (retry/timeout/키 마스킹) 은 src/http.py 의 표준 세션이 담당.
 
 사용 예::
 
-    from src.data_fetcher import fetch_prices, fetch_fundamentals
+    from src.data_fetcher import fetch_prices, fetch_key_metrics
     df = fetch_prices("CPNG", period="6mo")
-    info = fetch_fundamentals("CPNG")
+    metrics = fetch_key_metrics("CPNG", limit=5)
 """
 
 from __future__ import annotations
@@ -117,10 +119,11 @@ def fetch_financials_yf(
 
 
 def fetch_fundamentals(ticker: str) -> dict:
-    """기업 펀더멘털 요약. yfinance .info 의 핵심 키만 추려서 dict 로 반환.
+    """기업 펀더멘털 '스냅샷' (yfinance .info, API 키 불필요).
 
-    무료 소스라 일부 값이 None 일 수 있으니 그대로 두고, Phase 1 후반에
-    FMP API 로 보강할 예정입니다.
+    용도: hello_world 같은 키 없는 빠른 확인용. 본격 펀더멘털 분석은
+    FMP 시계열 함수들 (fetch_key_metrics / fetch_financial_statements) 사용.
+    4단계 리팩토링에서 실제 사용되는 필드만 남기고 축소.
     """
     t = yf.Ticker(ticker)
     info = t.info or {}
@@ -128,22 +131,9 @@ def fetch_fundamentals(ticker: str) -> dict:
     return {
         "ticker": ticker,
         "name": info.get("shortName") or info.get("longName"),
-        "sector": info.get("sector"),
-        "industry": info.get("industry"),
         "market_cap": info.get("marketCap"),
-        "trailing_pe": info.get("trailingPE"),
         "forward_pe": info.get("forwardPE"),
-        "price_to_book": info.get("priceToBook"),
-        "profit_margin": info.get("profitMargins"),
-        "operating_margin": info.get("operatingMargins"),
         "return_on_equity": info.get("returnOnEquity"),
-        "revenue_growth": info.get("revenueGrowth"),
-        "free_cashflow": info.get("freeCashflow"),
-        "total_cash": info.get("totalCash"),
-        "total_debt": info.get("totalDebt"),
-        "current_price": info.get("currentPrice"),
-        "fifty_two_week_low": info.get("fiftyTwoWeekLow"),
-        "fifty_two_week_high": info.get("fiftyTwoWeekHigh"),
     }
 
 
@@ -407,6 +397,21 @@ def _fmp_get(endpoint: str, params: dict | None = None) -> list:
     return response.json()
 
 
+def _fmp_to_dataframe(data: list) -> pd.DataFrame:
+    """FMP 응답(list[dict]) → 날짜 인덱스 DataFrame 공통 후처리.
+
+    빈 응답이면 빈 DataFrame. 'date' 컬럼이 있으면 datetime 변환 후
+    오름차순 정렬 + 인덱스 설정. (기존 3개 fetch 함수에 복붙되어 있던 로직)
+    """
+    if not data:
+        return pd.DataFrame()
+    df = pd.DataFrame(data)
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.sort_values("date").set_index("date")
+    return df
+
+
 def fetch_financial_statements(
     ticker: str,
     statement: str = "income-statement",
@@ -432,13 +437,7 @@ def fetch_financial_statements(
         statement,
         {"symbol": ticker, "period": period, "limit": limit},
     )
-    if not data:
-        return pd.DataFrame()
-    df = pd.DataFrame(data)
-    if "date" in df.columns:
-        df["date"] = pd.to_datetime(df["date"])
-        df = df.sort_values("date").set_index("date")
-    return df
+    return _fmp_to_dataframe(data)
 
 
 def fetch_key_metrics(
@@ -451,13 +450,7 @@ def fetch_key_metrics(
         "key-metrics",
         {"symbol": ticker, "period": period, "limit": limit},
     )
-    if not data:
-        return pd.DataFrame()
-    df = pd.DataFrame(data)
-    if "date" in df.columns:
-        df["date"] = pd.to_datetime(df["date"])
-        df = df.sort_values("date").set_index("date")
-    return df
+    return _fmp_to_dataframe(data)
 
 
 def fetch_quote(ticker: str) -> dict:
@@ -529,13 +522,7 @@ def fetch_ratios(
         "ratios",
         {"symbol": ticker, "period": period, "limit": limit},
     )
-    if not data:
-        return pd.DataFrame()
-    df = pd.DataFrame(data)
-    if "date" in df.columns:
-        df["date"] = pd.to_datetime(df["date"])
-        df = df.sort_values("date").set_index("date")
-    return df
+    return _fmp_to_dataframe(data)
 
 
 # TODO(다음 Phase 1.5 — 선택 사항):

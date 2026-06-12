@@ -59,7 +59,7 @@
 | 1 | 로깅 통합 (logger.py + print→logging) | ✅ 완료, 사인오프 |
 | 2 | 예외 체계화 (exceptions.py + specific catches) | ✅ 완료, 사인오프 |
 | 3 | HTTP 견고성 (http.py + Session/retry/timeout/masking) | ✅ 완료, 사인오프 |
-| **4** | **DRY 정리 (utils.py 신설, 데드 코드 삭제, 중복 제거)** | **▶️ 다음** |
+| **4** | **DRY 정리 (utils.py 신설, 데드 코드 삭제, 중복 제거)** | **🛠 구현 완료 (2026-06-12), 사인오프 대기** |
 | 5 | 패키지화 (pyproject.toml + `pip install -e .`, sys.path hack 제거) | ⏳ |
 | 6 | 테스트 인프라 (pytest + 픽스처 + 첫 테스트 5-10개) | ⏳ |
 | 7 | 결정론 & 검증 (`_clean_returns` 명시화, MC RNG 격리, 입력 검증, 매직 넘버 → 상수) | ⏳ |

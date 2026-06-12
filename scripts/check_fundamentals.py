@@ -32,6 +32,7 @@ from src.exceptions import (  # noqa: E402
     DataFetchError,
 )
 from src.logger import get_logger  # noqa: E402
+from src.utils import pick_first as pick  # noqa: E402
 
 logger = get_logger(__name__)
 
@@ -81,12 +82,7 @@ def main(ticker: str = "CPNG") -> None:
     print(f" {ticker} · 펀더멘털 5년 추세 (FMP)")
     print("=" * 78)
 
-    # 컬럼 이름은 소스에 따라 다르므로 후보 리스트로 처리.
-    def pick(row, candidates):
-        for c in candidates:
-            if c in row.index and pd.notna(row[c]):
-                return row[c]
-        return None
+    # 컬럼 이름은 소스에 따라 다르므로 후보 리스트로 처리 (utils.pick_first).
 
     # --- 손익계산서 ---
     income, src = _fmp_or_yf(ticker, "income-statement", "income")

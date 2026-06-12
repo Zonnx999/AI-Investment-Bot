@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.data_fetcher import fetch_fundamentals, fetch_prices  # noqa: E402
 from src.exceptions import DataFetchError  # noqa: E402
 from src.logger import get_logger  # noqa: E402
+from src.utils import close_series  # noqa: E402
 
 logger = get_logger(__name__)
 
@@ -44,14 +45,13 @@ def main() -> None:
 
         try:
             df = fetch_prices(ticker, period="6mo")
-            close_col = "Adj Close" if "Adj Close" in df.columns else "Close"
-            close_series = df[close_col].squeeze()  # 혹시 2D 로 와도 1D 로 평탄화
+            closes = close_series(df)
             print("최근 3 거래일 종가:")
-            for date, price in close_series.tail(3).items():
+            for date, price in closes.tail(3).items():
                 print(f"  {date.date()}  ${float(price):>10,.2f}")
 
             change = (
-                float(close_series.iloc[-1]) / float(close_series.iloc[0]) - 1
+                float(closes.iloc[-1]) / float(closes.iloc[0]) - 1
             ) * 100
             print(f"6개월 누적 수익률: {change:+.2f}%")
 
