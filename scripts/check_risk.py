@@ -24,7 +24,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from src.logger import get_logger  # noqa: E402
 from src.risk_engine import risk_report, scenario_impact  # noqa: E402
+
+logger = get_logger(__name__)
 
 
 # 시나리오 프리셋 — "이 정도 사건이면 어떻게 빠질까" 직관 키우는 용도

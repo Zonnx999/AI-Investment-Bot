@@ -21,6 +21,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pandas as pd  # noqa: E402
 
 from src.data_fetcher import fetch_korea_trade  # noqa: E402
+from src.logger import get_logger  # noqa: E402
+
+logger = get_logger(__name__)
 
 
 def main() -> None:
@@ -30,7 +33,7 @@ def main() -> None:
 
     df = fetch_korea_trade()
     if df.empty:
-        print("⚠️  데이터를 가져오지 못했습니다. .env 의 FRED_API_KEY 를 확인하세요.")
+        logger.error("한국 무역통계를 가져오지 못했습니다. FRED_API_KEY 확인 필요")
         return
 
     df = df.dropna(how="all")

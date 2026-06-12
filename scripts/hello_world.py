@@ -20,6 +20,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.data_fetcher import fetch_fundamentals, fetch_prices  # noqa: E402
+from src.exceptions import DataFetchError  # noqa: E402
+from src.logger import get_logger  # noqa: E402
+
+logger = get_logger(__name__)
 
 WATCHLIST = {
     "CPNG": "쿠팡",
@@ -61,8 +65,11 @@ def main() -> None:
                 pe_str = f"{pe:.2f}" if isinstance(pe, (int, float)) else "N/A"
                 roe_str = f"{roe*100:.2f}%" if isinstance(roe, (int, float)) else "N/A"
                 print(f"시가총액: {mcap_str}  |  PER(예상): {pe_str}  |  ROE: {roe_str}")
-        except Exception as e:  # noqa: BLE001
-            print(f"  ⚠️  에러: {e}")
+        except DataFetchError as e:
+            logger.warning("Ticker '%s' 처리 스킵 — %s", ticker, e)
+        except Exception:
+            # 예상치 못한 예외 — 풀 트레이스백 기록 후 다음 티커로
+            logger.exception("Ticker '%s' 처리 중 예상치 못한 예외", ticker)
 
     print("\n" + "=" * 60)
     print("끝. 여기까지 동작하면 Phase 1 의 절반은 완성된 겁니다.")

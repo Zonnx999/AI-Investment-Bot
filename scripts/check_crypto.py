@@ -16,6 +16,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.data_fetcher import fetch_crypto  # noqa: E402
+from src.exceptions import DataFetchError  # noqa: E402
+from src.logger import get_logger  # noqa: E402
+
+logger = get_logger(__name__)
 
 COINS = {
     "bitcoin": "BTC 비트코인",
@@ -49,8 +53,10 @@ def main() -> None:
             rets = df["price"].pct_change().dropna().tail(30)
             ann_vol = float(rets.std() * (365**0.5)) * 100
             print(f"  연환산 변동성: {ann_vol:>12.2f}%   (최근 30일 기준)")
-        except Exception as e:  # noqa: BLE001
-            print(f"  ⚠️  에러: {e}")
+        except DataFetchError as e:
+            logger.warning("Coin '%s' 스킵 — %s", coin_id, e)
+        except Exception:
+            logger.exception("Coin '%s' 처리 중 예상치 못한 예외", coin_id)
 
     print("\n" + "=" * 60)
 

@@ -23,7 +23,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pandas as pd  # noqa: E402
 
+from src.logger import get_logger  # noqa: E402
 from src.macro_analyzer import market_summary  # noqa: E402
+
+logger = get_logger(__name__)
 
 # pandas 출력 폭 늘리기 (상관관계 매트릭스가 잘리지 않게)
 pd.set_option("display.width", 120)

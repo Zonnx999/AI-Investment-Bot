@@ -20,29 +20,34 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pandas as pd  # noqa: E402
-import requests  # noqa: E402
 
 from src.data_fetcher import (  # noqa: E402
     fetch_financial_statements,
     fetch_financials_yf,
     fetch_key_metrics,
 )
+from src.exceptions import (  # noqa: E402
+    ApiAuthError,
+    ApiAuthorizationError,
+    DataFetchError,
+)
+from src.logger import get_logger  # noqa: E402
+
+logger = get_logger(__name__)
 
 
 def _fmp_or_yf(ticker: str, fmp_statement: str, yf_statement: str):
-    """FMP 시도 후 403/401 이면 yfinance 로 자동 폴백."""
+    """FMP 시도 후 401/403 이면 yfinance 로 자동 폴백."""
     try:
         df = fetch_financial_statements(ticker, fmp_statement, limit=5)
         if not df.empty:
             return df, "FMP"
-    except requests.exceptions.HTTPError as e:
-        code = e.response.status_code if e.response is not None else None
-        if code in (401, 403):
-            print(f"  ℹ️  FMP {fmp_statement} 차단됨 (HTTP {code}) → yfinance 로 대체")
-        else:
-            print(f"  ⚠️  FMP HTTP {code}: {e}")
-    except Exception as e:  # noqa: BLE001
-        print(f"  ⚠️  FMP 실패: {e}")
+    except (ApiAuthError, ApiAuthorizationError) as e:
+        logger.info("FMP %s 차단됨 — yfinance 로 폴백 (%s)", fmp_statement, e)
+    except DataFetchError as e:
+        logger.warning("FMP %s 호출 실패 — yfinance 로 폴백: %s", fmp_statement, e)
+    except Exception:
+        logger.exception("FMP %s 호출 중 예상치 못한 예외 — yfinance 로 폴백", fmp_statement)
 
     df = fetch_financials_yf(ticker, yf_statement)
     return df, "yfinance"
@@ -86,7 +91,7 @@ def main(ticker: str = "CPNG") -> None:
     # --- 손익계산서 ---
     income, src = _fmp_or_yf(ticker, "income-statement", "income")
     if income.empty:
-        print(f"⚠️  {ticker} 데이터를 받지 못했습니다. 티커를 확인하세요.")
+        logger.error("'%s' 데이터를 어떤 소스에서도 받지 못했습니다. 티커 확인 필요", ticker)
         return
 
     print(f"\n[손익계산서]  (출처: {src})")
@@ -139,11 +144,9 @@ def main(ticker: str = "CPNG") -> None:
     # --- 핵심 비율 (FMP 만 — yfinance 에는 시계열 없음) ---
     try:
         metrics = fetch_key_metrics(ticker, limit=5)
-    except requests.exceptions.HTTPError as e:
-        if e.response is not None and e.response.status_code in (401, 403):
-            metrics = pd.DataFrame()
-        else:
-            raise
+    except (ApiAuthError, ApiAuthorizationError) as e:
+        logger.info("FMP key-metrics 접근 불가 — 핵심 비율 섹션 생략 (%s)", e)
+        metrics = pd.DataFrame()
 
     # FMP stable 의 /key-metrics 는 P/E·P/FCF 를 직접 안 주고 yield 형태로 줍니다.
     # → 1/yield 로 역산. debt/equity 는 위에서 받아둔 재무상태표(bs)에서 계산.

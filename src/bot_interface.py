@@ -15,4 +15,5 @@ def hello() -> str:
 
 
 if __name__ == "__main__":
+    # placeholder 의 사용자 출력 (4단계에서 모듈 삭제 예정)
     print(hello())

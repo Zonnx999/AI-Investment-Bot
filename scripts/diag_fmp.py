@@ -19,6 +19,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import requests  # noqa: E402
 
 from src.config import settings  # noqa: E402
+from src.logger import get_logger  # noqa: E402
+
+logger = get_logger(__name__)
 
 # 2025-08-31 이후 가입자는 /stable/ 만 접근 가능. /api/v3/ 는 옛 가입자 전용.
 ENDPOINTS_TO_TEST = [
@@ -62,7 +65,12 @@ def main() -> None:
             else:
                 status = f"⚠️  {code}"
                 meaning = r.text[:60]
-        except Exception as e:  # noqa: BLE001
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            logger.warning("FMP probe 네트워크 실패 (%s): %s", path, e)
+            status = "NET"
+            meaning = str(e)[:60]
+        except Exception as e:  # noqa: BLE001 — 진단 스크립트라 의도적으로 광범위
+            logger.exception("FMP probe 예상치 못한 예외: %s", path)
             status = "ERR"
             meaning = str(e)[:60]
 

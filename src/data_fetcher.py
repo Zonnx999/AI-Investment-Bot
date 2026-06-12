@@ -22,6 +22,19 @@ import pandas as pd
 import yfinance as yf
 
 from src.config import settings
+from src.exceptions import (
+    ApiAuthError,
+    ApiAuthorizationError,
+    ApiConnectionError,
+    ApiHttpError,
+    ApiTimeoutError,
+    DataFetchError,
+    DataValidationError,
+    RateLimitError,
+)
+from src.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 def fetch_prices(ticker: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
@@ -40,17 +53,33 @@ def fetch_prices(ticker: str, period: str = "1y", interval: str = "1d") -> pd.Da
     -------
     pd.DataFrame
         Open, High, Low, Close, Adj Close, Volume 컬럼을 가진 일별 데이터.
+
+    Raises
+    ------
+    DataFetchError
+        yfinance 호출 자체가 실패할 때.
+    DataValidationError
+        호출은 성공했지만 빈 데이터(잘못된 티커 등) 가 돌아왔을 때.
     """
-    df = yf.download(
-        ticker,
-        period=period,
-        interval=interval,
-        progress=False,
-        auto_adjust=False,
-        multi_level_index=False,  # 단일 티커여도 컬럼이 멀티레벨로 오는 것을 막음
-    )
+    try:
+        df = yf.download(
+            ticker,
+            period=period,
+            interval=interval,
+            progress=False,
+            auto_adjust=False,
+            multi_level_index=False,
+        )
+    except Exception as e:  # noqa: BLE001  yfinance 는 여러 종류의 예외를 던짐
+        raise DataFetchError(
+            f"yfinance 다운로드 실패: ticker={ticker} period={period}", source="yfinance"
+        ) from e
+
     if df.empty:
-        raise ValueError(f"{ticker} 데이터를 가져오지 못했습니다. 티커를 확인하세요.")
+        raise DataValidationError(
+            f"yfinance 가 빈 데이터 반환: ticker={ticker} (티커 오타 가능성)",
+            source="yfinance",
+        )
     return df
 
 
@@ -137,41 +166,63 @@ FRED_SERIES = {
 def fetch_macro(series_id: str, start: str | None = None) -> pd.Series:
     """FRED 에서 단일 시계열 가져오기.
 
-    Parameters
-    ----------
-    series_id : str
-        FRED 시리즈 ID. 예: "T10Y2Y", "ICSA".
-        FRED_SERIES dict 의 값들을 참고하세요.
-    start : str | None
-        시작일 (YYYY-MM-DD). None 이면 최근 5년.
-
-    Returns
-    -------
-    pd.Series
-        인덱스가 날짜, 값이 지표 수치.
+    Raises
+    ------
+    MissingApiKeyError
+        FRED_API_KEY 미설정.
+    DataFetchError
+        fredapi 호출 자체 실패.
+    DataValidationError
+        시리즈 ID 가 존재하지 않거나 빈 응답.
     """
-    # fredapi 는 import 시점에 키를 묻지 않아서 여기서 lazy import
-    from fredapi import Fred
+    try:
+        from fredapi import Fred
+    except ImportError as e:
+        raise DataFetchError(
+            "fredapi 패키지가 설치되어 있지 않습니다. pip install fredapi", source="FRED"
+        ) from e
 
-    api_key = settings.require("fred_api_key")
+    api_key = settings.require("fred_api_key")  # raises MissingApiKeyError
     fred = Fred(api_key=api_key)
 
     if start is None:
         start = (datetime.utcnow() - timedelta(days=365 * 5)).strftime("%Y-%m-%d")
 
-    series = fred.get_series(series_id, observation_start=start)
+    try:
+        series = fred.get_series(series_id, observation_start=start)
+    except ValueError as e:
+        # fredapi 가 잘못된 시리즈 ID 에 ValueError 던짐
+        raise DataValidationError(
+            f"FRED 시리즈 '{series_id}' 가 존재하지 않거나 잘못됨", source="FRED"
+        ) from e
+    except Exception as e:  # noqa: BLE001  fredapi 는 다양한 네트워크 예외를 던질 수 있음
+        raise DataFetchError(
+            f"FRED 호출 실패: series_id={series_id}", source="FRED"
+        ) from e
+
+    if series is None or series.empty:
+        raise DataValidationError(
+            f"FRED 시리즈 '{series_id}' 가 빈 응답을 돌려줌", source="FRED"
+        )
+
     series.name = series_id
     return series.dropna()
 
 
 def fetch_macro_dashboard(start: str | None = None) -> pd.DataFrame:
-    """FRED_SERIES 에 정의된 주요 거시 지표를 한 번에 받아 DataFrame 으로 반환."""
+    """FRED_SERIES 에 정의된 주요 거시 지표를 한 번에 받아 DataFrame 으로 반환.
+
+    개별 시리즈 실패는 warning 로그 + 스킵 처리 (배치 운영에서 한 시리즈 실패가
+    전체를 막지 않도록). 단, 예상치 못한 예외는 그대로 bubble up.
+    """
     frames = {}
     for korean_name, series_id in FRED_SERIES.items():
         try:
             frames[korean_name] = fetch_macro(series_id, start=start)
-        except Exception as e:  # noqa: BLE001
-            print(f"  ⚠️  {korean_name} ({series_id}) 실패: {e}")
+        except DataFetchError as e:
+            logger.warning(
+                "FRED 시리즈 '%s' (%s) 스킵 — %s", korean_name, series_id, e
+            )
     return pd.DataFrame(frames)
 
 
@@ -183,25 +234,40 @@ def fetch_macro_dashboard(start: str | None = None) -> pd.DataFrame:
 def fetch_crypto(coin_id: str = "bitcoin", days: int = 180) -> pd.DataFrame:
     """CoinGecko 에서 암호화폐 일별 가격·거래량 가져오기.
 
-    Parameters
-    ----------
-    coin_id : str
-        CoinGecko 코인 ID (티커가 아님). "bitcoin", "ethereum", "solana" 등.
-        전체 목록: https://api.coingecko.com/api/v3/coins/list
-    days : int
-        오늘부터 며칠 전까지. 무료 티어는 최대 365일.
-
-    Returns
-    -------
-    pd.DataFrame
-        date 인덱스, columns=[price, volume, market_cap].
+    Raises
+    ------
+    DataFetchError
+        pycoingecko 호출 실패 (네트워크, rate limit 등).
+    DataValidationError
+        잘못된 coin_id 또는 빈 응답.
     """
-    from pycoingecko import CoinGeckoAPI
+    try:
+        from pycoingecko import CoinGeckoAPI
+    except ImportError as e:
+        raise DataFetchError(
+            "pycoingecko 패키지가 없습니다. pip install pycoingecko", source="CoinGecko"
+        ) from e
 
     cg = CoinGeckoAPI()
-    raw = cg.get_coin_market_chart_by_id(
-        id=coin_id, vs_currency="usd", days=days, interval="daily"
-    )
+    try:
+        raw = cg.get_coin_market_chart_by_id(
+            id=coin_id, vs_currency="usd", days=days, interval="daily"
+        )
+    except ValueError as e:
+        # pycoingecko 가 404 를 ValueError 로 감쌈
+        raise DataValidationError(
+            f"CoinGecko: coin_id='{coin_id}' 가 존재하지 않을 가능성", source="CoinGecko"
+        ) from e
+    except Exception as e:  # noqa: BLE001
+        raise DataFetchError(
+            f"CoinGecko 호출 실패: coin_id={coin_id}", source="CoinGecko"
+        ) from e
+
+    if not raw or "prices" not in raw or not raw["prices"]:
+        raise DataValidationError(
+            f"CoinGecko 가 빈 응답: coin_id={coin_id}", source="CoinGecko"
+        )
+
     df = pd.DataFrame(
         {
             "price": [p[1] for p in raw["prices"]],
@@ -235,8 +301,10 @@ def fetch_korea_trade(start: str | None = None) -> pd.DataFrame:
     for label, series_id in KOREA_TRADE_SERIES.items():
         try:
             frames[label] = fetch_macro(series_id, start=start)
-        except Exception as e:  # noqa: BLE001
-            print(f"  ⚠️  {label} ({series_id}) 실패: {e}")
+        except DataFetchError as e:
+            logger.warning(
+                "한국 무역 시리즈 '%s' (%s) 스킵 — %s", label, series_id, e
+            )
     return pd.DataFrame(frames)
 
 
@@ -260,16 +328,57 @@ FMP_BASE_URL = "https://financialmodelingprep.com/stable"
 def _fmp_get(endpoint: str, params: dict | None = None) -> list:
     """FMP stable API GET 헬퍼.
 
-    `endpoint` 는 마지막 path 한 조각만 (예: "income-statement").
-    티커는 params 안에 `"symbol": "CPNG"` 형태로 넣어주세요.
+    Raises
+    ------
+    MissingApiKeyError    FMP_API_KEY 미설정
+    ApiAuthError          HTTP 401 — 키 무효
+    ApiAuthorizationError HTTP 403 — 플랜 제한
+    RateLimitError        HTTP 429 — 호출 한도
+    ApiHttpError          기타 HTTP 4xx/5xx
+    ApiTimeoutError       타임아웃
+    ApiConnectionError    네트워크 접속 실패
+    DataValidationError   응답이 비어있음
     """
     import requests
 
     api_key = settings.require("fmp_api_key")
     p = dict(params or {})
     p["apikey"] = api_key
-    response = requests.get(f"{FMP_BASE_URL}/{endpoint}", params=p, timeout=30)
-    response.raise_for_status()
+    url = f"{FMP_BASE_URL}/{endpoint}"
+
+    try:
+        response = requests.get(url, params=p, timeout=30)
+    except requests.exceptions.Timeout as e:
+        raise ApiTimeoutError(
+            f"FMP {endpoint} 타임아웃 (30s)", source="FMP"
+        ) from e
+    except requests.exceptions.ConnectionError as e:
+        raise ApiConnectionError(
+            f"FMP {endpoint} 연결 실패", source="FMP"
+        ) from e
+    except requests.exceptions.RequestException as e:
+        raise DataFetchError(
+            f"FMP {endpoint} 요청 실패", source="FMP"
+        ) from e
+
+    code = response.status_code
+    if code == 401:
+        raise ApiAuthError(
+            f"FMP {endpoint}: 키가 무효합니다 (401)", source="FMP"
+        )
+    if code == 403:
+        raise ApiAuthorizationError(
+            f"FMP {endpoint}: 현재 플랜에서 차단된 엔드포인트 (403)", source="FMP"
+        )
+    if code == 429:
+        raise RateLimitError(
+            f"FMP {endpoint}: 호출 한도 초과 (429)", source="FMP"
+        )
+    if not response.ok:
+        raise ApiHttpError(
+            f"FMP {endpoint}: HTTP {code}", status_code=code, source="FMP"
+        )
+
     return response.json()
 
 
@@ -324,6 +433,68 @@ def fetch_key_metrics(
         df["date"] = pd.to_datetime(df["date"])
         df = df.sort_values("date").set_index("date")
     return df
+
+
+def fetch_quote(ticker: str) -> dict:
+    """FMP /stable/quote — 단일 종목의 실시간 시세 + 시가총액.
+
+    Returns
+    -------
+    dict
+        price, marketCap, change, name, exchange 등 포함.
+    """
+    data = _fmp_get("quote", {"symbol": ticker})
+    if not data:
+        raise DataValidationError(
+            f"FMP quote 빈 응답: ticker={ticker}", source="FMP"
+        )
+    return data[0] if isinstance(data, list) else data
+
+
+def fetch_profile(ticker: str) -> dict:
+    """FMP /stable/profile — 회사 프로필 (산업, 섹터, 배당, 시총)."""
+    data = _fmp_get("profile", {"symbol": ticker})
+    if not data:
+        raise DataValidationError(
+            f"FMP profile 빈 응답: ticker={ticker}", source="FMP"
+        )
+    return data[0] if isinstance(data, list) else data
+
+
+def fetch_crypto_top(top_n: int = 50) -> list[dict]:
+    """CoinGecko 시가총액 상위 N개 암호화폐 목록.
+
+    Returns
+    -------
+    list[dict]
+        각 dict: id, symbol, name, current_price, market_cap,
+        market_cap_rank, price_change_percentage_24h 등.
+    """
+    try:
+        from pycoingecko import CoinGeckoAPI
+    except ImportError as e:
+        raise DataFetchError(
+            "pycoingecko 패키지가 없습니다. pip install pycoingecko", source="CoinGecko"
+        ) from e
+
+    cg = CoinGeckoAPI()
+    try:
+        data = cg.get_coins_markets(
+            vs_currency="usd",
+            order="market_cap_desc",
+            per_page=min(top_n, 250),
+            page=1,
+        )
+    except Exception as e:  # noqa: BLE001
+        raise DataFetchError(
+            f"CoinGecko top markets 호출 실패: top_n={top_n}", source="CoinGecko"
+        ) from e
+
+    if not data:
+        raise DataValidationError(
+            "CoinGecko top markets 빈 응답", source="CoinGecko"
+        )
+    return data
 
 
 def fetch_ratios(

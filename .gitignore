@@ -36,3 +36,6 @@ Thumbs.db
 # 로그
 *.log
 logs/
+
+# 스크리너 출력 (자동 생성 데이터)
+dashboard/screener_data.json

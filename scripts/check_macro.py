@@ -22,6 +22,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pandas as pd  # noqa: E402
 
 from src.data_fetcher import FRED_SERIES, fetch_macro_dashboard  # noqa: E402, F401
+from src.logger import get_logger  # noqa: E402
+
+logger = get_logger(__name__)
 
 
 def main() -> None:
@@ -32,7 +35,7 @@ def main() -> None:
     df = fetch_macro_dashboard()
 
     if df.empty:
-        print("⚠️  지표를 하나도 못 가져왔습니다. .env 의 FRED_API_KEY 를 확인하세요.")
+        logger.error("FRED 지표를 하나도 못 가져왔습니다. .env 의 FRED_API_KEY 확인 필요")
         return
 
     print(f"\n{'지표':<28} {'최신일자':<12} {'최신값':>12} {'1년전':>12} {'변화':>12}")
