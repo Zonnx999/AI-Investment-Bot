@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import requests  # noqa: E402
 
 from src.config import settings  # noqa: E402
+from src.http import get_http_session, mask_secrets  # noqa: E402
 from src.logger import get_logger  # noqa: E402
 
 logger = get_logger(__name__)
@@ -44,11 +45,12 @@ def main() -> None:
     print(f"{'엔드포인트':<28} {'상태':<10} 의미")
     print("-" * 78)
 
+    session = get_http_session()  # retry/backoff + 타임아웃 강제 + 키 마스킹
     for label, path in ENDPOINTS_TO_TEST:
         sep = "&" if "?" in path else "?"
         url = f"https://financialmodelingprep.com/{path}{sep}apikey={api_key}"
         try:
-            r = requests.get(url, timeout=15)
+            r = session.get(url)
             code = r.status_code
             if code == 200:
                 status = "✅ 200"
@@ -68,11 +70,11 @@ def main() -> None:
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
             logger.warning("FMP probe 네트워크 실패 (%s): %s", path, e)
             status = "NET"
-            meaning = str(e)[:60]
+            meaning = mask_secrets(str(e))[:60]  # 예외 메시지에 URL(키 포함) 이 섞일 수 있음
         except Exception as e:  # noqa: BLE001 — 진단 스크립트라 의도적으로 광범위
             logger.exception("FMP probe 예상치 못한 예외: %s", path)
             status = "ERR"
-            meaning = str(e)[:60]
+            meaning = mask_secrets(str(e))[:60]
 
         print(f"{label:<28} {status:<10} {meaning}")
 

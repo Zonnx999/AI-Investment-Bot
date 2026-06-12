@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 
 from src.data_fetcher import fetch_macro, fetch_prices
-from src.exceptions import DataFetchError
+from src.exceptions import ConfigError, DataFetchError
 from src.logger import get_logger
 
 logger = get_logger(__name__)
@@ -295,7 +295,10 @@ def classify_regime() -> RegimeReport:
     for evaluator in _REGIME_EVALUATORS:
         try:
             outcome = evaluator()
-        except DataFetchError:
+        except (ConfigError, DataFetchError):
+            # ConfigError 포함 이유: FRED 키 미설정 시 fetch_macro 가
+            # MissingApiKeyError(ConfigError 계열) 를 던지는데, 이것도
+            # "지표 평가 실패" 로 failures 에 기록돼야 리포트가 안 죽음
             # series_id 가 헬퍼 이름에 1:1 매핑되지는 않아 evaluator.__name__ 로 식별
             failed_name = evaluator.__name__.replace("_eval_", "")
             logger.exception(

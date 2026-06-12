@@ -162,6 +162,11 @@ def setup_logging(
     for noisy in _NOISY_LOGGERS:
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
+    # yfinance 는 실패를 자기 로거에 ERROR 로 직접 찍어서 WARNING 누름을 우회.
+    # 모든 yfinance 실패는 data_fetcher 가 도메인 예외로 변환해 우리가 직접
+    # 로깅하므로, 원본 ERROR 는 중복 노이즈 → CRITICAL 로 차단 (3단계 fix).
+    logging.getLogger("yfinance").setLevel(logging.CRITICAL)
+
     # ---- warnings.warn() 도 로깅으로 흡수 ----
     if capture_warnings:
         logging.captureWarnings(True)

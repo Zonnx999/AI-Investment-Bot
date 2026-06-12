@@ -32,6 +32,7 @@ from src.exceptions import (
     DataValidationError,
     RateLimitError,
 )
+from src.http import DEFAULT_TIMEOUT, RETRY_TOTAL, get_http_session, is_timeout
 from src.logger import get_logger
 
 logger = get_logger(__name__)
@@ -166,6 +167,10 @@ FRED_SERIES = {
 def fetch_macro(series_id: str, start: str | None = None) -> pd.Series:
     """FRED 에서 단일 시계열 가져오기.
 
+    참고: fredapi 는 내부적으로 urllib.request.urlopen 을 사용해서
+    표준 HTTP 세션(src/http.py 의 retry/timeout)을 주입할 수 없습니다.
+    여기는 도메인 예외 wrapping 만 적용 (3단계 리팩토링 결정).
+
     Raises
     ------
     MissingApiKeyError
@@ -231,6 +236,27 @@ def fetch_macro_dashboard(start: str | None = None) -> pd.DataFrame:
 # ----------------------------------------------------------------------
 
 
+def _coingecko_client():
+    """프로젝트 표준 HTTP 세션이 주입된 CoinGecko 클라이언트.
+
+    pycoingecko 기본값은 자체 세션(retry 가 502/503/504 만 커버) +
+    timeout 120s 라서, 우리 표준 정책(429 포함 retry, connect 5s/read 25s)
+    으로 교체합니다. pycoingecko 3.2.0 의 ``session``/``request_timeout``
+    속성이 public 이라 주입 가능 — 버전 올릴 때 이 가정 재확인 필요.
+    """
+    try:
+        from pycoingecko import CoinGeckoAPI
+    except ImportError as e:
+        raise DataFetchError(
+            "pycoingecko 패키지가 없습니다. pip install pycoingecko", source="CoinGecko"
+        ) from e
+
+    cg = CoinGeckoAPI()
+    cg.session = get_http_session()
+    cg.request_timeout = DEFAULT_TIMEOUT
+    return cg
+
+
 def fetch_crypto(coin_id: str = "bitcoin", days: int = 180) -> pd.DataFrame:
     """CoinGecko 에서 암호화폐 일별 가격·거래량 가져오기.
 
@@ -241,14 +267,7 @@ def fetch_crypto(coin_id: str = "bitcoin", days: int = 180) -> pd.DataFrame:
     DataValidationError
         잘못된 coin_id 또는 빈 응답.
     """
-    try:
-        from pycoingecko import CoinGeckoAPI
-    except ImportError as e:
-        raise DataFetchError(
-            "pycoingecko 패키지가 없습니다. pip install pycoingecko", source="CoinGecko"
-        ) from e
-
-    cg = CoinGeckoAPI()
+    cg = _coingecko_client()
     try:
         raw = cg.get_coin_market_chart_by_id(
             id=coin_id, vs_currency="usd", days=days, interval="daily"
@@ -335,9 +354,12 @@ def _fmp_get(endpoint: str, params: dict | None = None) -> list:
     ApiAuthorizationError HTTP 403 — 플랜 제한
     RateLimitError        HTTP 429 — 호출 한도
     ApiHttpError          기타 HTTP 4xx/5xx
-    ApiTimeoutError       타임아웃
-    ApiConnectionError    네트워크 접속 실패
+    ApiTimeoutError       타임아웃 (자동 재시도 소진 후)
+    ApiConnectionError    네트워크 접속 실패 (자동 재시도 소진 후)
     DataValidationError   응답이 비어있음
+
+    참고: 429/5xx 는 표준 세션(src/http.py)이 backoff 로 최대 3회 자동
+    재시도한 뒤에도 실패한 경우에만 여기 도메인 예외로 변환됩니다.
     """
     import requests
 
@@ -347,14 +369,17 @@ def _fmp_get(endpoint: str, params: dict | None = None) -> list:
     url = f"{FMP_BASE_URL}/{endpoint}"
 
     try:
-        response = requests.get(url, params=p, timeout=30)
-    except requests.exceptions.Timeout as e:
-        raise ApiTimeoutError(
-            f"FMP {endpoint} 타임아웃 (30s)", source="FMP"
-        ) from e
-    except requests.exceptions.ConnectionError as e:
+        response = get_http_session().get(url, params=p)  # timeout/retry 는 세션이 강제
+    except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+        # 주의: Retry 가 개입하면 read timeout 도 ConnectionError 로 나옴 → is_timeout 으로 구분
+        if is_timeout(e):
+            raise ApiTimeoutError(
+                f"FMP {endpoint} 타임아웃 (connect {DEFAULT_TIMEOUT[0]:.0f}s / "
+                f"read {DEFAULT_TIMEOUT[1]:.0f}s, 재시도 {RETRY_TOTAL}회 포함)",
+                source="FMP",
+            ) from e
         raise ApiConnectionError(
-            f"FMP {endpoint} 연결 실패", source="FMP"
+            f"FMP {endpoint} 연결 실패 (재시도 {RETRY_TOTAL}회 포함)", source="FMP"
         ) from e
     except requests.exceptions.RequestException as e:
         raise DataFetchError(
@@ -372,7 +397,7 @@ def _fmp_get(endpoint: str, params: dict | None = None) -> list:
         )
     if code == 429:
         raise RateLimitError(
-            f"FMP {endpoint}: 호출 한도 초과 (429)", source="FMP"
+            f"FMP {endpoint}: 호출 한도 초과 (429, 재시도 후에도 지속)", source="FMP"
         )
     if not response.ok:
         raise ApiHttpError(
@@ -470,14 +495,7 @@ def fetch_crypto_top(top_n: int = 50) -> list[dict]:
         각 dict: id, symbol, name, current_price, market_cap,
         market_cap_rank, price_change_percentage_24h 등.
     """
-    try:
-        from pycoingecko import CoinGeckoAPI
-    except ImportError as e:
-        raise DataFetchError(
-            "pycoingecko 패키지가 없습니다. pip install pycoingecko", source="CoinGecko"
-        ) from e
-
-    cg = CoinGeckoAPI()
+    cg = _coingecko_client()
     try:
         data = cg.get_coins_markets(
             vs_currency="usd",

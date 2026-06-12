@@ -18,28 +18,27 @@
 - 점수 공식 미세조정 (현재 Haiku 공식 그대로)
 - 새 필드 추가 (`forward_pe`, `peg_ratio` 등)
 
-### B. 3단계 리팩토링 (HTTP 견고성) — 원래 다음 단계
-리팩토링 8단계 중 1-2단계가 완료된 상태로 인계됩니다. 다음은 **3단계**입니다.
+### B. 3단계 리팩토링 (HTTP 견고성) — 🛠 구현 완료 (2026-06-12), 사인오프 대기
+리팩토링 8단계 중 1-3단계가 구현된 상태입니다. 3단계 사인오프 후 다음은 **4단계 (DRY 정리)**.
 
 ### 목표
 `src/http.py` 를 신설하고 `requests.Session` + retry adapter + 타임아웃 일원화. 일일 배치 운영에서 transient 네트워크 에러로 인한 무작위 실패를 근절합니다.
 
 ### Definition of Done (3단계)
-- [ ] `src/http.py` 작성 완료, 타입힌트 + 도큐스트링 포함
-- [ ] **단일 HTTP 세션** — `get_http_session()` 가 프로젝트 표준 세션 반환
-- [ ] **Retry/backoff 자동** — 5xx 와 429 같은 transient 에러에 exponential backoff (예: 1s → 2s → 4s, 최대 3회). `urllib3.util.retry.Retry` 활용.
-- [ ] **타임아웃 강제** — 모든 호출에 connect 5s / read 25s 같이 강제 적용. 라이브러리 기본값 의존 금지.
-- [ ] **API 키 마스킹** — 에러 로그/traceback 에 키가 노출되지 않도록 logging filter 추가. 현재 `_fmp_get` 의 키 leak 문제 해결.
-- [ ] **연결 풀링** — 같은 host 재호출 시 keep-alive 활용.
-- [ ] 마이그레이션 대상:
-  - `data_fetcher._fmp_get()` 가 새 세션 사용하도록 교체
-  - `data_fetcher.fetch_crypto()` 가 pycoingecko 의 내부 세션 대신 우리 세션 주입 (지원되는지 확인 필요)
-  - `scripts/diag_fmp.py` 도 새 세션 사용
-  - `fetch_macro` (fredapi) 는 fredapi 가 외부 세션 주입 미지원이면 wrapping 만
-- [ ] 데모로 입증: 의도적 5xx 시뮬레이션 → 자동 재시도 → 결과 로그 확인
-- [ ] 데모로 입증: API 키 마스킹 — 에러 traceback 에 키가 `***REDACTED***` 같이 보임
-- [ ] 기존 스크립트들이 모두 정상 동작 (`check_market_regime.py`, `check_risk.py`, `check_fundamentals.py`)
-- [ ] 사용자 사인오프 받음
+- [x] `src/http.py` 작성 완료, 타입힌트 + 도큐스트링 포함
+- [x] **단일 HTTP 세션** — `get_http_session()` 가 프로젝트 표준 세션 반환
+- [x] **Retry/backoff 자동** — 429/5xx 에 exponential backoff (즉시 → 2s → 4s, 최대 3회 — urllib3 2.x 는 첫 재시도 backoff 0). `urllib3.util.retry.Retry` 활용.
+- [x] **타임아웃 강제** — connect 5s / read 25s 를 어댑터가 강제. (예외: fredapi 는 urllib 기반이라 미적용)
+- [x] **API 키 마스킹** — `SecretMaskingFilter` 가 로그 메시지 + traceback 마스킹. `_fmp_get` 키 leak 해결.
+- [x] **연결 풀링** — 단일 세션 keep-alive.
+- [x] 마이그레이션 완료:
+  - `data_fetcher._fmp_get()` → 표준 세션
+  - `fetch_crypto`/`fetch_crypto_top` → `_coingecko_client()` 가 pycoingecko 에 세션 주입 (3.2.0 의 public `session` 속성 확인됨)
+  - `scripts/diag_fmp.py` → 표준 세션 + mask_secrets
+  - `fetch_macro` (fredapi) → urllib 기반 확인, wrapping 만 유지
+- [x] 데모 입증: `scripts/demo_http.py` — 5xx 자동 재시도 / 재시도 소진 / 타임아웃 강제 / 키 마스킹 (4케이스)
+- [x] 기존 스크립트 정상 동작 (`check_market_regime.py`, `check_risk.py`, `check_fundamentals.py`, `check_crypto.py`, `demo_exceptions.py`)
+- [ ] **사용자 사인오프 받음** ← 여기까지 완료되면 3단계 종료
 
 ### 시작 시 권장 절차
 1. 사용자에게 작업 시작 알림
@@ -59,7 +58,7 @@
 |---|---|---|
 | 1 | 로깅 통합 (logger.py + print→logging) | ✅ 완료, 사인오프 |
 | 2 | 예외 체계화 (exceptions.py + specific catches) | ✅ 완료, 사인오프 |
-| **3** | **HTTP 견고성 (http.py + Session/retry/timeout/masking)** | **▶️ 다음** |
+| **3** | **HTTP 견고성 (http.py + Session/retry/timeout/masking)** | **🛠 구현 완료 (2026-06-12), 사인오프 대기** |
 | 4 | DRY 정리 (utils.py 신설, 데드 코드 삭제, 중복 제거) | ⏳ |
 | 5 | 패키지화 (pyproject.toml + `pip install -e .`, sys.path hack 제거) | ⏳ |
 | 6 | 테스트 인프라 (pytest + 픽스처 + 첫 테스트 5-10개) | ⏳ |
