@@ -178,7 +178,7 @@ QuantBotError
 
 ## 3. 가장 최근 완료 작업
 
-### Phase 4 — Storage & Daily Pipeline — 🛠 구현 완료 (2026-06-13), 사인오프 대기
+### Phase 4 — Storage & Daily Pipeline — ✅ 완료, 사인오프 받음 (2026-06-13)
 - `src/storage.py` 신설 — SQLite 캐시 (`data/quant_bot.db`, gitignore):
   - `Storage` 클래스: (namespace, key) → DataFrame/Series/JSON, TTL 기반
   - **캐시는 best-effort** — 읽기/쓰기 실패는 경고 후 무시, 파이프라인 절대 안 막음

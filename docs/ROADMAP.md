@@ -72,7 +72,7 @@
 
 ## 3. 본격 개발 로드맵 (리팩토링 완료 후)
 
-### Phase 4 — Storage & Daily Pipeline — 🛠 구현 완료 (2026-06-13), 사인오프 대기
+### Phase 4 — Storage & Daily Pipeline — ✅ 완료, 사인오프 받음 (2026-06-13)
 - ✅ `src/storage.py`: SQLite 캐시 레이어 (TTL, best-effort, @cached 데코레이터)
 - ✅ `scripts/daily_update.py`: 매일 한 번 모든 데이터 수집 오케스트레이터
 - ✅ 같은 데이터 두 번 안 부름 — 콜드 12s → 웜 2s 측정
