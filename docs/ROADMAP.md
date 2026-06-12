@@ -38,7 +38,7 @@
   - `fetch_macro` (fredapi) → urllib 기반 확인, wrapping 만 유지
 - [x] 데모 입증: `scripts/demo_http.py` — 5xx 자동 재시도 / 재시도 소진 / 타임아웃 강제 / 키 마스킹 (4케이스)
 - [x] 기존 스크립트 정상 동작 (`check_market_regime.py`, `check_risk.py`, `check_fundamentals.py`, `check_crypto.py`, `demo_exceptions.py`)
-- [ ] **사용자 사인오프 받음** ← 여기까지 완료되면 3단계 종료
+- [x] **사용자 사인오프 받음** (2026-06-12 — 사용자가 demo_http 4케이스 직접 실행·확인)
 
 ### 시작 시 권장 절차
 1. 사용자에게 작업 시작 알림
@@ -58,8 +58,8 @@
 |---|---|---|
 | 1 | 로깅 통합 (logger.py + print→logging) | ✅ 완료, 사인오프 |
 | 2 | 예외 체계화 (exceptions.py + specific catches) | ✅ 완료, 사인오프 |
-| **3** | **HTTP 견고성 (http.py + Session/retry/timeout/masking)** | **🛠 구현 완료 (2026-06-12), 사인오프 대기** |
-| 4 | DRY 정리 (utils.py 신설, 데드 코드 삭제, 중복 제거) | ⏳ |
+| 3 | HTTP 견고성 (http.py + Session/retry/timeout/masking) | ✅ 완료, 사인오프 |
+| **4** | **DRY 정리 (utils.py 신설, 데드 코드 삭제, 중복 제거)** | **▶️ 다음** |
 | 5 | 패키지화 (pyproject.toml + `pip install -e .`, sys.path hack 제거) | ⏳ |
 | 6 | 테스트 인프라 (pytest + 픽스처 + 첫 테스트 5-10개) | ⏳ |
 | 7 | 결정론 & 검증 (`_clean_returns` 명시화, MC RNG 격리, 입력 검증, 매직 넘버 → 상수) | ⏳ |
