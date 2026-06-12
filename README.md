@@ -22,7 +22,7 @@ AI-Investment-Bot/
 ├── CLAUDE.md              # 프로젝트 규칙 (먼저 읽기)
 ├── README.md              # 이 파일
 ├── .env.example           # API 키 템플릿 (실제 .env 는 절대 커밋 안 함)
-├── requirements.txt
+├── pyproject.toml         # 패키지/의존성 정의 (pip install -e ".[dev]")
 │
 ├── docs/
 │   ├── CURRENT_STATE.md   # 현재 작업 상태 (핸드오버용)
@@ -57,7 +57,7 @@ AI-Investment-Bot/
 ├── data/                  # 데이터 캐시 (gitignore)
 ├── notebooks/             # 실험용 노트북 (gitignore)
 ├── logs/                  # quant_bot.log (gitignore)
-└── tests/                 # 6단계 리팩토링에서 pytest 도입 예정
+└── tests/                 # pytest — 오프라인 테스트 40개 (python -m pytest)
 ```
 
 ## 첫 실행 (Quick Start)
@@ -69,8 +69,8 @@ python3.12 -m venv .venv
 # 2. 가상환경 켜기 (터미널 켤 때마다)
 source .venv/bin/activate
 
-# 3. 패키지 설치 (한 번만, 또는 requirements.txt 바뀔 때)
-pip install -r requirements.txt
+# 3. 패키지 설치 (한 번만, 또는 pyproject.toml 바뀔 때 — editable install)
+pip install -e ".[dev]"
 
 # 4. 환경변수 파일 만들기
 cp .env.example .env
@@ -132,14 +132,14 @@ from src.data_fetcher import (
 
 ## 로드맵
 
-현재 위치: **Phase 0–3 + 가치주 스크리너 완료. 리팩토링 8단계 중 1–2단계 완료, 다음은 3단계 (HTTP 견고성).**
+현재 위치: **Phase 0–3 + 가치주 스크리너 + 리팩토링 8단계 전체 완료. 다음은 Phase 4 (Storage).**
 
 - [x] Phase 0 — 폴더 구조 + Hello World
 - [x] Phase 1 — `data_fetcher.py` (yfinance + FRED + CoinGecko + 한국 무역통계)
 - [x] Phase 2 — `macro_analyzer.py` 상관관계 + 시장 국면 분류
 - [x] Phase 3 — `risk_engine.py` VaR / MDD / Monte Carlo / 시나리오
 - [x] Side Quest — 가치주 스크리너 + HTML 대시보드
-- [ ] 리팩토링 3–8단계 — HTTP 견고성 → DRY → 패키지화 → 테스트 → 결정론 → API 정합성
+- [x] 리팩토링 1–8단계 — 로깅 → 예외 → HTTP → DRY → 패키지화 → 테스트 → 결정론 → API 정합성
 - [ ] Phase 4 — Storage & Daily Pipeline (SQLite 캐시 + 일일 오케스트레이터)
 - [ ] Phase 5 — Signal Engine (스크리닝 룰 + 알림 룰 + 팩터 신호)
 - [ ] Phase 6 — 대체 데이터 & 예측 모델 (M2→BTC, 한국 수출→반도체 등)

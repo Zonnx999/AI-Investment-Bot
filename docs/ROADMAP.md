@@ -18,8 +18,8 @@
 - 점수 공식 미세조정 (현재 Haiku 공식 그대로)
 - 새 필드 추가 (`forward_pe`, `peg_ratio` 등)
 
-### B. 3단계 리팩토링 (HTTP 견고성) — 🛠 구현 완료 (2026-06-12), 사인오프 대기
-리팩토링 8단계 중 1-3단계가 구현된 상태입니다. 3단계 사인오프 후 다음은 **4단계 (DRY 정리)**.
+### B. 리팩토링 — ✅ 8단계 전체 완료 (2026-06-13)
+다음 작업은 **Phase 4 (Storage & Daily Pipeline)** 입니다 (사용자 승인 후 착수).
 
 ### 목표
 `src/http.py` 를 신설하고 `requests.Session` + retry adapter + 타임아웃 일원화. 일일 배치 운영에서 transient 네트워크 에러로 인한 무작위 실패를 근절합니다.
@@ -59,13 +59,14 @@
 | 1 | 로깅 통합 (logger.py + print→logging) | ✅ 완료, 사인오프 |
 | 2 | 예외 체계화 (exceptions.py + specific catches) | ✅ 완료, 사인오프 |
 | 3 | HTTP 견고성 (http.py + Session/retry/timeout/masking) | ✅ 완료, 사인오프 |
-| **4** | **DRY 정리 (utils.py 신설, 데드 코드 삭제, 중복 제거)** | **🛠 구현 완료 (2026-06-12), 사인오프 대기** |
-| 5 | 패키지화 (pyproject.toml + `pip install -e .`, sys.path hack 제거) | ⏳ |
-| 6 | 테스트 인프라 (pytest + 픽스처 + 첫 테스트 5-10개) | ⏳ |
-| 7 | 결정론 & 검증 (`_clean_returns` 명시화, MC RNG 격리, 입력 검증, 매직 넘버 → 상수) | ⏳ |
-| 8 | API 정합성 (빈 데이터 컨벤션 통일, TypedDict/dataclass 반환 타입) | ⏳ |
+| 4 | DRY 정리 (utils.py 신설, 데드 코드 삭제, 중복 제거) | ✅ 완료, 사인오프 |
+| 5 | 패키지화 (pyproject.toml + `pip install -e .`, sys.path hack 제거) | ✅ 완료 (2026-06-13) |
+| 6 | 테스트 인프라 (pytest + 픽스처 + 오프라인 테스트 40개) | ✅ 완료 (2026-06-13) |
+| 7 | 결정론 & 검증 (`_clean_returns` 명시화, MC RNG 격리, 입력 검증, 매직 넘버 → 상수) | ✅ 완료 (2026-06-13) |
+| 8 | API 정합성 (빈 데이터 컨벤션 통일, TypedDict 반환 타입) | ✅ 완료 (2026-06-13) |
 
-**8단계가 모두 끝나야 본격 Phase 4 진입.** 사용자는 속도보다 완벽함을 우선시한다는 입장을 명확히 했습니다.
+**리팩토링 8단계 전체 완료 (2026-06-13).** 5–8단계는 사용자 승인 하에 스피드 모드로
+일괄 진행 — 최종 사인오프 후 **Phase 4 (Storage & Daily Pipeline)** 진입.
 
 ---
 

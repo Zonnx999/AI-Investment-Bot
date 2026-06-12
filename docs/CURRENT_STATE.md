@@ -14,7 +14,8 @@ AI-Investment-Bot/
 ├── .env.example               # 키 템플릿
 ├── .gitignore
 ├── README.md
-├── requirements.txt
+├── pyproject.toml             # ★ 패키지/의존성 정의 (5단계) — pip install -e ".[dev]"
+├── requirements.txt           # -e .[dev] 포인터 (호환용)
 │
 ├── docs/
 │   ├── CURRENT_STATE.md       # 이 파일
@@ -49,8 +50,14 @@ AI-Investment-Bot/
 │   ├── index.html             # 4탭 가치주 대시보드 (Haiku 작성, 그대로 활용)
 │   └── screener_data.json     # 자동 생성 (gitignore)
 │
-├── tests/
-│   └── __init__.py            # 아직 빈 디렉토리 (6단계에서 pytest 도입)
+├── tests/                     # ★ 오프라인 테스트 40개 (6단계) — python -m pytest
+│   ├── conftest.py            # 픽스처: 합성 가격/OHLCV, API 키 격리
+│   ├── test_utils.py
+│   ├── test_exceptions.py
+│   ├── test_http.py           # 마스킹/is_timeout/retry (로컬 서버)
+│   ├── test_risk_engine.py
+│   ├── test_macro_analyzer.py
+│   └── test_data_fetcher.py
 │
 ├── data/.gitkeep              # 캐시 (gitignore)
 ├── notebooks/.gitkeep
@@ -169,7 +176,32 @@ QuantBotError
 
 ## 3. 가장 최근 완료 작업
 
-### 4단계 리팩토링 (DRY 정리) — 🛠 구현 완료 (2026-06-12), 사인오프 대기
+### 리팩토링 5–8단계 일괄 완료 (2026-06-13, 스피드 모드 — 사용자 승인 하에 phase-gate 한시 해제)
+
+**5단계 — 패키지화**
+- `pyproject.toml` 신설 (의존성 + dev/viz/llm/ui optional 그룹), `pip install -e ".[dev]"`
+- `requirements.txt` 는 `-e .[dev]` 포인터로 축소
+- 11개 스크립트의 `sys.path.insert` 보일러플레이트 전부 제거 — 어느 cwd 에서든 실행 가능
+
+**6단계 — 테스트 인프라**
+- pytest 도입, `tests/` 에 40개 테스트 — **전부 오프라인** (합성 데이터 + 로컬 HTTP 서버), ~2.5초
+- 픽스처: 합성 가격/OHLCV, API 키 격리 (`no_api_keys`, `fake_fmp_key`)
+- 회귀 테스트 포함: current_drawdown NaN 버그, classify_regime 실패 격리, 키 마스킹
+
+**7단계 — 결정론 & 검증**
+- `_clean_returns` 휴리스틱 제거: VaR/ES 는 수익률만 받음. 가격→수익률은
+  `returns_from_prices()` 명시 변환. 가격 오입력 시 `AnalysisError` raise (조용한 오답 방지)
+- 표본 부족 시 `InsufficientDataError` (최소 20개)
+- Monte Carlo RNG: 글로벌 `np.random.seed` → 격리된 `default_rng` (글로벌 오염 제거)
+  ⚠️ 같은 seed 라도 구버전과 난수열이 달라 MC 분위수 값이 바뀜 (재현성 자체는 유지)
+- 매직 넘버 상수화: `utils.TRADING_DAYS_PER_YEAR`, macro_analyzer 국면 임계값 8개
+
+**8단계 — API 정합성**
+- TypedDict 반환 스키마: `RiskReport`, `MarketSummary`, `ScreenedStock` (런타임은 dict — 무파손)
+- 빈 데이터 컨벤션 명문화 (data_fetcher 모듈 docstring): 단일 대상 → raise /
+  폴백 시계열 → 빈 DataFrame / 배치 → 부분 결과 + 경고
+
+### 4단계 리팩토링 (DRY 정리) — ✅ 완료, 사인오프 받음 (2026-06-13)
 - `src/utils.py` 신설: `close_series` (Adj Close/Close fallback 3곳 통합),
   `pick_first` (check_fundamentals 의 inline `pick` 이동)
 - `data_fetcher._fmp_to_dataframe` 신설 — FMP 후처리 3곳 통합
@@ -256,13 +288,15 @@ QuantBotError
 | ~~`pick()` 헬퍼 inline 정의~~ | ✅ 4단계 — `utils.pick_first` 로 이동 | 완료 |
 | ~~`bot_interface.py` 데드 코드~~ | ✅ 4단계 — 삭제 | 완료 |
 | ~~`fetch_fundamentals` 부분 데드 코드~~ | ✅ 4단계 — 사용 필드 5개로 축소, 스냅샷용으로 재정의 | 완료 |
-| `sys.path.insert` 보일러플레이트 7곳 중복 | 패키지 구조 부재 신호 | 5단계 |
-| 테스트 0건 | 회귀 검출 불가능 | 6단계 |
-| `_clean_returns` heuristic fragile | 페니스톡 오작동 가능 | 7단계 |
-| `np.random.seed` 글로벌 오염 (Monte Carlo) | 다른 random 연산 영향 | 7단계 |
-| 매직 넘버 분산 (regime 임계값, 252 등) | 조정·테스트 어려움 | 7단계 |
-| 빈 데이터 반환 컨벤션 불일치 | 호출자 방어 코드 3가지 | 8단계 |
-| 반환 타입 불투명 (dict[str, Any] 남발) | IDE 자동완성 부재 | 8단계 |
+| ~~`sys.path.insert` 보일러플레이트~~ | ✅ 5단계 — editable install 로 제거 | 완료 |
+| ~~테스트 0건~~ | ✅ 6단계 — 오프라인 40개 | 완료 |
+| ~~`_clean_returns` heuristic fragile~~ | ✅ 7단계 — 명시 API + 오입력 감지 | 완료 |
+| ~~`np.random.seed` 글로벌 오염~~ | ✅ 7단계 — default_rng 격리 | 완료 |
+| ~~매직 넘버 분산~~ | ✅ 7단계 — 상수화 | 완료 |
+| ~~빈 데이터 컨벤션 불일치~~ | ✅ 8단계 — 3분류 컨벤션 명문화 | 완료 |
+| ~~반환 타입 불투명~~ | ✅ 8단계 — TypedDict 3종 | 완료 |
+| fredapi 타임아웃 강제 불가 (urllib 기반) | FRED 호출 hang 가능성 (낮음) | 추후 (Phase 4 storage 도입 시 재평가) |
+| 패키지 import 이름이 `src` | 외부 배포 시 부적합 (개인용은 무방) | 추후 (필요 시 rename) |
 
 ---
 
@@ -272,9 +306,12 @@ QuantBotError
 cd /Users/leom/Developer/AI-Investment_Bot/AI-Investment-Bot
 python3.12 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -e ".[dev]"        # 5단계부터 pyproject.toml 기반 (editable)
 cp .env.example .env
 # .env 에 FRED_API_KEY, FMP_API_KEY 채워넣기
+
+# 테스트 (오프라인, ~2.5초)
+python -m pytest
 
 # 동작 확인 (위에서 아래 순서로)
 python scripts/hello_world.py         # 가장 기본
