@@ -51,10 +51,10 @@ def format_digest(
     elif not report.first_run:
         lines.append("_변화 알림 없음_")
 
-    # ---- 팩터 점수 ----
+    # ---- 오늘의 발굴 종목 (스크리닝 상위) + 팩터 점수 ----
     if report.factors:
         lines.append("")
-        lines.append("*📈 팩터 점수* (모멘텀/밸류/퀄리티 → 종합)")
+        lines.append("*📈 오늘의 발굴 종목* (스크리닝 상위 · 모멘텀/밸류/퀄리티→종합)")
         for f in sorted(report.factors, key=lambda x: x.composite, reverse=True):
             lines.append(
                 f"  `{f.ticker:<5}` {f.momentum:>3}/{f.value:>3}/{f.quality:>3} → *{f.composite}*"
@@ -92,19 +92,31 @@ def format_digest(
 
 def build_daily_digest(
     tickers: tuple[str, ...] | None = None,
-    screen: bool = False,
+    top_n: int = 6,
 ) -> str:
-    """fetch + 분석 → 다이제스트 문자열. 예측 개별 실패는 스킵(로그)."""
+    """fetch + 분석 → 다이제스트 문자열.
+
+    tickers=None 이면 매일 **스크리너 발굴 상위 N개**를 팩터 대상으로 사용
+    (고정 종목이 아니라 그날 저평가 상위 종목이 자동으로 올라옴).
+    스크리너 실패 시 DEFAULT_SIGNAL_TICKERS 로 폴백. 예측 개별 실패는 스킵(로그).
+    """
     from src.predictors import PREDICTORS
-    from src.signals import DEFAULT_SIGNAL_TICKERS, generate_signal_report
+    from src.signals import (
+        DEFAULT_SIGNAL_TICKERS,
+        generate_signal_report,
+        select_screened_tickers,
+    )
 
-    tk = tickers or DEFAULT_SIGNAL_TICKERS
-    screen_tickers = None
-    if screen:
-        from src.screener import US_WATCHLIST
-        screen_tickers = list(US_WATCHLIST)
+    tk = tickers
+    if tk is None:
+        try:
+            screened = select_screened_tickers(n=top_n)
+        except QuantBotError as e:
+            logger.warning("스크리너 실패 — 기본 종목으로 폴백: %s", e)
+            screened = []
+        tk = tuple(screened) or DEFAULT_SIGNAL_TICKERS
 
-    report = generate_signal_report(tickers=tk, screen_tickers=screen_tickers)
+    report = generate_signal_report(tickers=tk, screen_tickers=None)
 
     predictions: list[LeadLagResult] = []
     for name, predict in PREDICTORS.items():
@@ -118,9 +130,9 @@ def build_daily_digest(
 
 def send_daily_digest(
     tickers: tuple[str, ...] | None = None,
-    screen: bool = False,
+    top_n: int = 6,
 ) -> bool:
     """다이제스트 조립 + 텔레그램 전송 (best-effort). 성공 여부 반환."""
     from src.notifier import send_safe
 
-    return send_safe(build_daily_digest(tickers=tickers, screen=screen))
+    return send_safe(build_daily_digest(tickers=tickers, top_n=top_n))

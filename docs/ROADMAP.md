@@ -111,6 +111,8 @@
 - ✅ `.github/workflows/daily-digest.yml` — 한국(08:30 KST)·미국(09:00 ET) 장 30분 전 2회.
      UTC cron 3개 + 뉴욕 시각 게이트로 DST 자동 대응
 - ⏳ 사용자 작업: GitHub 저장소 Secrets 에 키 4개 등록 (FRED/FMP/TELEGRAM_*)
+- ✅ 다이제스트 팩터 표 = 매일 스크리너 발굴 상위 N개 (고정 종목 아님)
+- ✅ Node 24 런타임 opt-in (액션 deprecation 경고 제거)
 - ⚠️ 클라우드 러너는 ephemeral → 변화 알림 상태는 actions/cache 로 best-effort 유지
 
 ### Phase 8 (선택) — LLM 요약 한 줄

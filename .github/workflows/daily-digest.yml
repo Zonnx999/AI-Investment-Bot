@@ -11,6 +11,10 @@ on:
     - cron: "0 14 * * 1-5"    # 09:00 ET (겨울, 11~3월)
   workflow_dispatch: {}        # 수동 실행 버튼 (게이트 우회 — 언제든 테스트 전송)
 
+# 액션 런타임을 Node 24 로 (Node 20 deprecation 경고 제거 — 2026-06 GitHub 마이그레이션)
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   digest:
     runs-on: ubuntu-latest

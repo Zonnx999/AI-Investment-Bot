@@ -294,6 +294,19 @@ def screen_candidates(tickers: list[str]) -> list[dict]:
     return apply_screen_rules(rows)
 
 
+def select_screened_tickers(n: int = 6, market: str = "US") -> list[str]:
+    """스크리너가 뽑은 '오늘의 발굴 종목' 상위 N개 티커 (value+health 종합 점수순).
+
+    매일 시장 상황에 따라 결과가 바뀜 → 고정 워치리스트 대신 다이제스트의
+    팩터 표 주제로 사용. 스크리너 전체 실패 시 빈 리스트 (호출부가 폴백).
+    """
+    from src.screener import KR_WATCHLIST, US_WATCHLIST, screen_watchlist
+
+    watchlist = list(US_WATCHLIST if market == "US" else KR_WATCHLIST)
+    rows = screen_watchlist(watchlist, country_label=market)  # total_score 내림차순 정렬됨
+    return [r["symbol"] for r in rows[:n]]
+
+
 def generate_signal_report(
     tickers: tuple[str, ...] = DEFAULT_SIGNAL_TICKERS,
     screen_tickers: list[str] | None = None,

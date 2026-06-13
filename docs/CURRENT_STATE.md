@@ -191,11 +191,12 @@ VaR/ES 는 수익률 시리즈만 받음 (7단계). 가격→수익률은 `retur
 - `src/notifier.py` — 표준 HTTP 세션으로 Telegram Bot API 직접 POST (python-telegram-bot
   의존성 없음). `send_telegram`(Markdown, 4096 클램프), `get_updates`(chat_id 발견),
   `send_safe`(best-effort — 알림 실패가 배치를 안 죽임). 봇 토큰은 마스킹 대상 등록
-- `src/digest.py` — `format_digest` 순수 포매터 (국면+알림+팩터+예측 → 1 메시지),
-  `build_daily_digest`/`send_daily_digest` 오케스트레이터
+- `src/digest.py` — `format_digest` 순수 포매터 (국면+알림+팩터+예측 → 1 메시지).
+  팩터 표는 **매일 스크리너 발굴 상위 N개**(`select_screened_tickers`)를 자동 사용 →
+  고정 종목이 아니라 그날 저평가 상위 종목이 올라옴 (스크리너 실패 시 기본 종목 폴백)
 - `scripts/telegram_setup.py` (chat_id 발견 + --test), `scripts/send_digest.py` (--dry-run)
 - config: TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID. **사용자 연결 완료 + 실제 전송 검증됨**
-- 테스트 99개 (notifier 6 + digest 8 추가, 전부 오프라인/로컬서버)
+- 테스트 100개 (notifier 6 + digest 8 + 동적선택 1, 전부 오프라인/로컬서버)
 - ✅ `.github/workflows/daily-digest.yml`: GitHub Actions 로 한국(08:30 KST)·미국(09:00 ET)
   장 30분 전 2회. UTC cron 3개 + 뉴욕시각 게이트로 DST 대응. 수동 실행 버튼 포함
 - ⏳ 사용자: GitHub Secrets 에 FRED_API_KEY/FMP_API_KEY/TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID 등록

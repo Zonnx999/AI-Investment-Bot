@@ -146,3 +146,21 @@ def test_vol_no_alert_below_ratio():
 
 def test_vol_no_alert_without_prev():
     assert vol_spike_alerts({"NVDA": 80.0}, {}) == []
+
+
+# ---------------- select_screened_tickers ----------------
+
+
+def test_select_screened_tickers_takes_top_n(monkeypatch):
+    import src.signals as sig
+
+    fake_rows = [
+        {"symbol": "AAA", "total_score": 90},
+        {"symbol": "BBB", "total_score": 80},
+        {"symbol": "CCC", "total_score": 70},
+    ]
+    monkeypatch.setattr(
+        "src.screener.screen_watchlist", lambda wl, country_label="": fake_rows
+    )
+    assert sig.select_screened_tickers(n=2) == ["AAA", "BBB"]
+    assert sig.select_screened_tickers(n=10) == ["AAA", "BBB", "CCC"]
