@@ -87,6 +87,20 @@ def _section_screener() -> str:
     return f"{len(rows)}종목 스캔, 1위 {head}"
 
 
+def _section_predictions() -> str:
+    from src.predictors import PREDICTORS
+
+    parts = []
+    for name, predict in PREDICTORS.items():
+        try:
+            r = predict()
+            flag = "" if r.reliable else "?"
+            parts.append(f"{name.split(' → ')[-1].split('(')[0]} {r.direction[:2]}{flag}")
+        except QuantBotError:
+            parts.append(f"{name} ✗")
+    return " | ".join(parts)
+
+
 def _make_signals_section(tickers: list[str]):
     def run() -> str:
         from src.signals import generate_signal_report
@@ -120,6 +134,7 @@ def main() -> int:
         ("암호화폐 (BTC/ETH)", _section_crypto),
     ]
     sections += [(f"리스크 리포트 {t}", _make_risk_section(t)) for t in risk_tickers]
+    sections.append(("선행지표 예측 (alt-data)", _section_predictions))
     sections.append(("신호 엔진 (팩터 + 알림)", _make_signals_section(risk_tickers)))
     if args.screen:
         sections.append(("가치주 스크리너 (미국)", _section_screener))

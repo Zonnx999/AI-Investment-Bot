@@ -86,14 +86,20 @@
 - ✅ `src/signals.py` + `scripts/check_signals.py` + daily_update 통합
 - 사인오프 후 다음: **Phase 6 (Alternative Data & Predictive Models)**
 
-### Phase 6 — Alternative Data & Predictive Models ⭐⭐
-사용자가 가장 중요하게 강조한 부분. 다양한 무료 대체 데이터로 가격·매출을 선행 예측:
-- **M2 → BTC** 회귀 (FRED `M2SL` 시리즈)
-- **한국 수출 → 반도체株** 선행 회귀 (이미 `fetch_korea_trade` 사용 가능)
-- **Google Trends → 소비재 매출** 선행 (`pytrends` 라이브러리, 무료)
-- **위키피디아 페이지뷰 → 소비자 관심** (무료)
-- **SEC EDGAR 13F → 기관 보유 변동** (무료, 분기별)
-- ❌ 신용카드 결제 데이터 (2nd Measure 등) 는 월 수천 달러부터 시작 — 비현실적. 위 6-7가지 무료 alt-data 조합으로 70~80% 효과를 노리는 것이 합리적.
+### Phase 6 — Alternative Data & Predictive Models ⭐⭐ — 🛠 부분 구현 (2026-06-13), 사인오프 대기
+사용자가 가장 중요하게 강조한 부분. 다양한 무료 대체 데이터로 가격·매출을 선행 예측.
+**이미 가진 데이터로 가능한 핵심 2개를 먼저 견고하게 구현** (`src/predictors.py`):
+- ✅ **M2 → BTC** 회귀 (FRED `M2SL`) — 현재 R²=0.06 (약함, 정직하게 플래그)
+- ✅ **한국 수출 → 반도체(SOXX)** 선행 회귀 — R²=0.34, 10개월 선행
+- ✅ lead-lag 엔진: YoY 변환 → lag 1~12 탐색 → OLS → 신뢰도(R²) 판정. 순수 함수 + 테스트
+- ✅ `scripts/check_predictions.py` + daily_update 통합
+
+**미구현 — 새 의존성·fetcher 필요 (다음 결정 지점, 사용자 우선순위 확인)**:
+- ⏳ **Google Trends → 소비재 매출** (`pytrends` 추가 필요, rate-limit 불안정)
+- ⏳ **위키피디아 페이지뷰 → 소비자 관심** (REST API, 키 불필요)
+- ⏳ **SEC EDGAR 13F → 기관 보유 변동** (무료, 파싱 부담 큼)
+- ❌ 신용카드 결제 데이터 — 월 수천 달러, 비현실적
+→ 각각 fetcher + 캐싱 + 테스트가 필요해 핵심 2개와 분리. 사용자가 우선순위 정하면 추가.
 
 ### Phase 7 — Telegram/Discord 알림 봇
 - 스케줄러 (cron 또는 GitHub Actions) 로 매일 아침 7시 KST 자동 실행

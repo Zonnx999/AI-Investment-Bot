@@ -28,7 +28,8 @@ AI-Investment-Bot/
 │   ├── exceptions.py          # 도메인 예외 계층
 │   ├── http.py                # 표준 HTTP 세션 (retry/timeout/키 마스킹)
 │   ├── storage.py             # SQLite 캐시(@cached) + state 테이블 (Phase 4/5)
-│   ├── signals.py             # ★ NEW — 신호 엔진: 팩터/스크리닝/알림 (Phase 5)
+│   ├── signals.py             # 신호 엔진: 팩터/스크리닝/알림 (Phase 5)
+│   ├── predictors.py          # ★ NEW — lead-lag 예측 (M2→BTC, 한국수출→반도체) (Phase 6)
 │   ├── data_fetcher.py        # 모든 외부 API 호출 (전 함수 투명 캐싱)
 │   ├── macro_analyzer.py      # cross-asset + regime classifier
 │   ├── risk_engine.py         # VaR / MDD / MC / Scenario
@@ -45,7 +46,8 @@ AI-Investment-Bot/
 │   ├── check_risk.py          # 종목 종합 리스크 리포트
 │   ├── diag_fmp.py            # FMP 엔드포인트 접근 진단
 │   ├── daily_update.py        # 일일 수집 오케스트레이터 (Phase 4, cron 진입점)
-│   ├── check_signals.py       # ★ NEW — 일일 신호 리포트 (Phase 5)
+│   ├── check_signals.py       # 일일 신호 리포트 (Phase 5)
+│   ├── check_predictions.py   # ★ NEW — 선행지표 예측 리포트 (Phase 6)
 │   ├── demo_exceptions.py     # 예외 체계 검증 데모 (2단계 결과물)
 │   ├── demo_http.py           # HTTP 견고성 검증 데모 (3단계 결과물)
 │   └── screen_value.py        # ★ NEW — 가치주 스크리너 실행 (Side Quest)
@@ -179,6 +181,21 @@ QuantBotError
 ---
 
 ## 3. 가장 최근 완료 작업
+
+### Phase 6 — Alternative Data & Predictive Models — 🛠 부분 구현 (2026-06-13), 사인오프 대기
+선행지표로 'N개월 뒤 방향'을 예측. **핵심 2개 관계만 우선 구현** (이미 가진 데이터):
+- `src/predictors.py` 신설 — lead-lag 회귀 엔진:
+  - `to_monthly` / `yoy_growth` (추세 제거 → 레벨 시리즈 허위 상관 방지)
+  - `lagged_correlations` / `analyze_lead_lag` — lag 1~12개월 중 |상관| 최대 lag 선택 후 OLS
+  - **순수 함수** 설계 (월간 시리즈 2개 → 오프라인 테스트), fetch 는 predict_* 만
+- 구현된 관계:
+  - `predict_btc_from_m2` — M2 증가율 → BTC 수익률 (현재 R²=0.06, 약함으로 정직하게 플래그)
+  - `predict_semis_from_korea_exports` — 한국 수출 증가율 → SOXX 수익률 (R²=0.34, 10개월 선행)
+- `LeadLagResult.reliable` (R²≥0.30) + 상관 부호·표본수 노출 → 사용자가 신뢰도 판단
+- `scripts/check_predictions.py` + daily_update 섹션 통합
+- 테스트 84개 (predictors 순수함수 8개 추가). 합성 데이터로 회귀계수·lag·예측방향 정확 복원 검증
+- ⚠️ **미구현 (새 의존성 필요 — 별도 결정 지점)**: Google Trends(pytrends), 위키피디아
+  페이지뷰, SEC EDGAR 13F. fragility·테스트 부담 때문에 핵심 2개와 분리.
 
 ### Phase 5 — Signal Engine — ✅ 완료, 사인오프 받음 (2026-06-13)
 친구 C 봇("저평가 종목 알림")의 진화 버전. 결정론적 신호 생성 (LLM 없음).
