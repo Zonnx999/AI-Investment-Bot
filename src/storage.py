@@ -87,17 +87,61 @@ class Storage:
 
     def __init__(self, db_path: Path | None = None):
         self.db_path = self._resolve_path(db_path)
+        self.is_turso = False
         try:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
-            self._conn = sqlite3.connect(self.db_path)
+            self._conn = self._connect()
             self._conn.executescript(_SCHEMA)
             self._conn.commit()
         except (OSError, sqlite3.Error) as e:
             raise StorageError(f"캐시 DB 초기화 실패: {self.db_path}") from e
-        logger.debug("캐시 DB 연결: %s", self.db_path)
+        logger.debug("DB 연결: %s (turso=%s)", self.db_path, self.is_turso)
+
+    def _connect(self):
+        """백엔드 선택: Turso 설정 시 libSQL 임베디드 레플리카, 아니면 로컬 sqlite3.
+
+        임베디드 레플리카 = 로컬 파일에 읽고/쓰고(빠름) + sync() 로 클라우드 동기화.
+        Turso 설정(db_path 명시 테스트 제외)일 때만 활성 → 테스트는 항상 로컬.
+        """
+        url = settings.turso_database_url
+        # db_path 를 명시 주입한 경우(테스트)는 항상 로컬 — 원격 동기화 안 함
+        if not url or self._db_path_was_injected:
+            return sqlite3.connect(self.db_path)
+
+        try:
+            import libsql_experimental as libsql
+        except ImportError as e:
+            raise StorageError(
+                "Turso 설정됨(TURSO_DATABASE_URL) 이지만 libsql 미설치 — "
+                "pip install -e \".[hosting]\""
+            ) from e
+        try:
+            conn = libsql.connect(
+                str(self.db_path), sync_url=url, auth_token=settings.turso_auth_token
+            )
+        except Exception as e:  # noqa: BLE001 — libsql 예외 타입을 도메인 예외로 변환
+            raise StorageError(f"Turso 연결 실패: {self.db_path}") from e
+        self.is_turso = True
+        self._safe_sync(conn, "초기 pull")
+        logger.info("Turso 임베디드 레플리카 연결: %s", self.db_path)
+        return conn
 
     @staticmethod
-    def _resolve_path(db_path: Path | None) -> Path:
+    def _safe_sync(conn, what: str) -> None:
+        """클라우드 동기화 (best-effort) — 실패해도 로컬 레플리카로 진행."""
+        try:
+            conn.sync()
+            logger.debug("Turso sync(%s) OK", what)
+        except Exception:  # noqa: BLE001 — 동기화 실패가 파이프라인을 막지 않음
+            logger.warning("Turso sync(%s) 실패 — 로컬 레플리카로 진행", what, exc_info=True)
+
+    def sync(self) -> None:
+        """로컬 변경을 클라우드로 push. 쓰기 배치 후 호출. 로컬 sqlite3 면 no-op."""
+        if self.is_turso:
+            self._safe_sync(self._conn, "push")
+
+    def _resolve_path(self, db_path: Path | None) -> Path:
+        self._db_path_was_injected = db_path is not None
         if db_path is not None:
             return Path(db_path)
         env = os.getenv("QUANT_BOT_DB_PATH")

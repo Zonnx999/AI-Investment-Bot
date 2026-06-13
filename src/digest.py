@@ -140,5 +140,8 @@ def send_daily_digest(
 ) -> bool:
     """다이제스트 조립 + 텔레그램 전송 (best-effort). 성공 여부 반환."""
     from src.notifier import send_safe
+    from src.storage import get_storage
 
-    return send_safe(build_daily_digest(tickers=tickers, top_n=top_n))
+    ok = send_safe(build_daily_digest(tickers=tickers, top_n=top_n))
+    get_storage().sync()  # 신호 상태 변경을 클라우드로 push (Turso 시)
+    return ok

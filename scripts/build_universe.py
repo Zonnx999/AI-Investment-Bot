@@ -54,6 +54,10 @@ def main() -> int:
         stats = universe.enrich(max_age=timedelta(days=args.max_age), limit=args.limit)
         print(f"    완료: 보강 {stats['enriched']} / 데이터없음 {stats['no_data']} / 실패 {stats['failed']}")
 
+    # 호스팅 DB(Turso)면 클라우드로 push (로컬 sqlite3 면 no-op)
+    from src.storage import get_storage
+    get_storage().sync()
+
     print("\n[현황]")
     for k, v in universe.stats().items():
         print(f"    {k}: {v}")

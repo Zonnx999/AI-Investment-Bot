@@ -37,6 +37,10 @@ class Settings:
     telegram_bot_token: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
     telegram_chat_id: str = os.getenv("TELEGRAM_CHAT_ID", "")
 
+    # 호스팅 DB (Phase 10) — Turso(libSQL) 임베디드 레플리카. 둘 다 비면 로컬 sqlite3
+    turso_database_url: str = os.getenv("TURSO_DATABASE_URL", "")
+    turso_auth_token: str = os.getenv("TURSO_AUTH_TOKEN", "")
+
     # 경로
     project_root: Path = PROJECT_ROOT
     data_dir: Path = PROJECT_ROOT / "data"

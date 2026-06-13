@@ -13,11 +13,14 @@ _KEY_ATTRS = ("fred_api_key", "fmp_api_key", "anthropic_api_key", "news_api_key"
 
 @pytest.fixture(autouse=True)
 def _cache_off(monkeypatch):
-    """모든 테스트에서 SQLite 캐시 비활성화 — 결과가 캐시 상태에 좌우되지 않도록.
+    """모든 테스트에서 SQLite 캐시 비활성화 + Turso 중립화.
 
-    캐시 자체를 검증하는 test_storage.py 는 이 fixture 를 명시적으로 override.
+    - 결과가 캐시 상태에 좌우되지 않도록 캐시 off (test_storage.py 는 명시 override).
+    - .env 에 TURSO_* 가 있어도 테스트는 항상 로컬 sqlite3 사용 (원격 동기화 금지).
     """
     monkeypatch.setenv("QUANT_BOT_CACHE", "off")
+    object.__setattr__(settings, "turso_database_url", "")
+    object.__setattr__(settings, "turso_auth_token", "")
 
 
 def _set_keys(values: dict[str, str]):

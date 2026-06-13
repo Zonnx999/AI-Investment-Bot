@@ -40,6 +40,9 @@ viz = [
 llm = [
     "anthropic>=0.40.0",  # Phase 8+ (선택적 LLM 레이어)
 ]
+hosting = [
+    "libsql-experimental>=0.0.49",  # Turso(libSQL) 임베디드 레플리카 (Phase 10)
+]
 ui = [
     "streamlit>=1.36.0",  # Phase 11 (선택)
 ]

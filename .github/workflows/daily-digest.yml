@@ -27,7 +27,7 @@ jobs:
           cache: pip
 
       - name: Install
-        run: pip install -e .
+        run: pip install -e ".[hosting]"   # libsql 포함 — Turso 호스팅 DB 접근
 
       # SQLite 캐시/상태(변화 알림용)를 실행 간 best-effort 로 유지.
       # 클라우드 러너는 ephemeral 이라 캐시 미스 시 그냥 콜드 fetch + 첫 실행 취급.
@@ -44,6 +44,9 @@ jobs:
           FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # Turso 호스팅 DB — 풀유니버스를 클라우드에서도 사용 (없으면 워치리스트 폴백)
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
         run: |
           python - <<'PY'

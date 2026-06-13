@@ -187,7 +187,19 @@ VaR/ES 는 수익률 시리즈만 받음 (7단계). 가격→수익률은 `retur
 
 ## 3. 가장 최근 완료 작업
 
-### ▶️ 지금 여기 — 다음 작업 (2026-06-13 사용자 방향 설정)
+### Phase 10 — 데이터 호스팅 (Turso) — 🛠 코드 완료 (2026-06-13), 사용자 토큰 검증 대기
+노트북 이동성 + 클라우드 풀유니버스 해결. **Turso(libSQL) 임베디드 레플리카** 채택.
+- `storage.py` 백엔드 선택: `TURSO_DATABASE_URL` 있으면 libSQL(로컬 레플리카+클라우드 sync),
+  없으면 로컬 sqlite3 (기존 동작). db_path 명시 주입 시 항상 로컬 (테스트 안전)
+- `Storage.sync()` — 쓰기 배치 후 클라우드 push (build_universe/daily_update/send_digest 끝에).
+  best-effort: 동기화 실패가 파이프라인을 막지 않음
+- libsql 검증 완료: executescript / 복합키 ON CONFLICT / INSERT OR REPLACE / sync() 전부 동작
+- `pip install -e ".[hosting]"` (libsql-experimental), `scripts/turso_setup.py` 점검 도구
+- 워크플로: `.[hosting]` 설치 + TURSO_* 시크릿 → 클라우드 다이제스트도 풀유니버스 사용
+- 키 4종 마스킹 추가 (krx/turso 등). 테스트 110개 그린 (전부 로컬 sqlite3)
+- ⏳ 사용자: Turso 가입 → db 생성 → URL/토큰 .env + GitHub Secrets, `turso_setup.py` 검증
+
+### ▶️ 다음 작업 (2026-06-13 사용자 방향 설정)
 리팩토링 + Phase 0–8 완료. 사용자가 새 방향 4개를 추가 (상세·우선순위는 ROADMAP §4):
 1. **Phase 10 호스팅** ⭐ (블로커) — 노트북 이동 + 클라우드 풀유니버스. Turso/Supabase 등 검토
 2. **Phase 9 KRX** ⭐ — 한국 전 종목 전수조사 (KRX_API_KEY 등록됨, AUTH_KEY 헤더 확인.

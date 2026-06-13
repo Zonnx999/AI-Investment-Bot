@@ -163,6 +163,7 @@ def main() -> int:
         print(f"  {status} {name:<34} {elapsed:>5.1f}s  {detail}")
 
     print("-" * 78)
+    get_storage().sync()  # 호스팅 DB(Turso)면 클라우드로 push
     stats = get_storage().stats()
     total_rows = sum(stats.values())
     print(f"  캐시: {total_rows}행 / {len(stats)}개 네임스페이스  ({get_storage().db_path})")
