@@ -186,6 +186,19 @@ VaR/ES 는 수익률 시리즈만 받음 (7단계). 가격→수익률은 `retur
 
 ## 3. 가장 최근 완료 작업
 
+### Phase 7 — Telegram 알림 봇 — 🛠 구현 완료 (2026-06-13), 스케줄링만 남음
+디스코드는 사용자 요청으로 제외 (텔레그램 단일 채널).
+- `src/notifier.py` — 표준 HTTP 세션으로 Telegram Bot API 직접 POST (python-telegram-bot
+  의존성 없음). `send_telegram`(Markdown, 4096 클램프), `get_updates`(chat_id 발견),
+  `send_safe`(best-effort — 알림 실패가 배치를 안 죽임). 봇 토큰은 마스킹 대상 등록
+- `src/digest.py` — `format_digest` 순수 포매터 (국면+알림+팩터+예측 → 1 메시지),
+  `build_daily_digest`/`send_daily_digest` 오케스트레이터
+- `scripts/telegram_setup.py` (chat_id 발견 + --test), `scripts/send_digest.py` (--dry-run)
+- config: TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID. **사용자 연결 완료 + 실제 전송 검증됨**
+- 테스트 99개 (notifier 6 + digest 8 추가, 전부 오프라인/로컬서버)
+- ⏳ 남은 것: 자동 스케줄 (cron/launchd vs GitHub Actions) + 발송 시각 확정
+
+
 ### Phase 6 — Alternative Data & Predictive Models — ✅ 완료, 사인오프 받음 (2026-06-13)
 선행지표로 'N개월 뒤 방향'을 예측. 사용자 선택으로 **FRED/yfinance 관계 + 위키피디아** 보강.
 - `src/predictors.py` — lead-lag 회귀 엔진:
