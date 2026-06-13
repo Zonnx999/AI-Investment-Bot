@@ -109,11 +109,17 @@ def build_daily_digest(
 
     tk = tickers
     if tk is None:
-        try:
-            screened = select_screened_tickers(n=top_n)
-        except QuantBotError as e:
-            logger.warning("스크리너 실패 — 기본 종목으로 폴백: %s", e)
-            screened = []
+        # 1순위: 유니버스 DB 전수스캔 상위 (오프라인, API 0콜). 비어있으면
+        # 2순위: 라이브 스크리너(40종목 워치리스트). 그것도 실패하면 기본 종목.
+        from src import universe
+
+        screened = universe.top_symbols(n=top_n, market="US")
+        if not screened:
+            try:
+                screened = select_screened_tickers(n=top_n)
+            except QuantBotError as e:
+                logger.warning("스크리너 실패 — 기본 종목으로 폴백: %s", e)
+                screened = []
         tk = tuple(screened) or DEFAULT_SIGNAL_TICKERS
 
     report = generate_signal_report(tickers=tk, screen_tickers=None)

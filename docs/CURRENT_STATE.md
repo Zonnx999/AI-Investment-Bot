@@ -29,6 +29,7 @@ AI-Investment-Bot/
 │   ├── http.py                # 표준 HTTP 세션 (retry/timeout/키 마스킹)
 │   ├── storage.py             # SQLite 캐시(@cached) + state 테이블 (Phase 4/5)
 │   ├── signals.py             # 신호 엔진: 팩터/스크리닝/알림 (Phase 5)
+│   ├── universe.py            # ★ NEW — 전 종목 DB + 오프라인 전수 스캔 (Phase 8)
 │   ├── predictors.py          # ★ NEW — lead-lag 예측 (M2→BTC, 한국수출→반도체) (Phase 6)
 │   ├── data_fetcher.py        # 모든 외부 API 호출 (전 함수 투명 캐싱)
 │   ├── macro_analyzer.py      # cross-asset + regime classifier
@@ -185,6 +186,25 @@ VaR/ES 는 수익률 시리즈만 받음 (7단계). 가격→수익률은 `retur
 ---
 
 ## 3. 가장 최근 완료 작업
+
+### Phase 8 — 전 종목 유니버스 DB + 오프라인 전수 스크리닝 — 🛠 구현 완료 (2026-06-13), 사인오프 대기
+고정 40종목 워치리스트 → FMP 전 종목 발굴 + DB화 + 오프라인 전수조사. ($30 FMP 활용)
+- **2단계 깔때기**: `company-screener`(서버사이드 시총 필터, 1콜)로 유니버스 발굴 →
+  종목별 `key-metrics`로 점수 보강(주1회 배치, ~4.5종목/초) → 이후 스캔은 **API 0콜 오프라인**
+- `src/data_fetcher.fetch_company_screener` — 시총>$1B 필터 발굴 (price/섹터/배당 포함)
+- `src/universe.py` — `discover`/`enrich`(재개가능)/`scan`/`lookup`/`top_symbols`.
+  SQLite `screened` 테이블, **복합 PK (symbol, market)** — 주식 'M'(Macy's) vs 크립토 'M' 충돌 방지
+- `scripts/build_universe.py`(주1회 배치) + `scripts/scan.py`(오프라인 발굴/`--check` 조회)
+- 점수는 `screener.calculate_*` 재사용. 크립토는 CoinGecko(시총상위, FMP 쿼터 0)로 별도
+- 다이제스트 발굴 종목이 유니버스 DB 전수스캔 상위에서 나옴 (DB 비면 라이브 스크리너 폴백)
+- **실측**: US 발굴 2189종목 / KR 10(ADR) / 크립토 59. 보강 ~4.5종목/초 (US 전체 ~8분)
+- ⚠️ **KR 한계**: FMP엔 실제 KOSPI/KOSDAQ 없음 — 미국상장 ADR 대기업 ~10개만. 진짜 한국
+  전수조사는 추후 KRX/pykrx 소스 필요. 크립토 점수는 주식 점수와 비교 불가 → 스캔에서 시장별 분리
+- ⚠️ **클라우드 미해결**: 유니버스 DB는 로컬 파일 → GitHub Actions(ephemeral)엔 없음.
+  현재 클라우드 다이제스트는 40종목 워치리스트로 폴백. 전체 유니버스를 클라우드에 쓰려면
+  DB 영속화 결정 필요 (로컬 실행 vs DB 커밋 vs 외부 저장소)
+- 테스트: universe 8개 추가, 전부 오프라인(tmp DB)
+
 
 ### Phase 7 — Telegram 알림 봇 — ✅ 구현 완료 (2026-06-13), GitHub Secrets 등록 대기
 디스코드는 사용자 요청으로 제외 (텔레그램 단일 채널).

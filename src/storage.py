@@ -240,6 +240,15 @@ class Storage:
         ).fetchall()
         return dict(rows)
 
+    @property
+    def conn(self) -> sqlite3.Connection:
+        """원시 connection 접근 — universe.py 등 자체 테이블을 관리하는 모듈용.
+
+        cache/state 외의 영속 테이블(예: screened 유니버스)은 소유 모듈이
+        이 connection 으로 자기 스키마를 생성·관리합니다.
+        """
+        return self._conn
+
     def close(self) -> None:
         self._conn.close()
 
