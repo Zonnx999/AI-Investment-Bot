@@ -36,7 +36,8 @@ AI-Investment-Bot/
 │   ├── macro_analyzer.py  # 자산 간 상관관계, 시장 국면 분류
 │   ├── risk_engine.py     # VaR / MDD / Monte Carlo / 시나리오
 │   ├── screener.py        # 가치주 스크리너
-│   ├── storage.py         # SQLite 캐시 — 같은 데이터 하루 두 번 안 부름
+│   ├── storage.py         # SQLite 캐시 + state 테이블
+│   ├── signals.py         # 신호 엔진 (팩터/스크리닝/알림)
 │   └── utils.py           # 공용 헬퍼 (종가 추출, 컬럼 후보 선택)
 │
 ├── scripts/               # 실행 스크립트
@@ -48,6 +49,8 @@ AI-Investment-Bot/
 │   ├── check_market_regime.py # ★ 매일 아침 시장 조망 ★
 │   ├── check_risk.py          # ★ 종목 리스크 리포트 ★
 │   ├── screen_value.py        # ★ 가치주 스크리너 ★
+│   ├── daily_update.py        # ★ 일일 수집 오케스트레이터 (cron 진입점) ★
+│   ├── check_signals.py       # ★ 일일 신호 리포트 (팩터/발굴/알림) ★
 │   ├── diag_fmp.py            # FMP 엔드포인트 접근 진단
 │   └── demo_exceptions.py     # 예외 체계 검증 데모
 │
@@ -58,7 +61,7 @@ AI-Investment-Bot/
 ├── data/                  # 데이터 캐시 (gitignore)
 ├── notebooks/             # 실험용 노트북 (gitignore)
 ├── logs/                  # quant_bot.log (gitignore)
-└── tests/                 # pytest — 오프라인 테스트 40개 (python -m pytest)
+└── tests/                 # pytest — 오프라인 테스트 76개 (python -m pytest)
 ```
 
 ## 첫 실행 (Quick Start)
@@ -87,6 +90,10 @@ python scripts/hello_world.py
 # ★ 매일 아침 1회 — 모든 데이터 수집 + 캐시 워밍 (이후 다른 스크립트는 캐시 적중)
 python scripts/daily_update.py
 python scripts/daily_update.py --refresh   # 캐시 무시하고 새로 수집
+
+# ★ 일일 신호 리포트 — 팩터 점수 + 발굴 종목 + 변화 알림 (Phase 5)
+python scripts/check_signals.py
+python scripts/check_signals.py --screen   # 미국 워치리스트 발굴 포함
 
 # 주식 + 암호화폐 + 금 (API 키 불필요)
 python scripts/hello_world.py
@@ -137,7 +144,7 @@ from src.data_fetcher import (
 
 ## 로드맵
 
-현재 위치: **Phase 0–4 + 가치주 스크리너 + 리팩토링 8단계 완료. 다음은 Phase 5 (Signal Engine).**
+현재 위치: **Phase 0–5 + 가치주 스크리너 + 리팩토링 8단계 완료. 다음은 Phase 6 (대체 데이터).**
 
 - [x] Phase 0 — 폴더 구조 + Hello World
 - [x] Phase 1 — `data_fetcher.py` (yfinance + FRED + CoinGecko + 한국 무역통계)
@@ -146,7 +153,7 @@ from src.data_fetcher import (
 - [x] Side Quest — 가치주 스크리너 + HTML 대시보드
 - [x] 리팩토링 1–8단계 — 로깅 → 예외 → HTTP → DRY → 패키지화 → 테스트 → 결정론 → API 정합성
 - [x] Phase 4 — Storage & Daily Pipeline (SQLite 캐시 + `daily_update.py` 오케스트레이터)
-- [ ] Phase 5 — Signal Engine (스크리닝 룰 + 알림 룰 + 팩터 신호)
+- [x] Phase 5 — Signal Engine (팩터 점수 + 스크리닝 룰 + 변화 알림)
 - [ ] Phase 6 — 대체 데이터 & 예측 모델 (M2→BTC, 한국 수출→반도체 등)
 - [ ] Phase 7 — Telegram/Discord 알림 봇 (매일 아침 7시 KST 자동 push)
 - [ ] Phase 8+ (선택) — LLM 요약 한 줄 / 뉴스 센티먼트 / 백테스트 / Streamlit

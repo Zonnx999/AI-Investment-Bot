@@ -87,6 +87,18 @@ def _section_screener() -> str:
     return f"{len(rows)}종목 스캔, 1위 {head}"
 
 
+def _make_signals_section(tickers: list[str]):
+    def run() -> str:
+        from src.signals import generate_signal_report
+
+        report = generate_signal_report(tickers=tuple(tickers))
+        n_alerts = len(report.alerts)
+        seed = " (첫 실행 — 상태 시딩)" if report.first_run else ""
+        return f"팩터 {len(report.factors)}종목, 알림 {n_alerts}건{seed}"
+
+    return run
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="일일 데이터 수집 오케스트레이터")
     parser.add_argument("--refresh", action="store_true", help="캐시 무시하고 전부 새로 수집")
@@ -108,6 +120,7 @@ def main() -> int:
         ("암호화폐 (BTC/ETH)", _section_crypto),
     ]
     sections += [(f"리스크 리포트 {t}", _make_risk_section(t)) for t in risk_tickers]
+    sections.append(("신호 엔진 (팩터 + 알림)", _make_signals_section(risk_tickers)))
     if args.screen:
         sections.append(("가치주 스크리너 (미국)", _section_screener))
 

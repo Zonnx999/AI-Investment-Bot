@@ -27,7 +27,8 @@ AI-Investment-Bot/
 │   ├── logger.py              # TZFormatter (KST+0900) + setup_logging + get_logger
 │   ├── exceptions.py          # 도메인 예외 계층
 │   ├── http.py                # 표준 HTTP 세션 (retry/timeout/키 마스킹)
-│   ├── storage.py             # ★ NEW — SQLite 캐시 + @cached 데코레이터 (Phase 4)
+│   ├── storage.py             # SQLite 캐시(@cached) + state 테이블 (Phase 4/5)
+│   ├── signals.py             # ★ NEW — 신호 엔진: 팩터/스크리닝/알림 (Phase 5)
 │   ├── data_fetcher.py        # 모든 외부 API 호출 (전 함수 투명 캐싱)
 │   ├── macro_analyzer.py      # cross-asset + regime classifier
 │   ├── risk_engine.py         # VaR / MDD / MC / Scenario
@@ -43,7 +44,8 @@ AI-Investment-Bot/
 │   ├── check_fundamentals.py  # FMP 5년 재무제표 (FMP 실패시 yfinance fallback)
 │   ├── check_risk.py          # 종목 종합 리스크 리포트
 │   ├── diag_fmp.py            # FMP 엔드포인트 접근 진단
-│   ├── daily_update.py        # ★ NEW — 일일 수집 오케스트레이터 (Phase 4, cron 진입점)
+│   ├── daily_update.py        # 일일 수집 오케스트레이터 (Phase 4, cron 진입점)
+│   ├── check_signals.py       # ★ NEW — 일일 신호 리포트 (Phase 5)
 │   ├── demo_exceptions.py     # 예외 체계 검증 데모 (2단계 결과물)
 │   ├── demo_http.py           # HTTP 견고성 검증 데모 (3단계 결과물)
 │   └── screen_value.py        # ★ NEW — 가치주 스크리너 실행 (Side Quest)
@@ -177,6 +179,22 @@ QuantBotError
 ---
 
 ## 3. 가장 최근 완료 작업
+
+### Phase 5 — Signal Engine — 🛠 구현 완료 (2026-06-13), 사인오프 대기
+친구 C 봇("저평가 종목 알림")의 진화 버전. 결정론적 신호 생성 (LLM 없음).
+- `src/signals.py` 신설 — 3종 신호:
+  1. **팩터 점수** — momentum(가격) + value/quality(screener 점수 재사용) 각 0~100 + 종합
+  2. **스크리닝 룰** — ROE>10% AND FCF yield 양수 AND P/E ≤ 워치리스트 중간값 (적자종목은 P/E 룰 면제)
+  3. **알림 룰** — 국면 전환 / 자산 낙폭 -10% 돌파 / 변동성 ×1.25 급등
+- **설계**: 점수·룰·알림 판정은 전부 **순수 함수** (데이터를 인자로 → 오프라인 테스트).
+  fetch + 상태 관리는 `generate_signal_report()` 오케스트레이터만 담당
+- **상태 비교**: `storage.put_state/get_state` (TTL 없는 영속 테이블 신설) 에 직전 실행값
+  보관 → 알림은 '변화'에만 발화 (중복 알림 방지, 회복 알림 포함)
+- **첫 실행 일관성**: 비교 기준 없는 첫 실행은 모든 변화 알림 생략 + 상태만 시딩
+  (regime/낙폭/변동성 일관 처리 — 작업 중 잡은 버그)
+- `scripts/check_signals.py` 신설 (`--screen` 옵션), `daily_update.py` 에 신호 섹션 통합
+- 테스트 76개 (signals 순수함수 21개 + state 4개 추가). 실데이터 검증:
+  변화없음→알림0, 상태주입→국면전환·낙폭돌파·변동성급등 3종 발화 확인
 
 ### Phase 4 — Storage & Daily Pipeline — ✅ 완료, 사인오프 받음 (2026-06-13)
 - `src/storage.py` 신설 — SQLite 캐시 (`data/quant_bot.db`, gitignore):

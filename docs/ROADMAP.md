@@ -79,11 +79,12 @@
 - ✅ FMP 한도 보호: 재무제표 TTL 7일, 시세 30분
 - 사인오프 후 다음: **Phase 5 (Signal Engine)**
 
-### Phase 5 — Signal Engine ⭐ (친구 C 봇의 진화 버전)
-- **스크리닝 룰**: "P/E < 업종 중간값, FCF 양수, ROE > 10%" 같은 필터로 종목 발굴
-- **알림 룰**: 리스크 점수 급변, 시장 국면 전환, 자산 낙폭 임계 초과
-- **팩터 신호**: momentum, value, quality 세 가지 기본
-- 이 단계가 사용자가 영감 받은 친구의 C 봇 자리
+### Phase 5 — Signal Engine ⭐ (친구 C 봇의 진화 버전) — 🛠 구현 완료 (2026-06-13), 사인오프 대기
+- ✅ **스크리닝 룰**: ROE>10% AND FCF yield 양수 AND P/E ≤ 워치리스트 중간값 (`apply_screen_rules`)
+- ✅ **알림 룰**: 시장 국면 전환, 자산 낙폭 -10% 돌파, 변동성 ×1.25 급등 (상태 비교 기반)
+- ✅ **팩터 신호**: momentum / value / quality + 종합 (`factor_scores`)
+- ✅ `src/signals.py` + `scripts/check_signals.py` + daily_update 통합
+- 사인오프 후 다음: **Phase 6 (Alternative Data & Predictive Models)**
 
 ### Phase 6 — Alternative Data & Predictive Models ⭐⭐
 사용자가 가장 중요하게 강조한 부분. 다양한 무료 대체 데이터로 가격·매출을 선행 예측:

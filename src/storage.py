@@ -55,6 +55,15 @@ CREATE TABLE IF NOT EXISTS cache (
     fetched_at TEXT NOT NULL,   -- ISO 8601, UTC
     PRIMARY KEY (namespace, key)
 );
+
+-- 캐시와 달리 TTL 없는 영속 상태 (예: 신호 엔진의 '지난 실행 시점 값')
+CREATE TABLE IF NOT EXISTS state (
+    namespace  TEXT NOT NULL,
+    key        TEXT NOT NULL,
+    payload    TEXT NOT NULL,   -- JSON
+    updated_at TEXT NOT NULL,   -- ISO 8601, UTC
+    PRIMARY KEY (namespace, key)
+);
 """
 
 
@@ -81,7 +90,7 @@ class Storage:
         try:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
             self._conn = sqlite3.connect(self.db_path)
-            self._conn.execute(_SCHEMA)
+            self._conn.executescript(_SCHEMA)
             self._conn.commit()
         except (OSError, sqlite3.Error) as e:
             raise StorageError(f"캐시 DB 초기화 실패: {self.db_path}") from e
@@ -184,6 +193,32 @@ class Storage:
             return json.loads(payload)
         except json.JSONDecodeError:
             logger.warning("캐시 payload 손상 (%s/%s) — miss 취급", namespace, key)
+            return None
+
+    # ---------------- 영속 상태 (TTL 없음 — 신호 엔진의 실행 간 비교용) ----------------
+
+    def put_state(self, namespace: str, key: str, obj: Any) -> None:
+        """상태 저장. 캐시와 달리 만료 없음 — 다음 실행에서 '이전 값' 으로 사용."""
+        try:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO state (namespace, key, payload, updated_at) "
+                "VALUES (?, ?, ?, ?)",
+                (namespace, key, json.dumps(obj, ensure_ascii=False), _utcnow().isoformat()),
+            )
+            self._conn.commit()
+        except sqlite3.Error:
+            logger.warning("상태 쓰기 실패 (%s/%s) — 무시", namespace, key, exc_info=True)
+
+    def get_state(self, namespace: str, key: str) -> Any | None:
+        """상태 조회. 없거나 손상 시 None (= 첫 실행 취급)."""
+        try:
+            row = self._conn.execute(
+                "SELECT payload FROM state WHERE namespace=? AND key=?",
+                (namespace, key),
+            ).fetchone()
+            return json.loads(row[0]) if row else None
+        except (sqlite3.Error, json.JSONDecodeError):
+            logger.warning("상태 읽기 실패 (%s/%s) — 첫 실행 취급", namespace, key, exc_info=True)
             return None
 
     # ---------------- 관리 ----------------
