@@ -186,7 +186,7 @@ VaR/ES 는 수익률 시리즈만 받음 (7단계). 가격→수익률은 `retur
 
 ## 3. 가장 최근 완료 작업
 
-### Phase 7 — Telegram 알림 봇 — 🛠 구현 완료 (2026-06-13), 스케줄링만 남음
+### Phase 7 — Telegram 알림 봇 — ✅ 구현 완료 (2026-06-13), GitHub Secrets 등록 대기
 디스코드는 사용자 요청으로 제외 (텔레그램 단일 채널).
 - `src/notifier.py` — 표준 HTTP 세션으로 Telegram Bot API 직접 POST (python-telegram-bot
   의존성 없음). `send_telegram`(Markdown, 4096 클램프), `get_updates`(chat_id 발견),
@@ -196,7 +196,9 @@ VaR/ES 는 수익률 시리즈만 받음 (7단계). 가격→수익률은 `retur
 - `scripts/telegram_setup.py` (chat_id 발견 + --test), `scripts/send_digest.py` (--dry-run)
 - config: TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID. **사용자 연결 완료 + 실제 전송 검증됨**
 - 테스트 99개 (notifier 6 + digest 8 추가, 전부 오프라인/로컬서버)
-- ⏳ 남은 것: 자동 스케줄 (cron/launchd vs GitHub Actions) + 발송 시각 확정
+- ✅ `.github/workflows/daily-digest.yml`: GitHub Actions 로 한국(08:30 KST)·미국(09:00 ET)
+  장 30분 전 2회. UTC cron 3개 + 뉴욕시각 게이트로 DST 대응. 수동 실행 버튼 포함
+- ⏳ 사용자: GitHub Secrets 에 FRED_API_KEY/FMP_API_KEY/TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID 등록
 
 
 ### Phase 6 — Alternative Data & Predictive Models — ✅ 완료, 사인오프 받음 (2026-06-13)

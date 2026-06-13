@@ -1,0 +1,64 @@
+name: Daily Digest
+
+# 한국·미국 장 시작 30분 전 1통씩, 총 2회/일.
+#   · 한국: KRX 09:00 개장 → 08:30 KST = 23:30 UTC (한국은 DST 없음)
+#   · 미국: NYSE 09:30 개장 → 09:00 ET. GitHub cron 은 UTC 고정이라 DST 를 못 따라가므로
+#          13:00·14:00 UTC 둘 다 트리거하고, 아래 게이트로 '뉴욕 09시'일 때만 1회 전송.
+on:
+  schedule:
+    - cron: "30 23 * * 0-4"   # 08:30 KST (월~금) — UTC 일~목
+    - cron: "0 13 * * 1-5"    # 09:00 ET (서머타임, 3~11월)
+    - cron: "0 14 * * 1-5"    # 09:00 ET (겨울, 11~3월)
+  workflow_dispatch: {}        # 수동 실행 버튼 (게이트 우회 — 언제든 테스트 전송)
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: pip install -e .
+
+      # SQLite 캐시/상태(변화 알림용)를 실행 간 best-effort 로 유지.
+      # 클라우드 러너는 ephemeral 이라 캐시 미스 시 그냥 콜드 fetch + 첫 실행 취급.
+      - name: Restore data cache
+        uses: actions/cache@v4
+        with:
+          path: data
+          key: quantbot-data-${{ github.run_id }}
+          restore-keys: quantbot-data-
+
+      - name: Send digest (장 시작 30분 전 창에만)
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+        run: |
+          python - <<'PY'
+          import os, sys, subprocess
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+
+          # 수동 실행은 항상 전송 (테스트용)
+          if os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
+              send = True
+          else:
+              seoul = datetime.now(ZoneInfo("Asia/Seoul"))
+              ny = datetime.now(ZoneInfo("America/New_York"))
+              # 한국 08:30 창 또는 뉴욕 09시 창 (DST 무관하게 정확히 한 번)
+              send = (seoul.hour == 8 and 25 <= seoul.minute <= 40) or \
+                     (ny.hour == 9 and ny.minute <= 15)
+
+          if not send:
+              print("전송 창이 아님 — 스킵")
+              sys.exit(0)
+          sys.exit(subprocess.call([sys.executable, "scripts/send_digest.py"]))
+          PY

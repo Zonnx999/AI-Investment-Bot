@@ -63,7 +63,7 @@ AI-Investment-Bot/
 ├── data/                  # 데이터 캐시 (gitignore)
 ├── notebooks/             # 실험용 노트북 (gitignore)
 ├── logs/                  # quant_bot.log (gitignore)
-└── tests/                 # pytest — 오프라인 테스트 85개 (python -m pytest)
+└── tests/                 # pytest — 오프라인 테스트 99개 (python -m pytest)
 ```
 
 ## 첫 실행 (Quick Start)
@@ -162,7 +162,7 @@ from src.data_fetcher import (
 - [x] Phase 5 — Signal Engine (팩터 점수 + 스크리닝 룰 + 변화 알림)
 - [x] Phase 6 — 선행지표 예측 (7개 lead-lag 관계 + 위키피디아 대체 데이터)
 - [ ] Phase 6 (선택 잔여) — Google Trends / SEC EDGAR (새 의존성·우선순위 낮음)
-- [ ] Phase 7 — Telegram/Discord 알림 봇 (매일 아침 7시 KST 자동 push)
+- [x] Phase 7 — Telegram 알림 봇 (GitHub Actions, 한·미 장 30분 전 2회 자동 push)
 - [ ] Phase 8+ (선택) — LLM 요약 한 줄 / 뉴스 센티먼트 / 백테스트 / Streamlit
 
 세부 내용과 단계별 Definition of Done 은 [docs/ROADMAP.md](docs/ROADMAP.md) 참고.

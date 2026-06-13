@@ -104,11 +104,14 @@
 - ⏳ **SEC EDGAR 13F** (무료지만 파싱 부담 + 45일 지연으로 '선행' 의미 약함)
 - ❌ 신용카드 결제 데이터 — 월 수천 달러, 비현실적
 
-### Phase 7 — Telegram/Discord 알림 봇
-- 스케줄러 (cron 또는 GitHub Actions) 로 매일 아침 7시 KST 자동 실행
-- Phase 5 신호 + Phase 6 예측을 텔레그램으로 push
-- 친구분 C 봇의 정신을 잇되 데이터 풍부함과 신호 정교함을 한 단계 끌어올린 형태
-- 라이브러리: `python-telegram-bot`
+### Phase 7 — Telegram 알림 봇 — ✅ 구현 완료 (2026-06-13), GitHub Secrets 등록 대기
+- ✅ `src/notifier.py` (표준 HTTP POST, 의존성 0) + `src/digest.py` (메시지 조립)
+- ✅ `scripts/telegram_setup.py` (chat_id) + `scripts/send_digest.py` (cron 진입점)
+- ✅ 디스코드 제외 (사용자 요청, 텔레그램 단일). 봇 연결 + 실제 전송 검증 완료
+- ✅ `.github/workflows/daily-digest.yml` — 한국(08:30 KST)·미국(09:00 ET) 장 30분 전 2회.
+     UTC cron 3개 + 뉴욕 시각 게이트로 DST 자동 대응
+- ⏳ 사용자 작업: GitHub 저장소 Secrets 에 키 4개 등록 (FRED/FMP/TELEGRAM_*)
+- ⚠️ 클라우드 러너는 ephemeral → 변화 알림 상태는 actions/cache 로 best-effort 유지
 
 ### Phase 8 (선택) — LLM 요약 한 줄
 - Phase 7 push 메시지에 Claude Haiku 호출 한 번 추가
