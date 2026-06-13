@@ -66,6 +66,7 @@ TTL_QUOTE = timedelta(minutes=30)      # FMP 실시간 시세
 TTL_STATEMENTS = timedelta(days=7)     # 재무제표 — 분기에 한 번 바뀜 (FMP 한도 보호 핵심)
 TTL_PROFILE = timedelta(days=30)       # 회사 프로필 — 거의 불변
 TTL_SNAPSHOT = timedelta(hours=6)      # yfinance .info 스냅샷
+TTL_WIKI = timedelta(days=1)           # 위키피디아 페이지뷰 — 일 단위 갱신
 
 
 @cached("prices", TTL_PRICES, "dataframe")
@@ -567,6 +568,97 @@ def fetch_ratios(
     return _fmp_to_dataframe(data)
 
 
-# TODO(다음 Phase 1.5 — 선택 사항):
-# - SQLite 캐시 레이어 (같은 데이터 두 번 안 부르도록 src/storage.py 신설)
+# ----------------------------------------------------------------------
+# 위키피디아 페이지뷰 (Wikimedia REST API — 키 불필요, Phase 6 대체 데이터)
+# ----------------------------------------------------------------------
+#
+# 대중 관심도 프록시. 예: "Bitcoin" 페이지뷰 → 리테일 암호화폐 관심 → 가격.
+# REST API 는 키가 필요 없지만 **descriptive User-Agent 가 필수** (없으면 403/429).
+# 데이터는 2015-07 부터, 일별 granularity 직접 제공.
+# ----------------------------------------------------------------------
+
+WIKI_PAGEVIEWS_BASE = (
+    "https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article"
+)
+# Wikimedia 정책상 연락처가 담긴 식별 가능한 UA 요구
+WIKI_USER_AGENT = "AI-Investment-Bot/0.6 (personal quant research; https://github.com/Zonnx999/AI-Investment-Bot)"
+
+
+def _parse_wikipedia_items(items: list[dict], article: str) -> pd.Series:
+    """Wikimedia 응답 items → 일별 페이지뷰 Series (순수 함수, 오프라인 테스트용)."""
+    s = pd.Series(
+        {
+            pd.to_datetime(it["timestamp"][:8], format="%Y%m%d"): float(it["views"])
+            for it in items
+        },
+        name=article,
+        dtype=float,
+    )
+    s.index.name = "date"
+    return s.sort_index()
+
+
+@cached("wikipedia", TTL_WIKI, "series")
+def fetch_wikipedia_pageviews(
+    article: str = "Bitcoin",
+    days: int = 3650,
+    project: str = "en.wikipedia",
+) -> pd.Series:
+    """위키피디아 문서의 일별 조회수 (대중 관심도 프록시).
+
+    Parameters
+    ----------
+    article : str
+        문서 제목. 공백은 밑줄. 예: "Bitcoin", "Tesla,_Inc.".
+    days : int
+        오늘로부터 며칠 전까지. 기본 10년 (lead-lag 분석용 장기 시계열).
+
+    Raises
+    ------
+    DataValidationError   문서 없음(404) 또는 빈 응답.
+    ApiHttpError          기타 HTTP 4xx/5xx.
+    ApiTimeoutError / ApiConnectionError   네트워크 실패.
+    """
+    import requests
+    from urllib.parse import quote
+
+    end = datetime.utcnow()
+    start = end - timedelta(days=days)
+    url = (
+        f"{WIKI_PAGEVIEWS_BASE}/{project}/all-access/user/"
+        f"{quote(article, safe='')}/daily/{start:%Y%m%d}/{end:%Y%m%d}"
+    )
+
+    try:
+        response = get_http_session().get(url, headers={"User-Agent": WIKI_USER_AGENT})
+    except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+        if is_timeout(e):
+            raise ApiTimeoutError(
+                f"위키피디아 '{article}' 타임아웃 (재시도 {RETRY_TOTAL}회 포함)",
+                source="Wikipedia",
+            ) from e
+        raise ApiConnectionError(
+            f"위키피디아 '{article}' 연결 실패", source="Wikipedia"
+        ) from e
+
+    if response.status_code == 404:
+        raise DataValidationError(
+            f"위키피디아 문서 '{article}' 없음 (제목/언어 확인)", source="Wikipedia"
+        )
+    if not response.ok:
+        raise ApiHttpError(
+            f"위키피디아 '{article}': HTTP {response.status_code}",
+            status_code=response.status_code, source="Wikipedia",
+        )
+
+    items = response.json().get("items", [])
+    if not items:
+        raise DataValidationError(
+            f"위키피디아 '{article}' 빈 응답", source="Wikipedia"
+        )
+    return _parse_wikipedia_items(items, article)
+
+
+# TODO(향후 대체 데이터 — 새 의존성 필요, 사용자 우선순위 대기):
+# - Google Trends (pytrends, fragile), SEC EDGAR 13F (파싱 부담)
 # - 한국은행 ECOS API (한국 거시지표 더 풍부 — 금리/환율/물가/산업생산)

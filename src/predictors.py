@@ -7,9 +7,14 @@ Phase 6 — Alternative Data & Predictive Models.
 찾아 "N개월 뒤 방향"을 예측합니다. 사용자가 가장 강조한 부분 —
 가격만 보지 않고 거시·대체 데이터로 펀더멘털을 선행 예측.
 
-현재 구현된 관계 (둘 다 이미 가진 데이터로 가능):
-  · M2 통화량 증가율 → 비트코인 수익률   (유동성 → 위험자산)
-  · 한국 수출 증가율 → 반도체 ETF 수익률 (한국 수출은 글로벌 반도체 사이클 선행)
+현재 구현된 관계:
+  · M2 통화량 증가율 → 비트코인 수익률      (유동성 → 위험자산)
+  · 한국 수출 증가율 → 반도체 ETF 수익률    (한국 수출은 글로벌 반도체 사이클 선행)
+  · 건축허가 증가율 → 주택건설 ETF(XHB)     (허가 → 착공 → 매출, 명확한 선행)
+  · 소비자심리 증가율 → 소비재 ETF(XLY)     (심리 → 지출)
+  · 달러지수 증가율 → 신흥국 ETF(EEM)       (달러 강세 → 신흥국 역풍, 음의 관계)
+  · 구리/금 비율 증가율 → 경기민감(SPY)     ('닥터 코퍼' 실물경기 체온계)
+  · 위키피디아 관심 → 비트코인              (대중 관심 — 대체 데이터, 키 불필요)
 
 설계
 ----
@@ -229,8 +234,84 @@ def predict_semis_from_korea_exports(
     )
 
 
+def _fred_to_etf(
+    series_id: str, etf: str, leading_name: str, max_lag: int,
+) -> LeadLagResult:
+    """FRED 월간 지표(YoY) → ETF 수익률(YoY) 공통 헬퍼."""
+    from src.data_fetcher import fetch_macro, fetch_prices
+    from src.utils import close_series
+
+    lead_yoy = yoy_growth(to_monthly(fetch_macro(series_id, start="2013-01-01")))
+    etf_yoy = yoy_growth(to_monthly(close_series(fetch_prices(etf, period="max"))))
+    return analyze_lead_lag(lead_yoy, etf_yoy, leading_name, f"{etf} 수익률", max_lag=max_lag)
+
+
+def predict_homebuilders_from_permits(
+    etf: str = "XHB", max_lag: int = DEFAULT_MAX_LAG_MONTHS,
+) -> LeadLagResult:
+    """건축허가 증가율(YoY) → 주택건설 ETF 수익률. 허가는 착공·매출보다 먼저 발생."""
+    return _fred_to_etf("PERMIT", etf, "건축허가 증가율", max_lag)
+
+
+def predict_consumer_from_sentiment(
+    etf: str = "XLY", max_lag: int = DEFAULT_MAX_LAG_MONTHS,
+) -> LeadLagResult:
+    """소비자심리(YoY) → 소비재(임의소비) ETF 수익률. 심리가 지갑보다 먼저 움직임."""
+    return _fred_to_etf("UMCSENT", etf, "소비자심리 증가율", max_lag)
+
+
+def predict_em_from_dollar(
+    em_etf: str = "EEM", max_lag: int = DEFAULT_MAX_LAG_MONTHS,
+) -> LeadLagResult:
+    """달러지수(YoY) → 신흥국 ETF 수익률. 달러 강세는 보통 신흥국에 역풍(음의 관계 기대)."""
+    from src.data_fetcher import fetch_prices
+    from src.utils import close_series
+
+    dxy_yoy = yoy_growth(to_monthly(close_series(fetch_prices("DX-Y.NYB", period="max"))))
+    em_yoy = yoy_growth(to_monthly(close_series(fetch_prices(em_etf, period="max"))))
+    return analyze_lead_lag(dxy_yoy, em_yoy, "달러지수 증가율", f"{em_etf} 수익률", max_lag=max_lag)
+
+
+def predict_cyclicals_from_copper_gold(
+    target: str = "SPY", max_lag: int = DEFAULT_MAX_LAG_MONTHS,
+) -> LeadLagResult:
+    """구리/금 비율(YoY) → 경기민감 자산 수익률. '닥터 코퍼' — 실물경기 체온계."""
+    from src.data_fetcher import fetch_prices
+    from src.utils import close_series
+
+    copper = to_monthly(close_series(fetch_prices("HG=F", period="max")))
+    gold = to_monthly(close_series(fetch_prices("GC=F", period="max")))
+    ratio_yoy = yoy_growth((copper / gold).dropna())
+    tgt_yoy = yoy_growth(to_monthly(close_series(fetch_prices(target, period="max"))))
+    return analyze_lead_lag(ratio_yoy, tgt_yoy, "구리/금 비율 증가율", f"{target} 수익률", max_lag=max_lag)
+
+
+def predict_btc_from_wikipedia(
+    article: str = "Bitcoin", max_lag: int = DEFAULT_MAX_LAG_MONTHS,
+) -> LeadLagResult:
+    """위키피디아 관심도(YoY) → 비트코인 수익률.
+
+    대중 관심은 가격을 앞설 수도(리테일 FOMO 선행) 뒤따를 수도(가격 추종) 있어,
+    엔진이 찾은 lag 부호로 판단. 페이지뷰는 월평균으로 집계 (합/마지막 아님).
+    """
+    from src.data_fetcher import fetch_prices, fetch_wikipedia_pageviews
+    from src.utils import close_series
+
+    views = fetch_wikipedia_pageviews(article, days=3650)
+    views_yoy = yoy_growth(views.resample("ME").mean().dropna())  # 월평균 일일 조회수
+    btc_yoy = yoy_growth(to_monthly(close_series(fetch_prices("BTC-USD", period="max"))))
+    return analyze_lead_lag(
+        views_yoy, btc_yoy, f"위키 '{article}' 관심", "BTC 수익률", max_lag=max_lag
+    )
+
+
 # 사용 가능한 예측 관계 레지스트리 (스크립트/오케스트레이터가 순회)
 PREDICTORS: dict[str, callable] = {
     "M2 → 비트코인": predict_btc_from_m2,
     "한국수출 → 반도체(SOXX)": predict_semis_from_korea_exports,
+    "건축허가 → 주택건설(XHB)": predict_homebuilders_from_permits,
+    "소비자심리 → 소비재(XLY)": predict_consumer_from_sentiment,
+    "달러 → 신흥국(EEM)": predict_em_from_dollar,
+    "구리/금 → 경기(SPY)": predict_cyclicals_from_copper_gold,
+    "위키관심 → 비트코인": predict_btc_from_wikipedia,
 }

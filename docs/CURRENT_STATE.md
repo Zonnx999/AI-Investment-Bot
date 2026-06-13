@@ -56,14 +56,17 @@ AI-Investment-Bot/
 │   ├── index.html             # 4탭 가치주 대시보드 (Haiku 작성, 그대로 활용)
 │   └── screener_data.json     # 자동 생성 (gitignore)
 │
-├── tests/                     # ★ 오프라인 테스트 40개 (6단계) — python -m pytest
+├── tests/                     # 오프라인 테스트 85개 — python -m pytest
 │   ├── conftest.py            # 픽스처: 합성 가격/OHLCV, API 키 격리
 │   ├── test_utils.py
 │   ├── test_exceptions.py
 │   ├── test_http.py           # 마스킹/is_timeout/retry (로컬 서버)
 │   ├── test_risk_engine.py
 │   ├── test_macro_analyzer.py
-│   └── test_data_fetcher.py
+│   ├── test_data_fetcher.py
+│   ├── test_storage.py / test_storage_state.py
+│   ├── test_signals.py
+│   └── test_predictors.py
 │
 ├── data/.gitkeep              # 캐시 (gitignore)
 ├── notebooks/.gitkeep
@@ -134,6 +137,7 @@ QuantBotError
 | `fetch_financial_statements(ticker, ...)` | FMP | 재무제표 시계열 |
 | `fetch_key_metrics(ticker, ...)` | FMP | 핵심 비율 시계열 |
 | `fetch_ratios(ticker, ...)` | FMP | 광범위 비율 시계열 |
+| `fetch_wikipedia_pageviews(article, days)` | Wikimedia | 일별 페이지뷰 Series (Phase 6) |
 
 상수:
 - `FMP_BASE_URL = "https://financialmodelingprep.com/stable"` (v3 가 아님 — 중요)
@@ -170,7 +174,7 @@ QuantBotError
 | `scenario_impact(price, rev_shock, margin_shock, multi_shock, margin)` | 충격 → 가격 환산 |
 | `risk_report(ticker, period, mc_days, mc_paths, seed)` | 종합 dict |
 
-⚠️ 내부 `_clean_returns(s)` 가 `s.min() > 0.01` heuristic 으로 가격/수익률 자동 판별 — 페니스톡에 fragile. 7단계에서 명시적 API 로 정리 예정.
+VaR/ES 는 수익률 시리즈만 받음 (7단계). 가격→수익률은 `returns_from_prices()` 명시 변환, 가격 오입력 시 `AnalysisError`. MC 는 격리된 `default_rng` 사용 (글로벌 오염 없음).
 
 ### `src/utils.py` — 공용 헬퍼 (4단계 결과물)
 - `close_series(df)` — 'Adj Close' 우선/'Close' fallback + squeeze. 둘 다 없으면 `DataValidationError`
@@ -182,20 +186,28 @@ QuantBotError
 
 ## 3. 가장 최근 완료 작업
 
-### Phase 6 — Alternative Data & Predictive Models — 🛠 부분 구현 (2026-06-13), 사인오프 대기
-선행지표로 'N개월 뒤 방향'을 예측. **핵심 2개 관계만 우선 구현** (이미 가진 데이터):
-- `src/predictors.py` 신설 — lead-lag 회귀 엔진:
+### Phase 6 — Alternative Data & Predictive Models — 🛠 구현 완료 (2026-06-13), 사인오프 대기
+선행지표로 'N개월 뒤 방향'을 예측. 사용자 선택으로 **FRED/yfinance 관계 + 위키피디아** 보강.
+- `src/predictors.py` — lead-lag 회귀 엔진:
   - `to_monthly` / `yoy_growth` (추세 제거 → 레벨 시리즈 허위 상관 방지)
   - `lagged_correlations` / `analyze_lead_lag` — lag 1~12개월 중 |상관| 최대 lag 선택 후 OLS
   - **순수 함수** 설계 (월간 시리즈 2개 → 오프라인 테스트), fetch 는 predict_* 만
-- 구현된 관계:
-  - `predict_btc_from_m2` — M2 증가율 → BTC 수익률 (현재 R²=0.06, 약함으로 정직하게 플래그)
-  - `predict_semis_from_korea_exports` — 한국 수출 증가율 → SOXX 수익률 (R²=0.34, 10개월 선행)
-- `LeadLagResult.reliable` (R²≥0.30) + 상관 부호·표본수 노출 → 사용자가 신뢰도 판단
+- 구현된 관계 7개 (`PREDICTORS` 레지스트리):
+  | 관계 | 선행 | 상관 | R² | 판정 |
+  |---|---|---|---|---|
+  | 위키관심→BTC | 1개월 | +0.79 | 0.63 | ✅ (단 1개월=거의 동행지표) |
+  | 한국수출→SOXX | 10개월 | -0.58 | 0.34 | ✅ 진짜 선행 (평균회귀 해석) |
+  | 달러→EEM | 1개월 | -0.59 | 0.34 | ✅ 부호 일치, 거의 동행 |
+  | 구리/금→SPY | 1개월 | +0.58 | 0.34 | ✅ 부호 일치, 거의 동행 |
+  | M2→BTC / 건축허가→XHB / 소비자심리→XLY | — | — | <0.12 | ⚠️ 약함 |
+- **핵심 인사이트**: R² 높은 것들이 대부분 "1개월 선행"=동행지표. 진짜 멀리 선행하며
+  유의미한 건 한국수출(10개월)뿐 — 엔진이 선행개월·부호·R²를 다 노출해 이 함정을 간파 가능
+- `data_fetcher.fetch_wikipedia_pageviews` 신설 — Wikimedia REST (키 불필요, UA 필수, TTL 1일).
+  `_parse_wikipedia_items` 순수 헬퍼로 분리 (오프라인 테스트)
 - `scripts/check_predictions.py` + daily_update 섹션 통합
-- 테스트 84개 (predictors 순수함수 8개 추가). 합성 데이터로 회귀계수·lag·예측방향 정확 복원 검증
-- ⚠️ **미구현 (새 의존성 필요 — 별도 결정 지점)**: Google Trends(pytrends), 위키피디아
-  페이지뷰, SEC EDGAR 13F. fragility·테스트 부담 때문에 핵심 2개와 분리.
+- 테스트 85개 (predictors 9개 + 위키 파서). 합성 데이터로 회귀계수·lag·예측방향 정확 복원
+- ⚠️ **미구현 (새 의존성 필요 — 사용자 우선순위 대기)**: Google Trends(pytrends, fragile),
+  SEC EDGAR 13F(파싱 부담·45일 지연). 사용자가 위키피디아·FRED 우선 선택.
 
 ### Phase 5 — Signal Engine — ✅ 완료, 사인오프 받음 (2026-06-13)
 친구 C 봇("저평가 종목 알림")의 진화 버전. 결정론적 신호 생성 (LLM 없음).

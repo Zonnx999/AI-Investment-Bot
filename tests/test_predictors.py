@@ -107,3 +107,21 @@ def test_analyze_lead_lag_flags_weak_relationship():
     res = analyze_lead_lag(leading, target, "X", "Y", max_lag=6, min_obs=24)
     assert res.reliable is False
     assert any("R²" in n for n in res.notes)
+
+
+# ---------------- 위키피디아 파서 (data_fetcher 순수 헬퍼) ----------------
+
+
+def test_parse_wikipedia_items_builds_sorted_series():
+    from src.data_fetcher import _parse_wikipedia_items
+
+    items = [
+        {"timestamp": "2024030100", "views": 200},
+        {"timestamp": "2024010100", "views": 100},  # 일부러 역순
+        {"timestamp": "2024020100", "views": 150},
+    ]
+    s = _parse_wikipedia_items(items, "Bitcoin")
+    assert s.name == "Bitcoin"
+    assert s.index.is_monotonic_increasing      # 정렬됨
+    assert s.iloc[0] == 100.0
+    assert isinstance(s.index, pd.DatetimeIndex)

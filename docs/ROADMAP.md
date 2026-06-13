@@ -94,12 +94,15 @@
 - ✅ lead-lag 엔진: YoY 변환 → lag 1~12 탐색 → OLS → 신뢰도(R²) 판정. 순수 함수 + 테스트
 - ✅ `scripts/check_predictions.py` + daily_update 통합
 
-**미구현 — 새 의존성·fetcher 필요 (다음 결정 지점, 사용자 우선순위 확인)**:
-- ⏳ **Google Trends → 소비재 매출** (`pytrends` 추가 필요, rate-limit 불안정)
-- ⏳ **위키피디아 페이지뷰 → 소비자 관심** (REST API, 키 불필요)
-- ⏳ **SEC EDGAR 13F → 기관 보유 변동** (무료, 파싱 부담 큼)
+**보강 완료 (2026-06-13, 사용자 선택)**:
+- ✅ **FRED/yfinance 관계 4개 추가**: 건축허가→XHB, 소비자심리→XLY, 달러→EEM, 구리/금→SPY
+- ✅ **위키피디아 페이지뷰** fetcher + Bitcoin 관심→BTC 예측 (Wikimedia REST, 키 불필요)
+- 총 7개 관계. ⚠️ 발견: R² 높은 것들이 대부분 1개월 선행=동행지표. 진짜 선행은 한국수출(10mo).
+
+**미구현 — 새 의존성 필요 (다음 결정 지점)**:
+- ⏳ **Google Trends** (`pytrends`, rate-limit 불안정)
+- ⏳ **SEC EDGAR 13F** (무료지만 파싱 부담 + 45일 지연으로 '선행' 의미 약함)
 - ❌ 신용카드 결제 데이터 — 월 수천 달러, 비현실적
-→ 각각 fetcher + 캐싱 + 테스트가 필요해 핵심 2개와 분리. 사용자가 우선순위 정하면 추가.
 
 ### Phase 7 — Telegram/Discord 알림 봇
 - 스케줄러 (cron 또는 GitHub Actions) 로 매일 아침 7시 KST 자동 실행

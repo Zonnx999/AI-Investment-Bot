@@ -38,7 +38,7 @@ AI-Investment-Bot/
 │   ├── screener.py        # 가치주 스크리너
 │   ├── storage.py         # SQLite 캐시 + state 테이블
 │   ├── signals.py         # 신호 엔진 (팩터/스크리닝/알림)
-│   ├── predictors.py      # 선행지표 lead-lag 예측 (M2→BTC 등)
+│   ├── predictors.py      # 선행지표 lead-lag 예측 (7개 관계: M2/한국수출/달러/위키 등)
 │   └── utils.py           # 공용 헬퍼 (종가 추출, 컬럼 후보 선택)
 │
 ├── scripts/               # 실행 스크립트
@@ -63,7 +63,7 @@ AI-Investment-Bot/
 ├── data/                  # 데이터 캐시 (gitignore)
 ├── notebooks/             # 실험용 노트북 (gitignore)
 ├── logs/                  # quant_bot.log (gitignore)
-└── tests/                 # pytest — 오프라인 테스트 84개 (python -m pytest)
+└── tests/                 # pytest — 오프라인 테스트 85개 (python -m pytest)
 ```
 
 ## 첫 실행 (Quick Start)
@@ -97,7 +97,7 @@ python scripts/daily_update.py --refresh   # 캐시 무시하고 새로 수집
 python scripts/check_signals.py
 python scripts/check_signals.py --screen   # 미국 워치리스트 발굴 포함
 
-# ★ 선행지표 예측 — M2→BTC, 한국수출→반도체 (Phase 6)
+# ★ 선행지표 예측 — M2/한국수출/달러/구리·금/위키관심 → 자산 (Phase 6, 7개 관계)
 python scripts/check_predictions.py
 
 # 주식 + 암호화폐 + 금 (API 키 불필요)
@@ -144,12 +144,13 @@ from src.data_fetcher import (
     fetch_financial_statements,  # FMP 손익/재무/현금흐름 시계열
     fetch_key_metrics,           # FMP P/E, ROE, 부채비율 등
     fetch_ratios,                # FMP 광범위한 재무 비율
+    fetch_wikipedia_pageviews,   # 위키피디아 일별 페이지뷰 (대체 데이터)
 )
 ```
 
 ## 로드맵
 
-현재 위치: **Phase 0–6(부분) + 가치주 스크리너 + 리팩토링 8단계 완료. Phase 6 잔여(alt-data 소스) 진행 중.**
+현재 위치: **Phase 0–6 + 가치주 스크리너 + 리팩토링 8단계 완료. 다음은 Phase 7 (알림 봇).**
 
 - [x] Phase 0 — 폴더 구조 + Hello World
 - [x] Phase 1 — `data_fetcher.py` (yfinance + FRED + CoinGecko + 한국 무역통계)
@@ -159,8 +160,8 @@ from src.data_fetcher import (
 - [x] 리팩토링 1–8단계 — 로깅 → 예외 → HTTP → DRY → 패키지화 → 테스트 → 결정론 → API 정합성
 - [x] Phase 4 — Storage & Daily Pipeline (SQLite 캐시 + `daily_update.py` 오케스트레이터)
 - [x] Phase 5 — Signal Engine (팩터 점수 + 스크리닝 룰 + 변화 알림)
-- [x] Phase 6 (핵심) — 선행지표 예측 (M2→BTC, 한국수출→반도체 lead-lag 회귀)
-- [ ] Phase 6 (잔여) — Google Trends / 위키피디아 / SEC EDGAR (새 의존성 필요)
+- [x] Phase 6 — 선행지표 예측 (7개 lead-lag 관계 + 위키피디아 대체 데이터)
+- [ ] Phase 6 (선택 잔여) — Google Trends / SEC EDGAR (새 의존성·우선순위 낮음)
 - [ ] Phase 7 — Telegram/Discord 알림 봇 (매일 아침 7시 KST 자동 push)
 - [ ] Phase 8+ (선택) — LLM 요약 한 줄 / 뉴스 센티먼트 / 백테스트 / Streamlit
 
