@@ -79,7 +79,7 @@
 - ✅ FMP 한도 보호: 재무제표 TTL 7일, 시세 30분
 - 사인오프 후 다음: **Phase 5 (Signal Engine)**
 
-### Phase 5 — Signal Engine ⭐ (친구 C 봇의 진화 버전) — 🛠 구현 완료 (2026-06-13), 사인오프 대기
+### Phase 5 — Signal Engine ⭐ (친구 C 봇의 진화 버전) — ✅ 완료, 사인오프 받음 (2026-06-13)
 - ✅ **스크리닝 룰**: ROE>10% AND FCF yield 양수 AND P/E ≤ 워치리스트 중간값 (`apply_screen_rules`)
 - ✅ **알림 룰**: 시장 국면 전환, 자산 낙폭 -10% 돌파, 변동성 ×1.25 급등 (상태 비교 기반)
 - ✅ **팩터 신호**: momentum / value / quality + 종합 (`factor_scores`)

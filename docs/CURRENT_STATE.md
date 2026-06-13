@@ -180,7 +180,7 @@ QuantBotError
 
 ## 3. 가장 최근 완료 작업
 
-### Phase 5 — Signal Engine — 🛠 구현 완료 (2026-06-13), 사인오프 대기
+### Phase 5 — Signal Engine — ✅ 완료, 사인오프 받음 (2026-06-13)
 친구 C 봇("저평가 종목 알림")의 진화 버전. 결정론적 신호 생성 (LLM 없음).
 - `src/signals.py` 신설 — 3종 신호:
   1. **팩터 점수** — momentum(가격) + value/quality(screener 점수 재사용) 각 0~100 + 종합
