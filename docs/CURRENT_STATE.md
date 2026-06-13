@@ -186,7 +186,7 @@ VaR/ES 는 수익률 시리즈만 받음 (7단계). 가격→수익률은 `retur
 
 ## 3. 가장 최근 완료 작업
 
-### Phase 6 — Alternative Data & Predictive Models — 🛠 구현 완료 (2026-06-13), 사인오프 대기
+### Phase 6 — Alternative Data & Predictive Models — ✅ 완료, 사인오프 받음 (2026-06-13)
 선행지표로 'N개월 뒤 방향'을 예측. 사용자 선택으로 **FRED/yfinance 관계 + 위키피디아** 보강.
 - `src/predictors.py` — lead-lag 회귀 엔진:
   - `to_monthly` / `yoy_growth` (추세 제거 → 레벨 시리즈 허위 상관 방지)

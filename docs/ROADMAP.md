@@ -86,7 +86,7 @@
 - ✅ `src/signals.py` + `scripts/check_signals.py` + daily_update 통합
 - 사인오프 후 다음: **Phase 6 (Alternative Data & Predictive Models)**
 
-### Phase 6 — Alternative Data & Predictive Models ⭐⭐ — 🛠 부분 구현 (2026-06-13), 사인오프 대기
+### Phase 6 — Alternative Data & Predictive Models ⭐⭐ — ✅ 완료, 사인오프 받음 (2026-06-13)
 사용자가 가장 중요하게 강조한 부분. 다양한 무료 대체 데이터로 가격·매출을 선행 예측.
 **이미 가진 데이터로 가능한 핵심 2개를 먼저 견고하게 구현** (`src/predictors.py`):
 - ✅ **M2 → BTC** 회귀 (FRED `M2SL`) — 현재 R²=0.06 (약함, 정직하게 플래그)
