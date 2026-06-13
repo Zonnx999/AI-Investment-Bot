@@ -64,6 +64,7 @@ _SECRET_SETTINGS_ATTRS = (
     "fred_api_key",
     "anthropic_api_key",
     "news_api_key",
+    "telegram_bot_token",  # URL 경로에 들어가므로 마스킹 필수
 )
 
 # 오탐 방지: 이 길이 미만의 값은 마스킹 대상에서 제외

@@ -32,6 +32,10 @@ class Settings:
     fmp_api_key: str = os.getenv("FMP_API_KEY", "")
     news_api_key: str = os.getenv("NEWS_API_KEY", "")
 
+    # 알림 채널 (Phase 7)
+    telegram_bot_token: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    telegram_chat_id: str = os.getenv("TELEGRAM_CHAT_ID", "")
+
     # 경로
     project_root: Path = PROJECT_ROOT
     data_dir: Path = PROJECT_ROOT / "data"
