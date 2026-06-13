@@ -65,6 +65,7 @@ _SECRET_SETTINGS_ATTRS = (
     "anthropic_api_key",
     "news_api_key",
     "telegram_bot_token",  # URL 경로에 들어가므로 마스킹 필수
+    "krx_api_key",         # AUTH_KEY 헤더로 전송 — 로그 노출 방지
 )
 
 # 오탐 방지: 이 길이 미만의 값은 마스킹 대상에서 제외

@@ -31,6 +31,7 @@ class Settings:
     fred_api_key: str = os.getenv("FRED_API_KEY", "")
     fmp_api_key: str = os.getenv("FMP_API_KEY", "")
     news_api_key: str = os.getenv("NEWS_API_KEY", "")
+    krx_api_key: str = os.getenv("KRX_API_KEY", "")  # 한국거래소 정보데이터시스템 OpenAPI
 
     # 알림 채널 (Phase 7)
     telegram_bot_token: str = os.getenv("TELEGRAM_BOT_TOKEN", "")

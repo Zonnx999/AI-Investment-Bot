@@ -150,7 +150,7 @@ from src.data_fetcher import (
 
 ## 로드맵
 
-현재 위치: **Phase 0–6 + 가치주 스크리너 + 리팩토링 8단계 완료. 다음은 Phase 7 (알림 봇).**
+현재 위치: **Phase 0–8 완료 (전 종목 유니버스 DB까지). 다음: 호스팅·KRX·인터랙티브 봇·대시보드.**
 
 - [x] Phase 0 — 폴더 구조 + Hello World
 - [x] Phase 1 — `data_fetcher.py` (yfinance + FRED + CoinGecko + 한국 무역통계)
@@ -158,11 +158,15 @@ from src.data_fetcher import (
 - [x] Phase 3 — `risk_engine.py` VaR / MDD / Monte Carlo / 시나리오
 - [x] Side Quest — 가치주 스크리너 + HTML 대시보드
 - [x] 리팩토링 1–8단계 — 로깅 → 예외 → HTTP → DRY → 패키지화 → 테스트 → 결정론 → API 정합성
-- [x] Phase 4 — Storage & Daily Pipeline (SQLite 캐시 + `daily_update.py` 오케스트레이터)
+- [x] Phase 4 — Storage & Daily Pipeline (SQLite 캐시 + `daily_update.py`)
 - [x] Phase 5 — Signal Engine (팩터 점수 + 스크리닝 룰 + 변화 알림)
 - [x] Phase 6 — 선행지표 예측 (7개 lead-lag 관계 + 위키피디아 대체 데이터)
-- [ ] Phase 6 (선택 잔여) — Google Trends / SEC EDGAR (새 의존성·우선순위 낮음)
 - [x] Phase 7 — Telegram 알림 봇 (GitHub Actions, 한·미 장 30분 전 2회 자동 push)
-- [ ] Phase 8+ (선택) — LLM 요약 한 줄 / 뉴스 센티먼트 / 백테스트 / Streamlit
+- [x] Phase 8 — 전 종목 유니버스 DB + 오프라인 전수 스크리닝 (`build_universe` / `scan`)
+- [ ] Phase 9 — KRX 한국 전수조사 (코스피/코스닥/코넥스 전 종목)
+- [ ] Phase 10 — 데이터 호스팅 / 이동성 (Turso·Supabase 등 — 현재 블로커)
+- [ ] Phase 11 — 인터랙티브 텔레그램 봇 (`/stock`, `/news`, 점수 근거 상세)
+- [ ] Phase 12 — 대시보드 통합 (`dashboard/index.html` 에 모든 정보)
+- [ ] (잔여·선택) Google Trends / SEC EDGAR / LLM 요약 / 백테스트
 
 세부 내용과 단계별 Definition of Done 은 [docs/ROADMAP.md](docs/ROADMAP.md) 참고.

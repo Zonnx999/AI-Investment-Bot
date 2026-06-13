@@ -115,26 +115,67 @@
 - ✅ Node 24 런타임 opt-in (액션 deprecation 경고 제거)
 - ⚠️ 클라우드 러너는 ephemeral → 변화 알림 상태는 actions/cache 로 best-effort 유지
 
-### Phase 8 (선택) — LLM 요약 한 줄
-- Phase 7 push 메시지에 Claude Haiku 호출 한 번 추가
-- "오늘 신호: X종목 저평가, Y거시 위험" 같은 자연어 한 단락
-- 비용 월 $1 미만
-- **LLM 의 첫 번째 합리적 자리** (챗봇이 아닌 thin layer)
-
-### Phase 9 (선택) — 뉴스 센티먼트
-- NewsAPI 로 종목별 뉴스 수집 → Haiku 분류 → 신호 가중치 반영
-- **LLM 의 두 번째 합리적 자리** (단순 룰로 안 풀리는 영역)
-
-### Phase 10 (선택) — 백테스트 프레임워크
-- Phase 5 신호의 과거 성과 검증
-- 신호 → 백테스트 → 검증 → 운영 순서 정착
-
-### Phase 11 (선택) — Streamlit 웹 UI
-- 봇 push 만으로 충분하면 skip 가능
+### Phase 8 — 전 종목 유니버스 DB + 오프라인 전수 스크리닝 — ✅ 완료 (2026-06-13)
+- ✅ `company-screener`(시총 필터) 발굴 → `key-metrics` 보강 → 오프라인 전수 스캔
+- ✅ `src/universe.py` + `scripts/build_universe.py` + `scripts/scan.py` (`--check` 종목 조회)
+- ✅ SQLite `screened` 테이블, 복합 PK(symbol,market). 다이제스트가 DB 스캔 상위에서 발굴
+- ⚠️ 한계: FMP엔 실제 KOSPI/KOSDAQ 없음 → **Phase 9(KRX)로 해결**. DB 로컬 전용 → **Phase 10(호스팅)**
 
 ---
 
-## 4. 사용자의 작업 스타일 (주의사항)
+## 4. 다음 작업 — 우선순위 TODO (2026-06-13 사용자 방향 설정)
+
+원래 "LLM/뉴스/백테스트/Streamlit"(아래 부록) 위에, 사용자가 새 방향을 추가했습니다.
+**의존 관계상 권장 순서: 10(호스팅) → 9(KRX) → 11(인터랙티브 봇) → 12(대시보드).**
+호스팅이 먼저인 이유: 노트북 이동 문제 + 클라우드 다이제스트 풀유니버스 모두 이게 풀어야 가능.
+
+### Phase 9 — KRX 한국 전수조사 ⭐ (FMP 한국 한계 해결)
+- 한국거래소 정보데이터시스템 OpenAPI (`http://data-dbg.krx.co.kr/svc/apis/sto/{id}`)
+- 인증: **`AUTH_KEY` 헤더** (검증 완료 — 그 헤더만 "Unauthorized API *Call*" 응답)
+- 대상 API: `stk_bydd_trd`(유가증권 일별), `ksq_bydd_trd`(코스닥), `knx_bydd_trd`(코넥스),
+  `*_isu_base_info`(종목기본정보)
+- [ ] **사용자 선행 작업**: KRX 포털에서 위 API 들 **개별 신청/활성화** (현재 401 = 키 미승인)
+- [ ] `data_fetcher.fetch_krx_*` 신설 (AUTH_KEY 헤더, basDd 파라미터, 도메인 예외 변환)
+- [ ] `universe.discover` 의 KR 경로를 FMP ADR → KRX 전 종목으로 교체 (코스피+코스닥+코넥스)
+- [ ] 점수 공식: KRX 일별매매 데이터엔 재무지표 없음 → 종목기본정보 + (가능하면) DART 연계 검토
+- [ ] 오프라인 테스트 (KRX 응답 샘플 → 파싱/스코어 순수 함수)
+
+### Phase 10 — 데이터 호스팅 / 이동성 해결 ⭐ (현재 블로커)
+노트북 이동이 잦아 로컬 DB 가 불편 + 클라우드 다이제스트가 풀유니버스를 못 씀.
+- [ ] 옵션 검토 후 결정:
+  - **A. GitHub 에 DB 커밋** — 무료·단순. 단 SQLite 바이너리 diff 비효율, 커밋 노이즈,
+    100MB 제한, 동시쓰기 충돌. 유니버스 테이블만 별도 `.db` 로 분리하면 완화 가능.
+  - **B. 매니지드 클라우드 DB** — Turso(libSQL, SQLite 호환·무료티어), Supabase/Neon(Postgres
+    무료티어). 코드 변경 최소(Turso), 어디서든 접근, 동시성 OK. **권장.**
+  - **C. 오브젝트 스토리지** — Cloudflare R2 / S3 에 `.db` 업로드·다운로드. 단순하지만 수동적.
+- [ ] 선택지에 맞게 `storage.py` 백엔드 추상화 (현재 로컬 sqlite3 → 주입 가능하게)
+- [ ] GitHub Actions 다이제스트가 호스팅 DB 를 읽도록 → 클라우드에서도 풀유니버스 발굴
+
+### Phase 11 — 인터랙티브 텔레그램 봇 (명령어 조회)
+현재는 단방향 push. 명령어로 원하는 종목을 직접 조회.
+- [ ] 폴링/웹훅 구조 결정 (단방향 push 와 공존: `getUpdates` 폴링이 단순)
+- [ ] 명령어: `/stock <티커>` (점수+근거 상세), `/news <티커>` (뉴스 API), `/scan [시장]` (상위)
+- [ ] **점수 근거 상세화** — 현재 health/value 는 합산 결과만 노출 → 항목별 기여도 분해
+- [ ] 뉴스: `NEWS_API_KEY`(이미 .env 자리 있음) 또는 FMP 뉴스 엔드포인트로 종목 뉴스
+- [ ] (선택) 뉴스에 Haiku 센티먼트 분류 — LLM 의 합리적 자리
+
+### Phase 12 — 대시보드 통합 (모든 정보 한 화면)
+`dashboard/index.html` 을 발전시켜 봇의 모든 정보를 웹에서.
+- [ ] 현재 스크리너 전용 → 국면/리스크/예측/유니버스 스캔/종목 상세 탭 추가
+- [ ] 데이터 소스: `daily_update`/`scan` 결과 JSON 출력 → 정적 페이지가 fetch
+- [ ] 호스팅: GitHub Pages (정적) — Phase 10 DB 와 연계
+- [ ] 봇 push vs 대시보드 역할 분담 (push=요약 알림, 대시보드=심층 탐색)
+
+---
+
+## 5. 부록 — 원래 선택 단계 (우선순위 낮음, 위 TODO 이후)
+- **LLM 요약 한 줄** — 다이제스트 맨 위 Haiku 한 문단 (월 $1 미만). Phase 11 뉴스 센티먼트와 묶을 수 있음
+- **백테스트 프레임워크** — Phase 5 신호 / Phase 6 예측의 과거 성과 검증 (예측 R² 우려를 정량 해소)
+- **Streamlit 웹 UI** — Phase 12 대시보드로 대체 가능하면 skip
+
+---
+
+## 6. 사용자의 작업 스타일 (주의사항)
 
 - **Strict phase-gate 엄수** — 사용자가 "다음 단계로" 명시 승인하기 전까지 다음 단계 코드 미리 짜지 말 것. 사용자가 이전에 명시적으로 요청한 사항.
 - **시니어 엔지니어 리뷰 톤** 유지. 의심스러운 코드는 비판적으로 짚고 대안 제시.
