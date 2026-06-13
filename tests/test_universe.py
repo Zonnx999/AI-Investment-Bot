@@ -108,3 +108,46 @@ def test_top_symbols(fresh_db):
     _seed_stock(conn, "BBB", "US", 70)
     _seed_stock(conn, "CCC", "US", 50)
     assert universe.top_symbols(n=2, market="US") == ["AAA", "BBB"]
+
+
+def test_enrich_calls_progress_and_enriches(fresh_db, monkeypatch):
+    import pandas as pd
+
+    conn = universe._conn()
+    for sym in ["AAA", "BBB", "CCC"]:
+        universe._upsert_universe_row(
+            conn, symbol=sym, market="US", name=f"{sym} Inc", sector="Tech",
+            industry="x", price=100.0, market_cap=5e9, dividend_yield=1.0,
+        )
+    conn.commit()
+
+    # key-metrics 네트워크 호출을 합성 df 로 대체
+    fake = pd.DataFrame([{
+        "returnOnEquity": 0.20, "evToSales": 2.0, "freeCashFlowYield": 0.05,
+        "netDebtToEBITDA": 1.0, "earningsYield": 0.08, "currentRatio": 2.0,
+        "incomeQuality": 1.0,
+    }])
+    monkeypatch.setattr("src.data_fetcher.fetch_key_metrics", lambda *a, **k: fake)
+
+    seen: list[tuple[int, int]] = []
+    stats = universe.enrich(
+        commit_every=2, on_progress=lambda i, total, s: seen.append((i, total))
+    )
+    assert stats["enriched"] == 3
+    assert seen == [(1, 3), (2, 3), (3, 3)]      # 매 종목 콜백
+    # 배치 커밋(2개)+마지막 커밋 후 모두 반영됐는지
+    assert {r.symbol for r in universe.scan(market="US")} == {"AAA", "BBB", "CCC"}
+
+
+def test_enrich_empty_metrics_counts_no_data(fresh_db, monkeypatch):
+    import pandas as pd
+
+    conn = universe._conn()
+    universe._upsert_universe_row(
+        conn, symbol="ZZZ", market="US", name="Z", sector="x", industry="x",
+        price=10.0, market_cap=2e9, dividend_yield=0.0,
+    )
+    conn.commit()
+    monkeypatch.setattr("src.data_fetcher.fetch_key_metrics", lambda *a, **k: pd.DataFrame())
+    stats = universe.enrich()
+    assert stats["no_data"] == 1 and stats["enriched"] == 0

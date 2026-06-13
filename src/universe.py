@@ -20,6 +20,7 @@ Phase 8 — 전 종목 유니버스 DB + 오프라인 전수 스크리닝.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -248,8 +249,17 @@ def _enrich_one(conn, symbol: str, market: str) -> bool:
     return True
 
 
-def enrich(max_age: timedelta = ENRICH_MAX_AGE, limit: int | None = None) -> dict[str, int]:
-    """보강 필요한 주식들을 key-metrics 로 채움. 재개 가능 (종목마다 커밋).
+def enrich(
+    max_age: timedelta = ENRICH_MAX_AGE,
+    limit: int | None = None,
+    commit_every: int = 50,
+    on_progress: "Callable[[int, int, dict], None] | None" = None,
+) -> dict[str, int]:
+    """보강 필요한 주식들을 key-metrics 로 채움. 재개 가능.
+
+    commit_every: N종목마다 커밋 (Turso 는 쓰기가 클라우드 왕복이라 종목별 커밋이
+      매우 느림 → 배치로 왕복 횟수를 줄임. 중단 시 최대 N개만 재작업, 캐시로 저렴).
+    on_progress(i, total, stats): 매 종목 호출 (CLI 진행바 등). None 이면 미사용.
 
     Returns {"enriched": n, "no_data": n, "failed": n}.
     """
@@ -260,19 +270,23 @@ def enrich(max_age: timedelta = ENRICH_MAX_AGE, limit: int | None = None) -> dic
 
     stats = {"enriched": 0, "no_data": 0, "failed": 0}
     total = len(targets)
-    logger.info("보강 시작: %d종목", total)
+    logger.info("보강 시작: %d종목 (commit_every=%d)", total, commit_every)
 
     for i, (symbol, market) in enumerate(targets, 1):
         try:
             ok = _enrich_one(conn, symbol, market)
-            conn.commit()  # 종목마다 커밋 → 중단되어도 진행분 보존
             stats["enriched" if ok else "no_data"] += 1
         except DataFetchError as e:
             logger.warning("보강 실패 %s — %s", symbol, e)
             stats["failed"] += 1
+        if i % commit_every == 0:
+            conn.commit()  # 배치 커밋 → Turso 왕복 최소화
+        if on_progress is not None:
+            on_progress(i, total, stats)
         if i % 100 == 0:
             logger.info("보강 진행 %d/%d (%s)", i, total, stats)
 
+    conn.commit()  # 남은 분 커밋
     logger.info("보강 완료: %s", stats)
     return stats
 

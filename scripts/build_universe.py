@@ -18,12 +18,35 @@ scripts/build_universe.py
 from __future__ import annotations
 
 import argparse
+import time
 from datetime import timedelta
 
 from src import universe
 from src.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _make_progress_bar():
+    """보강 진행바 콜백 (\\r 갱신, 새 의존성 없음). rate/ETA 포함."""
+    start = time.monotonic()
+    bar_len = 28
+
+    def cb(i: int, total: int, stats: dict) -> None:
+        elapsed = time.monotonic() - start
+        rate = i / elapsed if elapsed > 0 else 0
+        eta_min = (total - i) / rate / 60 if rate > 0 else 0
+        pct = i / total if total else 1.0
+        filled = int(bar_len * pct)
+        bar = "█" * filled + "░" * (bar_len - filled)
+        print(
+            f"\r    [{bar}] {i}/{total} {pct*100:3.0f}%  "
+            f"보강{stats['enriched']} 빈값{stats['no_data']} 실패{stats['failed']}  "
+            f"{rate:.1f}/s  ETA {eta_min:.1f}분 ",
+            end="", flush=True,
+        )
+
+    return cb
 
 
 def main() -> int:
@@ -51,7 +74,11 @@ def main() -> int:
         print("\n[2] 보강 (key-metrics → 점수)...")
         pending = len(universe.symbols_needing_enrichment(timedelta(days=args.max_age)))
         print(f"    보강 대상: {pending}종목" + (f" (이번 {args.limit}개)" if args.limit else ""))
-        stats = universe.enrich(max_age=timedelta(days=args.max_age), limit=args.limit)
+        stats = universe.enrich(
+            max_age=timedelta(days=args.max_age), limit=args.limit,
+            on_progress=_make_progress_bar(),
+        )
+        print()  # 진행바 줄바꿈
         print(f"    완료: 보강 {stats['enriched']} / 데이터없음 {stats['no_data']} / 실패 {stats['failed']}")
 
     # 호스팅 DB(Turso)면 클라우드로 push (로컬 sqlite3 면 no-op)
