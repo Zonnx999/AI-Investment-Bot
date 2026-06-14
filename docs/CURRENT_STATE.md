@@ -204,9 +204,11 @@ VaR/ES 는 수익률 시리즈만 받음 (7단계). 가격→수익률은 `retur
 1. **Phase 10 호스팅** ⭐ (블로커) — 노트북 이동 + 클라우드 풀유니버스. Turso/Supabase 등 검토
 2. **Phase 9 KRX** ⭐ — 한국 전 종목 전수조사 (KRX_API_KEY 등록됨, AUTH_KEY 헤더 확인.
    단 KRX 포털에서 API 개별 신청 필요 — 현재 401)
-3. **Phase 11 인터랙티브 봇** — `/stock` `/news` 명령어, 점수 근거 상세, 뉴스 API
-4. **Phase 12 대시보드** — `dashboard/index.html` 에 모든 정보 통합
-권장 순서: 10 → 9 → 11 → 12 (호스팅이 나머지의 토대).
+3. **Phase 11a 멀티유저 브로드캐스트** — 친구 공유 (Turso `subscribers` + cron `getUpdates`
+   로 `/start` 자동 등록, 시크릿 편집 불필요). **새 인프라 없이 가능 → 우선순위 높음**
+4. **Phase 11b 실시간 인터랙티브** — `/stock` `/news` 즉답. 항상 켜진 호스트(폴링) 필요
+5. **Phase 12 대시보드** — `dashboard/index.html` 에 모든 정보 통합
+권장 순서: 10 ✅ → 9(KRX) → 11a → 11b → 12.
 
 ---
 
