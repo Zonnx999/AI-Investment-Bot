@@ -526,7 +526,8 @@ def scan(
         sql.append("AND sector = ?"); args.append(sector)
     sql.append("ORDER BY total_score DESC, market_cap DESC LIMIT ?"); args.append(limit)
 
-    rows = conn.execute(" ".join(sql), args).fetchall()
+    # libsql(Turso)은 파라미터를 tuple 로만 받음 (sqlite3 는 list 도 허용) → tuple 강제
+    rows = conn.execute(" ".join(sql), tuple(args)).fetchall()
     return [ScanRow(*r) for r in rows]
 
 

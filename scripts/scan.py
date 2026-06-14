@@ -24,6 +24,15 @@ from src.logger import get_logger
 logger = get_logger(__name__)
 
 
+def _fmt_mcap(market: str, mcap: float) -> str:
+    """시총 표기 — 한국은 원화(조), 미국/크립토는 달러($B)."""
+    if not mcap:
+        return "—"
+    if market == "KR":
+        return f"{mcap / 1e12:.1f}조원"
+    return f"${mcap / 1e9:.1f}B"
+
+
 def _print_rows(rows) -> None:
     print(f"  {'순위':>3} {'종목':<10} {'시장':<6} {'종합':>4} {'밸류':>4} {'건전':>4} "
           f"{'ROE':>7} {'PER':>6} {'PBR':>5}  회사")
@@ -50,10 +59,13 @@ def main() -> int:
         if not row:
             print(f"'{args.check.upper()}' — DB 에 없거나 아직 보강 안 됨. build_universe 먼저 실행.")
             return 1
-        print(f"\n[{row.symbol}] {row.name}  ({row.market} · {row.sector})")
-        print(f"  종합 {row.total_score} (밸류 {row.value_score} / 건전 {row.health_score})  "
-              f"ROE {row.roe:.1f}%  시총 ${row.market_cap/1e9:.1f}B" if row.roe is not None
-              else f"  종합 {row.total_score}")
+        mcap = _fmt_mcap(row.market, row.market_cap)
+        roe = f"{row.roe:.1f}%" if row.roe is not None else "—"
+        per = f"{row.per:.1f}" if row.per else "—"
+        pbr = f"{row.pbr:.2f}" if row.pbr else "—"
+        print(f"\n[{row.symbol}] {row.name}  ({row.market} · {row.sector or '—'})")
+        print(f"  종합 {row.total_score} (밸류 {row.value_score} / 건전 {row.health_score})")
+        print(f"  ROE {roe}  PER {per}  PBR {pbr}  시총 {mcap}")
         # 같은 시장 내 순위
         peers = universe.scan(market=row.market, limit=100000)
         rank = next((i for i, r in enumerate(peers, 1) if r.symbol == row.symbol), None)
@@ -74,7 +86,7 @@ def main() -> int:
     for mkt in markets:
         rows = universe.scan(market=mkt, limit=args.top,
                              min_total=args.min_score, sector=args.sector)
-        label = {"US": "🇺🇸 미국", "KR": "🇰🇷 한국(ADR)", "CRYPTO": "🪙 크립토"}.get(mkt, mkt)
+        label = {"US": "🇺🇸 미국", "KR": "🇰🇷 한국", "CRYPTO": "🪙 크립토"}.get(mkt, mkt)
         print(f"\n[{label}]  (보강 {st.get(f'{mkt}_enriched',0)}/{st.get(f'{mkt}_total',0)})")
         if mkt == "CRYPTO":
             print("  ※ 크립토 점수는 시총순위+변동성 기반 — 주식 펀더멘털 점수와 비교 불가")
