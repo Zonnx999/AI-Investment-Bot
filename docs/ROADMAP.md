@@ -130,15 +130,22 @@
 11a(친구 공유)는 새 인프라 없이 가능해 우선순위 높음. 11b(실시간)는 항상 켜진 호스트 결정 후.
 
 ### Phase 9 — KRX 한국 전수조사 ⭐ (FMP 한국 한계 해결)
-- 한국거래소 정보데이터시스템 OpenAPI (`http://data-dbg.krx.co.kr/svc/apis/sto/{id}`)
-- 인증: **`AUTH_KEY` 헤더** (검증 완료 — 그 헤더만 "Unauthorized API *Call*" 응답)
-- 대상 API: `stk_bydd_trd`(유가증권 일별), `ksq_bydd_trd`(코스닥), `knx_bydd_trd`(코넥스),
-  `*_isu_base_info`(종목기본정보)
-- [ ] **사용자 선행 작업**: KRX 포털에서 위 API 들 **개별 신청/활성화** (현재 401 = 키 미승인)
-- [ ] `data_fetcher.fetch_krx_*` 신설 (AUTH_KEY 헤더, basDd 파라미터, 도메인 예외 변환)
-- [ ] `universe.discover` 의 KR 경로를 FMP ADR → KRX 전 종목으로 교체 (코스피+코스닥+코넥스)
-- [ ] 점수 공식: KRX 일별매매 데이터엔 재무지표 없음 → 종목기본정보 + (가능하면) DART 연계 검토
-- [ ] 오프라인 테스트 (KRX 응답 샘플 → 파싱/스코어 순수 함수)
+사용자 결정: **B (DART 펀더멘털로 제대로)**. KRX 발굴(9a) + DART 점수(9b)로 분리.
+
+#### Phase 9a — KRX 발굴 — ✅ 완료, 검증됨 (2026-06-14)
+- ✅ `data_fetcher.fetch_krx_daily` / `fetch_krx_base_info` (AUTH_KEY 헤더, basDd, 도메인 예외)
+- ✅ `universe._discover_kr`: 코스피+코스닥 일별매매 → 보통주(주권) 필터 → 시총≥5천억 →
+  `screened`(market=KR, 가격/시총/섹터/명, enriched=0). 최근 영업일 자동 탐색(walk-back)
+- ✅ 검증: 한국 중대형 **507종목** 발굴 (삼성전자 1885조 등), 우선주/ETF 제외 정상
+- ✅ FMP 보강 경로는 US 전용으로 분리 (KR 6자리코드는 FMP 미지원 → DART 로)
+
+#### Phase 9b — DART 펀더멘털 점수 (DART 키 발급 후)
+- [ ] **사용자 선행 작업**: opendart.fss.or.kr 가입 → 인증키 → `.env` DART_API_KEY (자리 마련됨)
+- [ ] DART corpCode.xml(zip) 다운로드 → 6자리 종목코드 ↔ 8자리 corp_code 매핑 테이블
+- [ ] `fetch_dart_financials(corp_code, year)` — 재무제표(매출/순이익/자본 등)
+- [ ] KR 점수: DART 순이익·자본 + KRX 시총/가격 → ROE / PER / PBR → value/health 점수
+- [ ] `enrich_kr()` (DART 배치, 재개가능) → KR 행 enriched=1 → scan/digest 에 한국 등장
+- [ ] 오프라인 테스트 (DART 응답 샘플 → 비율 계산 순수 함수)
 
 ### Phase 10 — 데이터 호스팅 / 이동성 해결 — ✅ 완료 (Turso, 2026-06-13)
 노트북 이동이 잦아 로컬 DB 가 불편 + 클라우드 다이제스트가 풀유니버스를 못 씀.

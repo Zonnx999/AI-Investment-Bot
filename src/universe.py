@@ -36,7 +36,8 @@ from src.storage import get_storage
 logger = get_logger(__name__)
 
 # 시장별 발굴 설정 (시총 floor 는 사용자 합의: 중대형주만)
-MARKET_CAP_FLOOR = 1_000_000_000          # $1B
+MARKET_CAP_FLOOR = 1_000_000_000          # $1B (US)
+KR_MARKET_CAP_FLOOR = 500_000_000_000     # 5천억 KRW (한국 중대형, MKTCAP 는 원화)
 CRYPTO_MCAP_FLOOR = 1_000_000_000         # $1B
 CRYPTO_TOP_N = 100
 ENRICH_MAX_AGE = timedelta(days=7)        # 펀더멘털 재보강 주기
@@ -134,6 +135,77 @@ def _store_crypto_scored(conn, *, symbol, name, price, market_cap, scores) -> No
     )
 
 
+def _latest_kr_trading_day() -> tuple[str | None, list[dict]]:
+    """오늘(KST)부터 거슬러 올라가며 KRX 데이터가 있는 영업일 찾기 (최대 10일).
+
+    Returns (basDd, KOSPI 일별데이터) — 못 찾으면 (None, []).
+    """
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo
+
+    from src.data_fetcher import fetch_krx_daily
+
+    now = _dt.now(ZoneInfo("Asia/Seoul"))
+    for back in range(10):
+        bas_dd = (now - timedelta(days=back)).strftime("%Y%m%d")
+        try:
+            data = fetch_krx_daily("KOSPI", bas_dd)
+        except DataFetchError as e:
+            logger.warning("KRX 일별 조회 실패 (%s) — %s", bas_dd, e)
+            return None, []
+        if data:
+            return bas_dd, data
+    return None, []
+
+
+def _common_stock_codes(bas_dd: str) -> set[str]:
+    """기본정보에서 '주권 + 보통주' 6자리 코드만 (ETF/리츠/우선주 제외)."""
+    from src.data_fetcher import fetch_krx_base_info
+
+    codes: set[str] = set()
+    for market in ("KOSPI", "KOSDAQ"):
+        for b in fetch_krx_base_info(market, bas_dd):
+            if b.get("SECUGRP_NM") == "주권" and b.get("KIND_STKCERT_TP_NM") == "보통주":
+                codes.add(b.get("ISU_SRT_CD"))
+    return codes
+
+
+def _discover_kr(conn, floor: float = KR_MARKET_CAP_FLOOR) -> int:
+    """KRX 한국 전 종목 발굴 (코스피+코스닥). 보통주만, 시총 floor 이상.
+
+    재무지표는 KRX 에 없음 → enriched=0 (점수는 Phase 9b DART 에서). 발굴 종목 수 반환.
+    """
+    from src.data_fetcher import fetch_krx_daily
+
+    bas_dd, kospi = _latest_kr_trading_day()
+    if not bas_dd:
+        logger.warning("KRX 최근 영업일 데이터를 찾지 못함 — KR 발굴 스킵")
+        return 0
+    kosdaq = fetch_krx_daily("KOSDAQ", bas_dd)
+    common = _common_stock_codes(bas_dd)
+
+    n = 0
+    for row in kospi + kosdaq:
+        code = row.get("ISU_CD")
+        if code not in common:                       # 우선주/리츠/ETF 제외
+            continue
+        try:
+            price = float(row.get("TDD_CLSPRC") or 0)
+            mcap = float(row.get("MKTCAP") or 0)
+        except (TypeError, ValueError):
+            continue
+        if mcap < floor:                             # 중대형주만
+            continue
+        _upsert_universe_row(
+            conn, symbol=code, market="KR", name=row.get("ISU_NM", ""),
+            sector=row.get("SECT_TP_NM", ""), industry="",
+            price=price, market_cap=mcap, dividend_yield=0.0,  # 배당은 DART(9b)
+        )
+        n += 1
+    logger.info("KR 발굴: %d종목 (기준일 %s)", n, bas_dd)
+    return n
+
+
 def discover(
     markets: tuple[str, ...] = ("US", "KR", "CRYPTO"),
     market_cap_floor: float = MARKET_CAP_FLOOR,
@@ -145,24 +217,27 @@ def discover(
     counts: dict[str, int] = {}
 
     for mkt in markets:
-        if mkt in ("US", "KR"):
+        if mkt == "US":
             try:
-                rows = fetch_company_screener(country=mkt, market_cap_min=market_cap_floor)
+                rows = fetch_company_screener(country="US", market_cap_min=market_cap_floor)
             except DataFetchError as e:
-                logger.warning("발굴 실패 %s — %s", mkt, e)
-                counts[mkt] = 0
+                logger.warning("발굴 실패 US — %s", e)
+                counts["US"] = 0
                 continue
             for r in rows:
                 price = r.get("price") or 0.0
                 last_div = r.get("lastAnnualDividend") or 0.0
                 div_yield = (last_div / price * 100) if price else 0.0
                 _upsert_universe_row(
-                    conn, symbol=r["symbol"], market=mkt,
+                    conn, symbol=r["symbol"], market="US",
                     name=r.get("companyName", ""), sector=r.get("sector", ""),
                     industry=r.get("industry", ""), price=price,
                     market_cap=r.get("marketCap") or 0.0, dividend_yield=div_yield,
                 )
-            counts[mkt] = len(rows)
+            counts["US"] = len(rows)
+
+        elif mkt == "KR":
+            counts["KR"] = _discover_kr(conn)
 
         elif mkt == "CRYPTO":
             try:
@@ -195,13 +270,16 @@ def discover(
 
 
 def symbols_needing_enrichment(max_age: timedelta = ENRICH_MAX_AGE) -> list[tuple[str, str]]:
-    """보강이 필요한 (symbol, market) — 미보강이거나 오래된 주식(US/KR)."""
+    """FMP key-metrics 보강이 필요한 (symbol, market) — 미보강/오래된 **US** 주식.
+
+    KR 은 FMP 가 6자리 코드를 모름 → DART 로 별도 보강 (Phase 9b). 여기선 US 만.
+    """
     conn = _conn()
     cutoff = (datetime.now(timezone.utc) - max_age).isoformat()
     rows = conn.execute(
         """
         SELECT symbol, market FROM screened
-        WHERE market IN ('US','KR')
+        WHERE market = 'US'
           AND (enriched = 0 OR updated_at < ?)
         ORDER BY market_cap DESC
         """,

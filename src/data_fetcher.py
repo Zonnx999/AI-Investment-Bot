@@ -602,6 +602,67 @@ def fetch_ratios(
 
 
 # ----------------------------------------------------------------------
+# KRX (한국거래소 정보데이터시스템 OpenAPI) — 한국 전 종목 (Phase 9)
+# ----------------------------------------------------------------------
+#
+# 인증: AUTH_KEY 헤더. API 별로 포털에서 개별 신청·승인 필요.
+# 일별매매(bydd_trd): 가격/시총/거래량 (재무지표 없음 → 펀더멘털은 DART, Phase 9b).
+# 종목기본정보(isu_base_info): 종목명/시장/보통주·우선주 구분 (필터용).
+# ISU_CD: 일별매매는 6자리 단축코드, 기본정보는 ISIN + ISU_SRT_CD(6자리).
+# ----------------------------------------------------------------------
+
+KRX_BASE_URL = "http://data-dbg.krx.co.kr/svc/apis/sto"
+KRX_DAILY_API = {"KOSPI": "stk_bydd_trd", "KOSDAQ": "ksq_bydd_trd"}
+KRX_BASE_INFO_API = {"KOSPI": "stk_isu_base_info", "KOSDAQ": "ksq_isu_base_info"}
+TTL_KRX = timedelta(hours=12)
+
+
+def _krx_get(api_id: str, bas_dd: str) -> list[dict]:
+    """KRX OpenAPI GET 헬퍼. AUTH_KEY 헤더 + basDd. OutBlock_1 리스트 반환."""
+    import requests
+
+    key = settings.require("krx_api_key")
+    url = f"{KRX_BASE_URL}/{api_id}"
+    try:
+        response = get_http_session().get(
+            url, headers={"AUTH_KEY": key}, params={"basDd": bas_dd}
+        )
+    except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+        if is_timeout(e):
+            raise ApiTimeoutError(f"KRX {api_id} 타임아웃", source="KRX") from e
+        raise ApiConnectionError(f"KRX {api_id} 연결 실패", source="KRX") from e
+
+    if response.status_code == 401:
+        raise ApiAuthError(
+            f"KRX {api_id}: 인증 실패 (포털에서 해당 API 신청/승인 확인)", source="KRX"
+        )
+    if not response.ok:
+        raise ApiHttpError(
+            f"KRX {api_id}: HTTP {response.status_code}",
+            status_code=response.status_code, source="KRX",
+        )
+    try:
+        return response.json().get("OutBlock_1", []) or []
+    except ValueError as e:
+        raise DataValidationError(f"KRX {api_id}: JSON 파싱 실패", source="KRX") from e
+
+
+@cached("krx_daily", TTL_KRX, "json")
+def fetch_krx_daily(market: str, bas_dd: str) -> list[dict]:
+    """KRX 일별매매정보 — 시장 전 종목의 종가/시가총액/거래량.
+
+    market: "KOSPI" | "KOSDAQ". bas_dd: 기준일 "YYYYMMDD" (비영업일이면 빈 리스트).
+    """
+    return _krx_get(KRX_DAILY_API[market], bas_dd)
+
+
+@cached("krx_base_info", TTL_KRX, "json")
+def fetch_krx_base_info(market: str, bas_dd: str) -> list[dict]:
+    """KRX 종목기본정보 — 종목명/시장/증권구분(주권)/보통주·우선주 등 (필터용)."""
+    return _krx_get(KRX_BASE_INFO_API[market], bas_dd)
+
+
+# ----------------------------------------------------------------------
 # 위키피디아 페이지뷰 (Wikimedia REST API — 키 불필요, Phase 6 대체 데이터)
 # ----------------------------------------------------------------------
 #

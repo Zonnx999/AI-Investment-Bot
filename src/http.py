@@ -67,6 +67,7 @@ _SECRET_SETTINGS_ATTRS = (
     "telegram_bot_token",  # URL 경로에 들어가므로 마스킹 필수
     "krx_api_key",         # AUTH_KEY 헤더로 전송 — 로그 노출 방지
     "turso_auth_token",    # Turso DB 토큰
+    "dart_api_key",        # DART 전자공시 키
 )
 
 # 오탐 방지: 이 길이 미만의 값은 마스킹 대상에서 제외

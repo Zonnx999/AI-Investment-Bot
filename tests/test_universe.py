@@ -139,6 +139,53 @@ def test_enrich_calls_progress_and_enriches(fresh_db, monkeypatch):
     assert {r.symbol for r in universe.scan(market="US")} == {"AAA", "BBB", "CCC"}
 
 
+def test_discover_kr_filters_common_stocks_and_floor(fresh_db, monkeypatch):
+    # KRX 일별 (코스피 2 + 코스닥 1) + 기본정보(보통주 필터)
+    kospi = [
+        {"ISU_CD": "005930", "ISU_NM": "삼성전자", "TDD_CLSPRC": "70000",
+         "MKTCAP": "400000000000000", "SECT_TP_NM": ""},        # 보통주, 대형 → 포함
+        {"ISU_CD": "005935", "ISU_NM": "삼성전자우", "TDD_CLSPRC": "60000",
+         "MKTCAP": "50000000000000", "SECT_TP_NM": ""},          # 우선주 → 제외
+    ]
+    kosdaq = [
+        {"ISU_CD": "035720", "ISU_NM": "카카오", "TDD_CLSPRC": "50000",
+         "MKTCAP": "200000000000", "SECT_TP_NM": "벤처"},        # 보통주지만 시총<5천억 → 제외
+    ]
+    base = {
+        "KOSPI": [
+            {"ISU_SRT_CD": "005930", "SECUGRP_NM": "주권", "KIND_STKCERT_TP_NM": "보통주"},
+            {"ISU_SRT_CD": "005935", "SECUGRP_NM": "주권", "KIND_STKCERT_TP_NM": "우선주"},
+        ],
+        "KOSDAQ": [
+            {"ISU_SRT_CD": "035720", "SECUGRP_NM": "주권", "KIND_STKCERT_TP_NM": "보통주"},
+        ],
+    }
+    monkeypatch.setattr("src.data_fetcher.fetch_krx_daily",
+                        lambda market, bas_dd: kospi if market == "KOSPI" else kosdaq)
+    monkeypatch.setattr("src.data_fetcher.fetch_krx_base_info",
+                        lambda market, bas_dd: base[market])
+
+    n = universe.discover(markets=("KR",))["KR"]
+    assert n == 1                                   # 삼성전자만 (우선주·소형 제외)
+    row = universe._conn().execute(
+        "SELECT symbol, market, name, price, enriched FROM screened WHERE market='KR'"
+    ).fetchall()
+    assert len(row) == 1
+    assert row[0][0] == "005930" and row[0][4] == 0   # 발굴만, 미보강 (DART 대기)
+
+
+def test_kr_not_targeted_by_fmp_enrichment(fresh_db):
+    # KR 행은 FMP key-metrics 보강 대상에서 제외 (DART 로 별도)
+    conn = universe._conn()
+    universe._upsert_universe_row(
+        conn, symbol="005930", market="KR", name="삼성", sector="", industry="",
+        price=70000.0, market_cap=4e14, dividend_yield=0.0,
+    )
+    conn.commit()
+    pending = universe.symbols_needing_enrichment()
+    assert all(m != "KR" for _, m in pending)
+
+
 def test_enrich_empty_metrics_counts_no_data(fresh_db, monkeypatch):
     import pandas as pd
 
