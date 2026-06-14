@@ -71,15 +71,25 @@ def main() -> int:
             print(f"    {mkt}: {n}종목 발굴")
 
     if do_enrich:
-        print("\n[2] 보강 (key-metrics → 점수)...")
+        print("\n[2] 미국 보강 (FMP key-metrics → 점수)...")
         pending = len(universe.symbols_needing_enrichment(timedelta(days=args.max_age)))
         print(f"    보강 대상: {pending}종목" + (f" (이번 {args.limit}개)" if args.limit else ""))
         stats = universe.enrich(
             max_age=timedelta(days=args.max_age), limit=args.limit,
             on_progress=_make_progress_bar(),
         )
-        print()  # 진행바 줄바꿈
+        print()
         print(f"    완료: 보강 {stats['enriched']} / 데이터없음 {stats['no_data']} / 실패 {stats['failed']}")
+
+        print("\n[3] 한국 보강 (DART 펀더멘털 → ROE/PER/PBR)...")
+        kr_pending = len(universe._kr_symbols_needing_enrichment(timedelta(days=args.max_age)))
+        print(f"    보강 대상: {kr_pending}종목" + (f" (이번 {args.limit}개)" if args.limit else ""))
+        kr_stats = universe.enrich_kr(
+            max_age=timedelta(days=args.max_age), limit=args.limit,
+            on_progress=_make_progress_bar(),
+        )
+        print()
+        print(f"    완료: 보강 {kr_stats['enriched']} / 데이터없음 {kr_stats['no_data']} / 실패 {kr_stats['failed']}")
 
     # 호스팅 DB(Turso)면 클라우드로 push (로컬 sqlite3 면 no-op)
     from src.storage import get_storage

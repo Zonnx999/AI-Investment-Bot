@@ -59,6 +59,8 @@ CREATE TABLE IF NOT EXISTS screened (
     health_score     INTEGER,
     value_score      INTEGER,
     total_score      INTEGER,
+    per              REAL,                          -- KR(DART): 주가수익비율
+    pbr              REAL,                          -- KR(DART): 주가순자산비율
     enriched         INTEGER NOT NULL DEFAULT 0,   -- 0=발굴만, 1=보강+점수 완료
     discovered_at    TEXT,
     updated_at       TEXT,
@@ -81,6 +83,8 @@ class ScanRow:
     value_score: int
     health_score: int
     roe: float | None
+    per: float | None = None
+    pbr: float | None = None
 
 
 def _utcnow() -> str:
@@ -90,6 +94,11 @@ def _utcnow() -> str:
 def _conn() -> sqlite3.Connection:
     conn = get_storage().conn
     conn.executescript(_SCHEMA)
+    # 기존 DB 마이그레이션: per/pbr 컬럼 없으면 추가 (9b 도입)
+    existing = {r[1] for r in conn.execute("PRAGMA table_info(screened)").fetchall()}
+    for col in ("per", "pbr"):
+        if col not in existing:
+            conn.execute(f"ALTER TABLE screened ADD COLUMN {col} REAL")
     return conn
 
 
@@ -370,6 +379,131 @@ def enrich(
 
 
 # ----------------------------------------------------------------------
+# 2b. 한국 보강 (DART 펀더멘털) — Phase 9b
+# ----------------------------------------------------------------------
+
+
+def calculate_kr_scores(fin: dict, market_cap: float) -> dict:
+    """DART 재무제표 + KRX 시총 → 한국 종목 점수 (순수 함수).
+
+    health(건전성): ROE + 부채비율 + 영업이익률 + 흑자 보너스
+    value(저평가): PER 낮을수록 + PBR 낮을수록 + 이익수익률(1/PER)
+    임계·가중치는 튜닝 지점 (미국 screener.calculate_* 와 철학 동일, 입력만 다름).
+    """
+    ni, eq, debt = fin.get("net_income"), fin.get("equity"), fin.get("debt")
+    rev, op = fin.get("revenue"), fin.get("op_income")
+
+    roe = (ni / eq * 100) if (ni is not None and eq) else None
+    per = (market_cap / ni) if (ni and ni > 0) else None
+    pbr = (market_cap / eq) if eq else None
+    debt_ratio = (debt / eq * 100) if (debt is not None and eq) else None
+    op_margin = (op / rev * 100) if (op is not None and rev) else None
+
+    health = 0.0
+    if roe is not None:
+        health += min(35.0, max(0.0, roe * 2.5))            # ROE 14%+ → 만점
+    if debt_ratio is not None:
+        health += min(30.0, max(0.0, 30.0 - debt_ratio / 10))  # 부채비율 0%→30, 300%→0
+    if op_margin is not None:
+        health += min(20.0, max(0.0, op_margin * 2))        # 영업이익률 10%+ → 만점
+    if ni is not None and ni > 0:
+        health += 15.0                                       # 흑자 보너스
+
+    value = 0.0
+    if per is not None and per > 0:
+        value += min(40.0, max(0.0, 40.0 - per * 1.5))      # PER 낮을수록 (PER<6 만점 근처)
+        value += min(25.0, max(0.0, (1.0 / per) * 100 * 2.5))  # 이익수익률
+    if pbr is not None and pbr > 0:
+        value += min(35.0, max(0.0, 35.0 - pbr * 17.5))     # PBR<1 만점 근처
+
+    health_i = round(min(100.0, health))
+    value_i = round(min(100.0, value))
+    return {
+        "health_score": health_i, "value_score": value_i,
+        "total_score": round((health_i + value_i) / 2),
+        "roe": roe, "per": per, "pbr": pbr,
+    }
+
+
+def _kr_symbols_needing_enrichment(max_age: timedelta) -> list[str]:
+    conn = _conn()
+    cutoff = (datetime.now(timezone.utc) - max_age).isoformat()
+    rows = conn.execute(
+        "SELECT symbol FROM screened WHERE market='KR' AND (enriched=0 OR updated_at < ?) "
+        "ORDER BY market_cap DESC",
+        (cutoff,),
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+def enrich_kr(
+    year: int | None = None,
+    max_age: timedelta = ENRICH_MAX_AGE,
+    limit: int | None = None,
+    commit_every: int = 50,
+    on_progress: "Callable[[int, int, dict], None] | None" = None,
+) -> dict[str, int]:
+    """한국 종목 DART 펀더멘털 보강 → ROE/PER/PBR 점수. 재개 가능.
+
+    year=None 이면 직전 회계연도 (당해 사업보고서가 아직이면 build 시 조정).
+    """
+    from datetime import datetime as _dt
+
+    from src.data_fetcher import fetch_dart_corp_codes, fetch_dart_financials
+
+    conn = _conn()
+    year = year or (_dt.now().year - 1)
+    try:
+        corp_map = fetch_dart_corp_codes()
+    except DataFetchError as e:
+        logger.warning("DART corpCode 실패 — KR 보강 중단: %s", e)
+        return {"enriched": 0, "no_data": 0, "failed": 0}
+
+    targets = _kr_symbols_needing_enrichment(max_age)
+    if limit:
+        targets = targets[:limit]
+    stats = {"enriched": 0, "no_data": 0, "failed": 0}
+    total = len(targets)
+    logger.info("KR 보강 시작: %d종목 (DART %d년)", total, year)
+
+    for i, symbol in enumerate(targets, 1):
+        corp_code = corp_map.get(symbol)
+        if not corp_code:
+            stats["no_data"] += 1
+        else:
+            try:
+                fin = fetch_dart_financials(corp_code, year)
+                mcap = conn.execute(
+                    "SELECT market_cap FROM screened WHERE symbol=? AND market='KR'", (symbol,)
+                ).fetchone()
+                if fin and fin.get("equity") and mcap:
+                    sc = calculate_kr_scores(fin, float(mcap[0]))
+                    conn.execute(
+                        "UPDATE screened SET roe=?, per=?, pbr=?, health_score=?, "
+                        "value_score=?, total_score=?, enriched=1, updated_at=? "
+                        "WHERE symbol=? AND market='KR'",
+                        (sc["roe"], sc["per"], sc["pbr"], sc["health_score"],
+                         sc["value_score"], sc["total_score"], _utcnow(), symbol),
+                    )
+                    stats["enriched"] += 1
+                else:
+                    stats["no_data"] += 1
+            except DataFetchError as e:
+                logger.warning("KR 보강 실패 %s — %s", symbol, e)
+                stats["failed"] += 1
+        if i % commit_every == 0:
+            conn.commit()
+        if on_progress is not None:
+            on_progress(i, total, stats)
+        if i % 100 == 0:
+            logger.info("KR 보강 진행 %d/%d (%s)", i, total, stats)
+
+    conn.commit()
+    logger.info("KR 보강 완료: %s", stats)
+    return stats
+
+
+# ----------------------------------------------------------------------
 # 3. 스캔 (scan) — 오프라인, API 0콜
 # ----------------------------------------------------------------------
 
@@ -383,7 +517,7 @@ def scan(
     """점수 내림차순 전수 스캔 (보강 완료 종목만). 저평가 상위 발굴용."""
     conn = _conn()
     sql = ["SELECT symbol, market, name, sector, price, market_cap, total_score,",
-           "       value_score, health_score, roe",
+           "       value_score, health_score, roe, per, pbr",
            "FROM screened WHERE enriched=1 AND total_score >= ?"]
     args: list = [min_total]
     if market:
@@ -404,7 +538,7 @@ def lookup(symbol: str) -> ScanRow | None:
     conn = _conn()
     r = conn.execute(
         """SELECT symbol, market, name, sector, price, market_cap, total_score,
-                  value_score, health_score, roe
+                  value_score, health_score, roe, per, pbr
            FROM screened WHERE symbol = ? AND enriched = 1
            ORDER BY CASE market WHEN 'US' THEN 0 WHEN 'KR' THEN 1 ELSE 2 END
            LIMIT 1""",

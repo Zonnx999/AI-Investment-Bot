@@ -26,13 +26,14 @@ logger = get_logger(__name__)
 
 def _print_rows(rows) -> None:
     print(f"  {'순위':>3} {'종목':<10} {'시장':<6} {'종합':>4} {'밸류':>4} {'건전':>4} "
-          f"{'ROE':>7} {'시총($B)':>9}  회사")
-    print("  " + "-" * 86)
+          f"{'ROE':>7} {'PER':>6} {'PBR':>5}  회사")
+    print("  " + "-" * 90)
     for i, r in enumerate(rows, 1):
         roe = f"{r.roe:.1f}%" if r.roe is not None else "—"
-        mcap = (r.market_cap or 0) / 1e9
+        per = f"{r.per:.1f}" if getattr(r, "per", None) else "—"
+        pbr = f"{r.pbr:.2f}" if getattr(r, "pbr", None) else "—"
         print(f"  {i:>3} {r.symbol:<10} {r.market:<6} {r.total_score:>4} {r.value_score:>4} "
-              f"{r.health_score:>4} {roe:>7} {mcap:>9.1f}  {(r.name or '')[:28]}")
+              f"{r.health_score:>4} {roe:>7} {per:>6} {pbr:>5}  {(r.name or '')[:24]}")
 
 
 def main() -> int:

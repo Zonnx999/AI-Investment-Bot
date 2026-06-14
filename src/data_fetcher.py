@@ -663,6 +663,133 @@ def fetch_krx_base_info(market: str, bas_dd: str) -> list[dict]:
 
 
 # ----------------------------------------------------------------------
+# DART (전자공시 OpenAPI) — 한국 재무제표/펀더멘털 (Phase 9b)
+# ----------------------------------------------------------------------
+#
+# KRX 6자리 종목코드 ↔ DART 8자리 corp_code 매핑이 먼저 필요 (corpCode.xml zip).
+# 재무제표(fnlttSinglAcnt 주요계정): 순이익='당기순이익(손실)'(중복행 주의),
+# 자본총계/부채총계/매출액/영업이익. CFS(연결) 우선, 없으면 OFS(별도).
+# → KRX 시총과 결합해 ROE/PER/PBR 산출 (universe.calculate_kr_scores).
+# ----------------------------------------------------------------------
+
+DART_BASE_URL = "https://opendart.fss.or.kr/api"
+TTL_DART_CORP = timedelta(days=30)     # corp_code 매핑은 거의 불변
+TTL_DART_FIN = timedelta(days=7)       # 재무제표는 분기 갱신
+
+
+@cached("dart_corp_codes", TTL_DART_CORP, "json")
+def fetch_dart_corp_codes() -> dict[str, str]:
+    """DART corpCode.xml(zip) → {6자리 종목코드: 8자리 corp_code} (상장사만)."""
+    import io
+    import xml.etree.ElementTree as ET
+    import zipfile
+
+    import requests
+
+    key = settings.require("dart_api_key")
+    try:
+        response = get_http_session().get(
+            f"{DART_BASE_URL}/corpCode.xml", params={"crtfc_key": key}
+        )
+    except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+        if is_timeout(e):
+            raise ApiTimeoutError("DART corpCode 타임아웃", source="DART") from e
+        raise ApiConnectionError("DART corpCode 연결 실패", source="DART") from e
+    if not response.ok:
+        raise ApiHttpError(
+            f"DART corpCode: HTTP {response.status_code}",
+            status_code=response.status_code, source="DART",
+        )
+    try:
+        z = zipfile.ZipFile(io.BytesIO(response.content))
+        root = ET.fromstring(z.read(z.namelist()[0]))
+    except (zipfile.BadZipFile, ET.ParseError, KeyError) as e:
+        # 키 오류 등은 zip 대신 에러 XML/JSON 이 옴
+        raise DataValidationError(
+            "DART corpCode 응답이 zip 이 아님 (키 확인)", source="DART"
+        ) from e
+    mapping: dict[str, str] = {}
+    for it in root.iter("list"):
+        stock_code = (it.findtext("stock_code") or "").strip()
+        corp_code = (it.findtext("corp_code") or "").strip()
+        if stock_code and corp_code:
+            mapping[stock_code] = corp_code
+    if not mapping:
+        raise DataValidationError("DART corpCode 매핑이 비어있음", source="DART")
+    return mapping
+
+
+def _parse_dart_accounts(items: list[dict]) -> dict:
+    """DART fnlttSinglAcnt list → 핵심 계정 dict (순수 함수, 오프라인 테스트).
+
+    CFS(연결) 우선, 없으면 OFS(별도). '당기순이익(손실)' 중복행은 첫 값만.
+    """
+    def _amt(raw) -> float | None:
+        try:
+            return float(str(raw).replace(",", ""))
+        except (TypeError, ValueError):
+            return None
+
+    cfs: dict[str, float] = {}
+    ofs: dict[str, float] = {}
+    for x in items:
+        nm = x.get("account_nm")
+        val = _amt(x.get("thstrm_amount"))
+        bucket = cfs if x.get("fs_div") == "CFS" else ofs
+        if nm and val is not None and nm not in bucket:
+            bucket[nm] = val
+
+    base = cfs or ofs
+    return {
+        "net_income": base.get("당기순이익(손실)"),
+        "equity": base.get("자본총계"),
+        "debt": base.get("부채총계"),
+        "revenue": base.get("매출액"),
+        "op_income": base.get("영업이익"),
+        "assets": base.get("자산총계"),
+        "fs_div": "CFS" if cfs else ("OFS" if ofs else None),
+    }
+
+
+@cached("dart_financials", TTL_DART_FIN, "json")
+def fetch_dart_financials(corp_code: str, year: int) -> dict:
+    """DART 주요계정 재무제표 → 핵심 계정 dict. 데이터 없으면 빈 dict.
+
+    reprt_code=11011 (사업보고서/연간). status 013(데이터없음) → {} 반환.
+    """
+    import requests
+
+    key = settings.require("dart_api_key")
+    try:
+        response = get_http_session().get(
+            f"{DART_BASE_URL}/fnlttSinglAcnt.json",
+            params={"crtfc_key": key, "corp_code": corp_code,
+                    "bsns_year": str(year), "reprt_code": "11011"},
+        )
+    except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+        if is_timeout(e):
+            raise ApiTimeoutError(f"DART {corp_code} 타임아웃", source="DART") from e
+        raise ApiConnectionError(f"DART {corp_code} 연결 실패", source="DART") from e
+    if not response.ok:
+        raise ApiHttpError(
+            f"DART {corp_code}: HTTP {response.status_code}",
+            status_code=response.status_code, source="DART",
+        )
+
+    body = response.json()
+    status = body.get("status")
+    if status == "013":          # 조회된 데이터 없음 (미상장/미제출)
+        return {}
+    if status == "020":          # 사용 한도 초과
+        raise RateLimitError("DART 사용 한도 초과 (020)", source="DART")
+    if status != "000":
+        raise DataValidationError(
+            f"DART {corp_code}: status={status} ({body.get('message')})", source="DART"
+        )
+    return _parse_dart_accounts(body.get("list", []))
+
+
+# ----------------------------------------------------------------------
 # 위키피디아 페이지뷰 (Wikimedia REST API — 키 불필요, Phase 6 대체 데이터)
 # ----------------------------------------------------------------------
 #

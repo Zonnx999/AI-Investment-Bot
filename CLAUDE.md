@@ -44,7 +44,8 @@
 | CoinGecko | `pycoingecko` | ❌ | 암호화폐 |
 | FMP | `https://financialmodelingprep.com/stable/...?symbol=...` | ✅ FMP_API_KEY (유료) | 재무제표 시계열, 전 종목 발굴(company-screener) |
 | 한국 무역 | FRED (OECD 출처) | ✅ FRED_API_KEY | 한국 수출·수입·무역수지 |
-| KRX (한국거래소) | `data-dbg.krx.co.kr/svc/apis/sto/*` (AUTH_KEY 헤더) | ✅ KRX_API_KEY | 한국 전 종목 일별매매·기본정보 (Phase 9, API별 신청 필요) |
+| KRX (한국거래소) | `data-dbg.krx.co.kr/svc/apis/sto/*` (AUTH_KEY 헤더) | ✅ KRX_API_KEY | 한국 전 종목 일별매매·기본정보 (Phase 9a, API별 신청 필요) |
+| DART (전자공시) | `opendart.fss.or.kr/api/*` (crtfc_key 쿼리) | ✅ DART_API_KEY | 한국 재무제표 → ROE/PER/PBR (Phase 9b). corpCode 로 6자리↔8자리 매핑 |
 
 **FMP 중요 사실 (2026-05 기준):** 2025-08-31 이후 가입자는 `/stable/` 엔드포인트만 사용 가능. `/api/v3/` 는 레거시. URL 패턴은 `?symbol=AAPL&apikey=...` (티커가 쿼리 파라미터). `/stable/key-metrics` 는 P/E 를 직접 안 주고 `earningsYield` 형태로 줌 → 역수 취해 계산.
 

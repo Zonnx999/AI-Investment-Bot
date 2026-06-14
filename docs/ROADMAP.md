@@ -139,13 +139,15 @@
 - ✅ 검증: 한국 중대형 **507종목** 발굴 (삼성전자 1885조 등), 우선주/ETF 제외 정상
 - ✅ FMP 보강 경로는 US 전용으로 분리 (KR 6자리코드는 FMP 미지원 → DART 로)
 
-#### Phase 9b — DART 펀더멘털 점수 (DART 키 발급 후)
-- [ ] **사용자 선행 작업**: opendart.fss.or.kr 가입 → 인증키 → `.env` DART_API_KEY (자리 마련됨)
-- [ ] DART corpCode.xml(zip) 다운로드 → 6자리 종목코드 ↔ 8자리 corp_code 매핑 테이블
-- [ ] `fetch_dart_financials(corp_code, year)` — 재무제표(매출/순이익/자본 등)
-- [ ] KR 점수: DART 순이익·자본 + KRX 시총/가격 → ROE / PER / PBR → value/health 점수
-- [ ] `enrich_kr()` (DART 배치, 재개가능) → KR 행 enriched=1 → scan/digest 에 한국 등장
-- [ ] 오프라인 테스트 (DART 응답 샘플 → 비율 계산 순수 함수)
+#### Phase 9b — DART 펀더멘털 점수 — ✅ 완료, 검증됨 (2026-06-14)
+- ✅ 사용자 DART 키 발급 + `.env` 등록 완료
+- ✅ `fetch_dart_corp_codes` (corpCode.xml zip → 6자리↔8자리, 상장사 3970), `fetch_dart_financials`
+  (주요계정, '당기순이익(손실)' 중복 dedupe, CFS 우선/OFS 폴백) — `_parse_dart_accounts` 순수함수
+- ✅ `calculate_kr_scores`: DART 순이익·자본·부채·영업이익 + KRX 시총 → ROE/PER/PBR → value/health
+- ✅ `enrich_kr()` 배치(재개가능, 배치커밋) → KR 행 enriched=1, per/pbr 컬럼 추가(스키마 마이그레이션)
+- ✅ build_universe `[3] 한국 보강` 단계 + scan 에 PER/PBR 표시
+- ✅ 검증: 기아 종합77(PER8.6/PBR1.06), 현대차 PBR0.97 등 저평가 발굴 타당. 12/12 보강 성공
+- ✅ 테스트 122개 (DART 파싱/KR 점수 순수함수 추가)
 
 ### Phase 10 — 데이터 호스팅 / 이동성 해결 — ✅ 완료 (Turso, 2026-06-13)
 노트북 이동이 잦아 로컬 DB 가 불편 + 클라우드 다이제스트가 풀유니버스를 못 씀.
