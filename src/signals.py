@@ -38,6 +38,8 @@ DEFAULT_SIGNAL_TICKERS = ("CPNG", "NVDA")
 
 MOMENTUM_LOOKBACK_LONG_D = 126    # ~6개월
 MOMENTUM_LOOKBACK_SHORT_D = 63    # ~3개월
+MOMENTUM_SKIP_D = 21             # 스킵-먼스 (최근 1개월 제외, Jegadeesh-Titman)
+MOMENTUM_12M_D = 252             # ~12개월
 MA_LONG_WINDOW = 200              # 장기 추세선
 
 # 종합 점수 가중치 — 합 1.0 (4팩터: 모멘텀/밸류/퀄리티/로우볼)
@@ -118,7 +120,7 @@ def momentum_score(prices: pd.Series) -> tuple[int, list[str]]:
     notes: list[str] = []
     scores: list[float] = []
     weights: list[float] = []
-    SKIP, LONG = 21, 252  # 1개월, 12개월 (거래일)
+    SKIP, LONG = MOMENTUM_SKIP_D, MOMENTUM_12M_D  # 모듈 상수 (테스트 오버라이드 가능)
 
     if len(p) > LONG + SKIP:
         r = float(p.iloc[-SKIP] / p.iloc[-(LONG + SKIP)] - 1) * 100
@@ -153,6 +155,8 @@ def low_vol_score(prices: pd.Series) -> tuple[int, list[str]]:
     if len(p) < MOMENTUM_LOOKBACK_SHORT_D:
         return 50, ["변동성 데이터 부족 — 중립(50)"]
     returns = p.pct_change().dropna()
+    # 252(거래일) 연환산 — 주식 기준. 크립토(365일 거래)엔 적용되지 않음
+    # (크립토는 calculate_crypto_scores 사용). 추후 크립토가 이 경로를 타면 365 필요.
     vol = float(returns.std() * np.sqrt(TRADING_DAYS_PER_YEAR) * 100)
     score = max(0.0, min(100.0, (30.0 / max(vol, 1.0)) * 50.0))
     return round(score), [f"연환산 변동성 {vol:.1f}% → Low Vol {round(score)}"]
@@ -193,7 +197,9 @@ def apply_screen_rules(rows: list[dict]) -> list[dict]:
 
         passing.append({**r, "reasons": reasons})
 
-    passing.sort(key=lambda r: (r.get("pe") or float("inf")))
+    # 정렬: 저PER 우선이되 같은 PER 대역이면 고ROE 우선 (PER만 보면 value-trap 위험).
+    # (이미 ROE>10% 필터를 통과한 후보군이라 1차 가드는 있음)
+    passing.sort(key=lambda r: (r.get("pe") or float("inf"), -(r.get("roe") or 0.0)))
     return passing
 
 

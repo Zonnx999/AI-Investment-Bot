@@ -24,6 +24,11 @@ def test_fmp_to_dataframe_sorts_and_indexes_by_date():
     assert df.iloc[0]["revenue"] == 100
 
 
+def test_fmp_to_dataframe_rejects_error_dict():
+    # FMP 가 200 + 에러 dict 를 줄 때 잘못된 1행 프레임을 만들면 안 됨 (#5)
+    assert _fmp_to_dataframe({"Error Message": "Invalid API KEY."}).empty
+
+
 def test_fmp_to_dataframe_without_date_column():
     df = _fmp_to_dataframe([{"symbol": "CPNG", "price": 17.0}])
     assert df.index.name is None  # date 없으면 인덱스 설정 안 함

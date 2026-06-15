@@ -82,3 +82,28 @@ def test_scorecard_to_dict_serializable():
 def test_empty_metrics_safe():
     assert calculate_health_score({}) >= 0
     assert calculate_value_score({}, {}) >= 0
+
+
+def test_negative_ev_ebitda_gets_zero_not_full():
+    """적자 EBITDA(음수 EV/EBITDA) 는 만점이 아니라 0점 (역설 방지)."""
+    quote = {"price": 100.0, "sector": "Technology", "industry": "Software"}
+    loss = {"evToEBITDA": -5.0, "priceToBookRatio": 2.0, "earningsYield": 0.0}
+    card = value_scorecard(quote, loss)
+    ev = next(c for c in card.components if c.label == "EV/EBITDA")
+    assert ev.points == 0.0
+    assert "적자" in ev.detail
+
+
+def test_negative_pbr_gets_zero():
+    """자본잠식(음수 PBR) 도 0점."""
+    quote = {"price": 100.0, "sector": "Industrials", "industry": "x"}
+    card = value_scorecard(quote, {"evToEBITDA": 10.0, "priceToBookRatio": -3.0})
+    pbr = next(c for c in card.components if c.label == "PBR")
+    assert pbr.points == 0.0
+
+
+def test_positive_ev_ebitda_still_scores():
+    quote = {"price": 100.0, "sector": "Industrials", "industry": "x"}
+    card = value_scorecard(quote, {"evToEBITDA": 5.0, "priceToBookRatio": 1.0})
+    ev = next(c for c in card.components if c.label == "EV/EBITDA")
+    assert ev.points > 0

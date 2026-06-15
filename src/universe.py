@@ -308,13 +308,17 @@ def _enrich_one(conn, symbol: str, market: str) -> bool:
     if not m:
         return False
 
-    # 발굴 단계에서 저장한 가격/섹터를 quote 대용으로 사용 (value 점수 일부에 필요)
+    # 발굴 단계에서 저장한 가격/섹터/배당을 quote 대용으로 사용 (value 점수에 필요).
+    # value_scorecard 는 lastAnnualDividend(절대 배당액)로 배당수익률을 재계산하므로,
+    # 저장된 dividend_yield(%) 에서 절대액을 역산해 넣어준다 (없으면 배당점수 0).
     base = conn.execute(
-        "SELECT price, sector, industry FROM screened WHERE symbol=? AND market=?",
+        "SELECT price, sector, industry, dividend_yield FROM screened WHERE symbol=? AND market=?",
         (symbol, market),
     ).fetchone()
-    price, sector, industry = base if base else (0.0, "", "")
-    quote_like = {"price": price, "sector": sector, "industry": industry}
+    price, sector, industry, div_yield = base if base else (0.0, "", "", 0.0)
+    last_div = (div_yield / 100.0) * price if (div_yield and price) else 0.0
+    quote_like = {"price": price, "sector": sector, "industry": industry,
+                  "lastAnnualDividend": last_div}
 
     health = health_scorecard(m)
     value = value_scorecard(quote_like, m)

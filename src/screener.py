@@ -196,10 +196,16 @@ def value_scorecard(quote: dict, metrics: dict) -> ScoreCard:
     is_fin = any(x in industry for x in ("Bank", "Financial", "Insurance"))
     ev_sales_pts = 7.5 if is_fin else _clip(15.0 - ev_sales * 2.0, 0, 15)
 
+    # 음수 배수(적자 EBITDA / 자본잠식 음수 PBR)는 '저평가' 아님 → 0점.
+    # 안 그러면 "25 − (음수)×1.25 > 25" 로 적자기업이 만점 받는 역설.
+    ev_ebitda_pts = _clip(25.0 - ev_ebitda * 1.25, 0, 25) if ev_ebitda > 0 else 0.0
+    pbr_pts = _clip(15.0 - pbr * 1.5, 0, 15) if pbr > 0 else 0.0
+
     comps = [
-        Component("EV/EBITDA", _clip(25.0 - ev_ebitda * 1.25, 0, 25), 25, f"{ev_ebitda:.1f}x"),
+        Component("EV/EBITDA", ev_ebitda_pts, 25,
+                  f"{ev_ebitda:.1f}x" + ("" if ev_ebitda > 0 else " (적자)")),
         Component("EV/Sales", ev_sales_pts, 15, ("금융중립" if is_fin else f"{ev_sales:.1f}x")),
-        Component("PBR", _clip(15.0 - pbr * 1.5, 0, 15), 15, f"{pbr:.2f}"),
+        Component("PBR", pbr_pts, 15, f"{pbr:.2f}" + ("" if pbr > 0 else " (자본잠식)")),
         Component("이익수익률", _clip(ey * 5.0, 0, 25), 25, f"{ey:.1f}%"),
         Component("배당수익률", _clip(dy * 2.0, 0, 10), 10, f"{dy:.1f}%"),
         Component("FCF수익률", _clip(fcf * 1.5, 0, 10), 10, f"{fcf:.1f}%"),

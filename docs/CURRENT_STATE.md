@@ -187,6 +187,22 @@ VaR/ES 는 수익률 시리즈만 받음 (7단계). 가격→수익률은 `retur
 
 ## 3. 가장 최근 완료 작업
 
+### 코드 리뷰 대응 (외부 AI 리포트 15건 트리아지) — ✅ (2026-06-15)
+검증 후 진짜 버그만 수정, 오진은 설명:
+- 🔴 #1+#2 **데코레이터 오배치 수정** — `@cached("fmp_quote")` 가 Phase 8 때 실수로
+  `fetch_company_screener` 에 붙어 있었음 → `fetch_quote` 로 이동. quote 무캐시 + screener
+  이중캐시 동시 해결 (검증: fmp_quote/company_screener 네임스페이스 분리 확인)
+- 🔴 #3 **음수 EV/EBITDA·PBR → 0점** — 적자기업이 만점 받던 역설 제거
+- 🔴 #5 `_fmp_to_dataframe` **list 가드** — FMP 에러 dict(200+Error Message) 방어
+- 🔴 #12 **universe enrich 배당 누락 수정** — quote_like 에 lastAnnualDividend(저장된
+  dividend_yield 역산) 전달 → US 전 종목 배당점수 0 이던 버그 해결
+- 🟡 #4(drawdown 중복호출 정리는 무해—유지), #8(국면범위 동적), #9(momentum SKIP/LONG
+  모듈상수), #10(value-trap 정렬 ROE 보조키), #13(utcnow→now(timezone.utc)), #14(MANEMP 라벨)
+- 🔵 오진/과장으로 미수정 (설명): #6(fetch_macro 이미 dropna), #7(low_vol 은 크립토 미적용—주석),
+  #11(429 자동 재시도로 throttle 완화), #15(커넥션 자체가 non-threadsafe—lock 만으론 불완전)
+- 테스트 137개 (음수배수/에러dict 가드 추가)
+
+
 ### 점수 엔진 정밀화 (UPGRADE_PLAN Phase 1) — ✅ 완료 (2026-06-15)
 - `screener.py`: `ScoreCard`/`Component` 도입 — 점수를 **구성요소로 분해** 반환.
   `health_scorecard`(총이익률 GP/ROIC/ROE/순부채/이익질/유동비율),

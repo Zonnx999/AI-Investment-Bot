@@ -192,7 +192,9 @@ class RegimeReport:
     failures: list[str] = field(default_factory=list)
 
     def __str__(self) -> str:
-        lines = [f"국면 판정: {self.regime}  (점수 {self.score:+d} / -3 ~ +3)"]
+        # 점수 범위는 지표 개수에서 동적 계산 (Phase 2 에서 VIX 등 추가 시 자동 반영)
+        rng = len(_REGIME_EVALUATORS)
+        lines = [f"국면 판정: {self.regime}  (점수 {self.score:+d} / -{rng} ~ +{rng})"]
         lines.append("")
         lines.append("근거:")
         lines.extend(f"  · {s}" for s in self.signals)
