@@ -113,7 +113,7 @@ def send_telegram(
     return result
 
 
-def get_updates(offset: int | None = None) -> list[dict[str, Any]]:
+def get_updates(offset: int | None = None, timeout: int = 0) -> list[dict[str, Any]]:
     """봇이 받은 최근 메시지들 (chat_id 발견 / 구독 명령 수거용).
 
     토큰만 있으면 호출 가능 (chat_id 불필요). 봇에게 메시지를 한 번 보낸 뒤
@@ -122,10 +122,14 @@ def get_updates(offset: int | None = None) -> list[dict[str, Any]]:
     offset: 이 update_id 이상만 반환 — 이전 것은 텔레그램 서버에서 확인 처리되어
             다음 호출부터 사라짐. cron 폴링(Phase 11a)이 '마지막 처리 update_id + 1'
             을 넘겨 같은 메시지를 두 번 처리하지 않도록 함.
+    timeout: long-poll 대기 초 (0=즉시 반환). 상시 봇(Phase 11b)은 ~20s 로 long-poll 해
+            유휴 시 요청 수를 줄임. ⚠️ http 세션 read timeout(25s)보다 작게 둘 것.
     """
     payload: dict[str, Any] = {}
     if offset is not None:
         payload["offset"] = offset
+    if timeout:
+        payload["timeout"] = timeout
     return _telegram_post("getUpdates", payload)
 
 

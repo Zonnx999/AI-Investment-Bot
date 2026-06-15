@@ -211,3 +211,17 @@ def test_sync_survives_getupdates_failure(fresh_db, owner_set, monkeypatch):
     monkeypatch.setattr("src.notifier.get_updates", boom)
     st = subscribers.sync_subscribers()
     assert st == {"requests": 0, "approved": 0, "denied": 0, "unsubscribed": 0, "ignored_admin": 0}
+
+
+def test_apply_events_handles_authorization_and_state(fresh_db, owner_set, monkeypatch):
+    # apply_events 는 fetch/offset 무관 — 폴링 루프(scripts/bot.py)가 재사용하는 경로
+    monkeypatch.setattr("src.notifier.send_safe",
+                        lambda text, chat_id=None, parse_mode="Markdown": True)
+    events = [
+        subscribers.SubEvent(1, "100", "alice", "request"),
+        subscribers.SubEvent(2, "1", "owner", "approve", "100"),    # 소유자 승인
+        subscribers.SubEvent(3, "999", "mallory", "approve", "100"),  # 비소유자 → 무시
+    ]
+    st = subscribers.apply_events(events)
+    assert st["requests"] == 1 and st["approved"] == 1 and st["ignored_admin"] == 1
+    assert subscribers.active_subscribers() == [("100", "alice")]

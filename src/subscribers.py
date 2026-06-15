@@ -215,26 +215,16 @@ _MSG_DENIED = "가입이 거절되었습니다."
 _MSG_UNSUBSCRIBED = "👋 구독이 해지되었습니다. 다시 받으려면 /start"
 
 
-def sync_subscribers(send_notifications: bool = True) -> dict[str, int]:
-    """텔레그램 명령 수거 → 요청/승인/거절/해지 처리. cron 폴링용.
+def apply_events(events: list[SubEvent], send_notifications: bool = True) -> dict[str, int]:
+    """파싱된 구독 이벤트들을 DB 에 반영 + 알림. (fetch/offset 무관 — 재사용 가능)
 
-    approve/deny/pending 은 **소유자(telegram_chat_id)** 가 보낸 것만 처리. offset 을
-    영속 state 에 저장해 재처리 방지. getUpdates 실패는 best-effort (다이제스트 발송 안 막음).
+    cron(sync_subscribers)과 상시 폴링 루프(scripts/bot.py)가 공유. approve/deny/pending 은
+    **소유자(telegram_chat_id)** 가 보낸 것만 처리. 조회 명령 등 "ignore" 는 무시.
     Returns {"requests","approved","denied","unsubscribed","ignored_admin"}.
     """
-    from src.notifier import get_updates, send_safe
+    from src.notifier import send_safe
 
-    store = get_storage()
     owner = str(settings.telegram_chat_id) if settings.telegram_chat_id else None
-
-    offset = store.get_state(_OFFSET_NS, _OFFSET_KEY)
-    try:
-        updates = get_updates(offset=offset)
-    except DataFetchError as e:
-        logger.warning("getUpdates 실패 — 구독 동기화 스킵: %s", e)
-        return {"requests": 0, "approved": 0, "denied": 0, "unsubscribed": 0, "ignored_admin": 0}
-
-    events, next_offset = parse_updates(updates)
     st = {"requests": 0, "approved": 0, "denied": 0, "unsubscribed": 0, "ignored_admin": 0}
     conn = _conn()
 
@@ -292,8 +282,30 @@ def sync_subscribers(send_notifications: bool = True) -> dict[str, int]:
                 notify(_MSG_DENIED, ev.target)
 
     conn.commit()
+    logger.info("구독 처리: %s", st)
+    return st
+
+
+def sync_subscribers(send_notifications: bool = True) -> dict[str, int]:
+    """텔레그램 명령 수거(getUpdates) → apply_events. cron(GitHub Actions) 폴링용.
+
+    offset 을 영속 state 에 저장해 재처리 방지. getUpdates 실패는 best-effort.
+    ⚠️ 상시 봇(scripts/bot.py)이 돌 때는 그쪽이 getUpdates 를 소유하므로 cron 은
+       이걸 호출하면 안 됨 (offset 경합) → send_digest.py --no-sync 사용.
+    """
+    from src.notifier import get_updates
+
+    store = get_storage()
+    offset = store.get_state(_OFFSET_NS, _OFFSET_KEY)
+    try:
+        updates = get_updates(offset=offset)
+    except DataFetchError as e:
+        logger.warning("getUpdates 실패 — 구독 동기화 스킵: %s", e)
+        return {"requests": 0, "approved": 0, "denied": 0, "unsubscribed": 0, "ignored_admin": 0}
+
+    events, next_offset = parse_updates(updates)
+    st = apply_events(events, send_notifications=send_notifications)
     if next_offset is not None:
         store.put_state(_OFFSET_NS, _OFFSET_KEY, next_offset)
     store.sync()
-    logger.info("구독 동기화: %s", st)
     return st
