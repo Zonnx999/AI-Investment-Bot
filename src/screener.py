@@ -30,17 +30,64 @@ JSON 스키마 (dashboard/index.html 호환)
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Iterable, TypedDict
 
 from src.data_fetcher import (
     fetch_crypto_top,
     fetch_key_metrics,
     fetch_quote,
+    fetch_ratios,
 )
 from src.exceptions import DataFetchError
 from src.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+# ----------------------------------------------------------------------
+# 점수 분해 (ScoreCard) — 총점뿐 아니라 '왜 이 점수인지'를 항목별로 보관.
+# scan --check / 텔레그램 /stock 이 이 분해를 그대로 보여줌.
+# ----------------------------------------------------------------------
+
+
+@dataclass
+class Component:
+    """점수 한 항목: 라벨, 획득점수, 만점, 원시값 설명 (예: ROE '15.2%')."""
+
+    label: str
+    points: float
+    max_points: float
+    detail: str
+
+    def as_tuple(self) -> list:
+        return [self.label, round(self.points, 1), self.max_points, self.detail]
+
+
+@dataclass
+class ScoreCard:
+    total: int
+    components: list[Component] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {"total": self.total, "components": [c.as_tuple() for c in self.components]}
+
+
+def latest_fundamentals(ticker: str) -> dict:
+    """key-metrics + ratios 최신 행 병합 — 점수 계산용 통합 dict.
+
+    grossProfitMargin·priceToBookRatio 는 ratios 에만, 나머지는 key-metrics 에 있어
+    둘 다 받아 병합 (충돌 시 key-metrics 우선). 둘 다 비면 {} 반환.
+    """
+    merged: dict = {}
+    km = fetch_key_metrics(ticker, limit=1)
+    if not km.empty:
+        merged.update(km.iloc[-1].to_dict())
+    rt = fetch_ratios(ticker, limit=1)
+    if not rt.empty:
+        for k, v in rt.iloc[-1].to_dict().items():
+            merged.setdefault(k, v)
+    return merged
 
 
 # ----------------------------------------------------------------------
@@ -97,60 +144,77 @@ def _safe(d: dict, key: str, default: float = 0.0) -> float:
     return float(default if v is None else v)
 
 
-def calculate_health_score(metrics: dict) -> int:
-    """재무 건전성 점수 (0~100). FMP /stable/key-metrics 응답 dict 기준.
+def _clip(v: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, v))
 
-    - Net Debt/EBITDA  : 낮을수록 좋음 → 최대 25점
-    - ROE              : 높을수록 좋음 → 최대 30점
-    - FCF Yield        : 높을수록 좋음 → 최대 25점
-    - Current Ratio    : 1~3 적정 → 최대 15점
-    - Income Quality   : 영업이익 대비 영업CF → 최대 5점
+
+def health_scorecard(metrics: dict) -> ScoreCard:
+    """재무 건전성 (0~100) — 학술 근거 기반 Quality 팩터 (병합 metrics 필요).
+
+    1. 총이익률 (Gross Profitability, Novy-Marx 2013) 25 — 가장 강력한 Quality 신호
+    2. ROIC (투하자본수익률) 20 — 자본비용 초과 여부 = 진짜 가치창출
+    3. ROE 20
+    4. 순부채/EBITDA 20 (낮을수록↑)
+    5. 이익의 질 (incomeQuality, CFO/순이익) 10
+    6. 유동비율 5
     """
-    net_debt_ebitda = _safe(metrics, "netDebtToEBITDA", 10.0)
-    roe_pct = _safe(metrics, "returnOnEquity") * 100  # 비율 → %
-    fcf_yield_pct = _safe(metrics, "freeCashFlowYield") * 100
-    current_ratio = _safe(metrics, "currentRatio", 1.0)
-    income_quality = _safe(metrics, "incomeQuality")
+    gp = _safe(metrics, "grossProfitMargin") * 100        # ratios
+    roic = _safe(metrics, "returnOnInvestedCapital") * 100  # key-metrics
+    roe = _safe(metrics, "returnOnEquity") * 100
+    nde = _safe(metrics, "netDebtToEBITDA", 10.0)
+    iq = _safe(metrics, "incomeQuality")
+    cr = _safe(metrics, "currentRatio", 1.0)
 
-    score = 0.0
-    score += max(0.0, 25.0 - net_debt_ebitda * 3.0)
-    score += min(30.0, max(0.0, roe_pct * 2.5))
-    score += min(25.0, max(0.0, fcf_yield_pct * 3.0))
-    score += min(15.0, min(current_ratio, 3.0) * 5.0)
-    score += min(5.0, max(0.0, income_quality))
-    return round(min(100.0, score))
+    comps = [
+        Component("총이익률(GP)", _clip(gp * 0.625, 0, 25), 25, f"{gp:.0f}%"),
+        Component("ROIC", _clip(roic * 1.0, 0, 20), 20, f"{roic:.1f}%"),
+        Component("ROE", _clip(roe * 1.67, 0, 20), 20, f"{roe:.1f}%"),
+        Component("순부채/EBITDA", _clip(20.0 - nde * 2.5, 0, 20), 20, f"{nde:.1f}x"),
+        Component("이익의 질", _clip(iq * 2.0, 0, 10), 10, f"{iq:.2f}"),
+        Component("유동비율", _clip(min(cr, 3.0) * 1.67, 0, 5), 5, f"{cr:.2f}"),
+    ]
+    return ScoreCard(round(min(100.0, sum(c.points for c in comps))), comps)
+
+
+def value_scorecard(quote: dict, metrics: dict) -> ScoreCard:
+    """저평가도 (0~100) — 무배당 성장주 페널티 제거 + EV/EBITDA·PBR 추가.
+
+    1. EV/EBITDA 25 (자본구조 중립) 2. EV/Sales 15(금융 중립) 3. PBR 15
+    4. 이익수익률(=1/PER) 25  5. 배당수익률 10(과거 35→축소)  6. FCF수익률 10
+    """
+    ev_ebitda = _safe(metrics, "evToEBITDA", 20.0)
+    ev_sales = _safe(metrics, "evToSales", 10.0)
+    pbr = _safe(metrics, "priceToBookRatio", 5.0)            # ratios
+    ey = _safe(metrics, "earningsYield") * 100
+    fcf = _safe(metrics, "freeCashFlowYield") * 100
+
+    price = _safe(quote, "price", 1.0)
+    last_div = _safe(quote, "lastDividend") or _safe(quote, "lastAnnualDividend")
+    dy = (last_div / max(price, 0.01)) * 100 if price else 0.0
+
+    industry = (quote.get("industry") or "") + (quote.get("sector") or "")
+    is_fin = any(x in industry for x in ("Bank", "Financial", "Insurance"))
+    ev_sales_pts = 7.5 if is_fin else _clip(15.0 - ev_sales * 2.0, 0, 15)
+
+    comps = [
+        Component("EV/EBITDA", _clip(25.0 - ev_ebitda * 1.25, 0, 25), 25, f"{ev_ebitda:.1f}x"),
+        Component("EV/Sales", ev_sales_pts, 15, ("금융중립" if is_fin else f"{ev_sales:.1f}x")),
+        Component("PBR", _clip(15.0 - pbr * 1.5, 0, 15), 15, f"{pbr:.2f}"),
+        Component("이익수익률", _clip(ey * 5.0, 0, 25), 25, f"{ey:.1f}%"),
+        Component("배당수익률", _clip(dy * 2.0, 0, 10), 10, f"{dy:.1f}%"),
+        Component("FCF수익률", _clip(fcf * 1.5, 0, 10), 10, f"{fcf:.1f}%"),
+    ]
+    return ScoreCard(round(min(100.0, sum(c.points for c in comps))), comps)
+
+
+def calculate_health_score(metrics: dict) -> int:
+    """건전성 점수 int (하위호환 wrapper)."""
+    return health_scorecard(metrics).total
 
 
 def calculate_value_score(quote: dict, metrics: dict) -> int:
-    """저평가도 점수 (0~100). quote 와 key-metrics 둘 다 사용.
-
-    - EV/Sales        : 낮을수록 좋음 → 최대 30점 (금융사 예외)
-    - 배당수익률      : 최대 35점
-    - FCF Yield       : 최대 20점
-    - Earnings Yield  : 최대 15점
-    """
-    ev_to_sales = _safe(metrics, "evToSales", 10.0)
-    fcf_yield_pct = _safe(metrics, "freeCashFlowYield") * 100
-    earnings_yield_pct = _safe(metrics, "earningsYield") * 100
-
-    # 배당수익률 = lastDividend / price * 100
-    price = _safe(quote, "price", 1.0)
-    last_dividend = _safe(quote, "lastDividend") or _safe(quote, "lastAnnualDividend")
-    dividend_yield_pct = (last_dividend / max(price, 0.01)) * 100 if price else 0.0
-
-    # 금융업종은 EV/Sales 의미 적음 → 중립 처리
-    industry = (quote.get("industry") or "") + (quote.get("sector") or "")
-    is_financial = "Bank" in industry or "Financial" in industry or "Insurance" in industry
-
-    score = 0.0
-    if is_financial:
-        score += 15.0  # 중립값
-    else:
-        score += max(0.0, 30.0 - ev_to_sales * 4.0)
-    score += min(35.0, dividend_yield_pct * 5.0)
-    score += min(20.0, max(0.0, fcf_yield_pct * 3.0))
-    score += min(15.0, max(0.0, earnings_yield_pct * 3.0))
-    return round(min(100.0, score))
+    """저평가도 점수 int (하위호환 wrapper)."""
+    return value_scorecard(quote, metrics).total
 
 
 def calculate_crypto_scores(coin: dict) -> dict:
@@ -205,16 +269,11 @@ def screen_one(ticker: str) -> ScreenedStock | None:
         logger.warning("Quote 실패 — %s: %s", ticker, e)
         return None
 
-    metrics_df = None
     metrics: dict = {}
     try:
-        metrics_df = fetch_key_metrics(ticker, limit=1)
+        metrics = latest_fundamentals(ticker)   # key-metrics + ratios 병합
     except DataFetchError as e:
-        # 한국 종목 등 FMP plan 에서 막힌 케이스 — 기본값으로 점수 산출
-        logger.info("Key-metrics 미가용 — %s: %s (기본값으로 진행)", ticker, e)
-
-    if metrics_df is not None and not metrics_df.empty:
-        metrics = metrics_df.iloc[-1].to_dict()
+        logger.info("Fundamentals 미가용 — %s: %s (기본값으로 진행)", ticker, e)
 
     health = calculate_health_score(metrics)
     value = calculate_value_score(quote, metrics)

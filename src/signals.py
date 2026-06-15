@@ -25,7 +25,7 @@ import pandas as pd
 
 from src.exceptions import DataFetchError, InsufficientDataError
 from src.logger import get_logger
-from src.screener import calculate_health_score, calculate_value_score
+from src.screener import calculate_health_score, calculate_value_score, latest_fundamentals
 from src.storage import get_storage
 from src.utils import TRADING_DAYS_PER_YEAR, close_series
 
@@ -40,8 +40,8 @@ MOMENTUM_LOOKBACK_LONG_D = 126    # ~6개월
 MOMENTUM_LOOKBACK_SHORT_D = 63    # ~3개월
 MA_LONG_WINDOW = 200              # 장기 추세선
 
-# 종합 점수 가중치 — 합 1.0
-COMPOSITE_WEIGHTS = {"momentum": 1 / 3, "value": 1 / 3, "quality": 1 / 3}
+# 종합 점수 가중치 — 합 1.0 (4팩터: 모멘텀/밸류/퀄리티/로우볼)
+COMPOSITE_WEIGHTS = {"momentum": 0.25, "value": 0.25, "quality": 0.25, "low_vol": 0.25}
 
 # 스크리닝 룰
 SCREEN_MIN_ROE = 0.10             # ROE > 10%
@@ -70,6 +70,7 @@ class FactorScores:
     quality: int
     composite: int
     notes: list[str] = field(default_factory=list)
+    low_vol: int = 0   # 4번째 팩터 (Low Volatility)
 
 
 @dataclass
@@ -99,43 +100,62 @@ class SignalReport:
 
 
 def momentum_score(prices: pd.Series) -> tuple[int, list[str]]:
-    """가격 시리즈 → 모멘텀 점수 (0~100) + 근거.
+    """가격 시리즈 → 모멘텀 점수 (0~100, 연속) + 근거.
 
-    세 요소를 각각 통과/탈락으로 평가, 점수 = 100 × 통과 / 평가가능 요소 수:
-      · 6개월 수익률 > 0
-      · 3개월 수익률 > 0
-      · 현재가 > 200일 이동평균
-
-    데이터가 짧으면 평가 가능한 요소만 사용. 하나도 평가 불가면
-    InsufficientDataError.
+    연속 점수 (구버전 0/33/67/100 → 세분화):
+      A. 스킵-먼스 모멘텀 (70%): 12개월-1개월 수익률 (Jegadeesh-Titman 1993 —
+         최근 1개월 제외가 단기 평균회귀 노이즈를 걷어내 신호를 강화).
+         데이터 부족 시 3개월 수익률로 대체.
+      B. 200일선 위치 (30%): 이동평균 대비 ±% 거리.
+    매핑: 0% → 50점, +30%(A)/+10%(B) → ~83점 (선형, 0~100 클램프).
     """
     p = prices.dropna()
-    notes: list[str] = []
-    passed = 0
-    evaluated = 0
-
-    for label, lookback in (("6개월", MOMENTUM_LOOKBACK_LONG_D), ("3개월", MOMENTUM_LOOKBACK_SHORT_D)):
-        if len(p) > lookback:
-            r = float(p.iloc[-1] / p.iloc[-(lookback + 1)] - 1) * 100
-            ok = r > 0
-            evaluated += 1
-            passed += ok
-            notes.append(f"{label} 수익률 {r:+.1f}% {'↑' if ok else '↓'}")
-
-    if len(p) >= MA_LONG_WINDOW:
-        ma = float(p.rolling(MA_LONG_WINDOW).mean().iloc[-1])
-        last = float(p.iloc[-1])
-        ok = last > ma
-        evaluated += 1
-        passed += ok
-        notes.append(f"200일선 {'위' if ok else '아래'} (현재 {last:,.2f} vs MA {ma:,.2f})")
-
-    if evaluated == 0:
+    if len(p) < MOMENTUM_LOOKBACK_SHORT_D + 1:
         raise InsufficientDataError(
             f"모멘텀 평가에 데이터 {len(p)}개 — 최소 {MOMENTUM_LOOKBACK_SHORT_D + 1}개 필요",
             n_points=len(p), required=MOMENTUM_LOOKBACK_SHORT_D + 1,
         )
-    return round(100 * passed / evaluated), notes
+    notes: list[str] = []
+    scores: list[float] = []
+    weights: list[float] = []
+    SKIP, LONG = 21, 252  # 1개월, 12개월 (거래일)
+
+    if len(p) > LONG + SKIP:
+        r = float(p.iloc[-SKIP] / p.iloc[-(LONG + SKIP)] - 1) * 100
+        scores.append(max(0.0, min(100.0, 50.0 + r * (50.0 / 30.0))))
+        weights.append(0.70)
+        notes.append(f"12-1개월(skip) 수익률 {r:+.1f}% {'↑' if r > 0 else '↓'}")
+    else:
+        r = float(p.iloc[-1] / p.iloc[-(MOMENTUM_LOOKBACK_SHORT_D + 1)] - 1) * 100
+        scores.append(max(0.0, min(100.0, 50.0 + r * (50.0 / 15.0))))
+        weights.append(0.70)
+        notes.append(f"3개월 수익률 {r:+.1f}% (데이터 부족, 단기 대체)")
+
+    if len(p) >= MA_LONG_WINDOW:
+        ma = float(p.rolling(MA_LONG_WINDOW).mean().iloc[-1])
+        last = float(p.iloc[-1])
+        pct = (last / ma - 1) * 100
+        scores.append(max(0.0, min(100.0, 50.0 + pct * (50.0 / 10.0))))
+        weights.append(0.30)
+        notes.append(f"200일선 {'위' if pct > 0 else '아래'} {pct:+.1f}%")
+
+    final = sum(s * w for s, w in zip(scores, weights)) / sum(weights)
+    return round(final), notes
+
+
+def low_vol_score(prices: pd.Series) -> tuple[int, list[str]]:
+    """Low Volatility 팩터 (0~100) — 변동성 낮을수록 높음.
+
+    Robeco/MSCI 가 독립적 알파 원천으로 확인한 팩터. 연환산 변동성 기준
+    ~15% → 100, ~30% → 50, ~60% → 25 (score = clip(30/vol × 50)).
+    """
+    p = prices.dropna()
+    if len(p) < MOMENTUM_LOOKBACK_SHORT_D:
+        return 50, ["변동성 데이터 부족 — 중립(50)"]
+    returns = p.pct_change().dropna()
+    vol = float(returns.std() * np.sqrt(TRADING_DAYS_PER_YEAR) * 100)
+    score = max(0.0, min(100.0, (30.0 / max(vol, 1.0)) * 50.0))
+    return round(score), [f"연환산 변동성 {vol:.1f}% → Low Vol {round(score)}"]
 
 
 # ----------------------------------------------------------------------
@@ -238,11 +258,13 @@ _STATE_KEY = "last_run"
 
 
 def factor_scores(ticker: str) -> FactorScores:
-    """한 종목의 팩터 점수. value/quality 데이터 미가용 시 0점 + note."""
-    from src.data_fetcher import fetch_key_metrics, fetch_prices, fetch_quote
+    """한 종목의 4팩터 점수 (모멘텀/밸류/퀄리티/로우볼). 데이터 미가용 시 0점 + note."""
+    from src.data_fetcher import fetch_prices, fetch_quote
 
     closes = close_series(fetch_prices(ticker, period="1y"))
     momentum, notes = momentum_score(closes)
+    low_vol, lv_notes = low_vol_score(closes)
+    notes.extend(lv_notes)
 
     quote: dict = {}
     metrics: dict = {}
@@ -251,13 +273,11 @@ def factor_scores(ticker: str) -> FactorScores:
     except DataFetchError as e:
         notes.append(f"quote 미가용 ({type(e).__name__}) — value 점수 불완전")
     try:
-        metrics_df = fetch_key_metrics(ticker, limit=1)
-        if not metrics_df.empty:
-            metrics = metrics_df.iloc[-1].to_dict()
-        else:
-            notes.append("key-metrics 빈 응답 — value/quality 점수 불완전")
+        metrics = latest_fundamentals(ticker)   # key-metrics + ratios 병합
+        if not metrics:
+            notes.append("fundamentals 빈 응답 — value/quality 점수 불완전")
     except DataFetchError as e:
-        notes.append(f"key-metrics 미가용 ({type(e).__name__}) — value/quality 점수 불완전")
+        notes.append(f"fundamentals 미가용 ({type(e).__name__}) — value/quality 점수 불완전")
 
     value = calculate_value_score(quote, metrics)
     quality = calculate_health_score(metrics)
@@ -265,8 +285,9 @@ def factor_scores(ticker: str) -> FactorScores:
         momentum * COMPOSITE_WEIGHTS["momentum"]
         + value * COMPOSITE_WEIGHTS["value"]
         + quality * COMPOSITE_WEIGHTS["quality"]
+        + low_vol * COMPOSITE_WEIGHTS["low_vol"]
     )
-    return FactorScores(ticker, momentum, value, quality, composite, notes)
+    return FactorScores(ticker, momentum, value, quality, composite, notes, low_vol=low_vol)
 
 
 def screen_candidates(tickers: list[str]) -> list[dict]:

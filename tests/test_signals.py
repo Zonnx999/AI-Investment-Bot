@@ -19,37 +19,55 @@ from src.signals import (
 # ---------------- momentum_score ----------------
 
 
-def _uptrend(n=260) -> pd.Series:
-    idx = pd.bdate_range("2024-01-01", periods=n)
+def _uptrend(n=300) -> pd.Series:
+    idx = pd.bdate_range("2023-06-01", periods=n)
     return pd.Series(np.linspace(100, 200, n), index=idx)
 
 
-def _downtrend(n=260) -> pd.Series:
-    idx = pd.bdate_range("2024-01-01", periods=n)
+def _downtrend(n=300) -> pd.Series:
+    idx = pd.bdate_range("2023-06-01", periods=n)
     return pd.Series(np.linspace(200, 100, n), index=idx)
 
 
-def test_momentum_full_score_on_uptrend():
+def test_momentum_high_on_uptrend():
+    # 강한 상승 → 높은 점수 (상한 100 도달 가능). 연속성은 별도 테스트가 검증.
     score, notes = momentum_score(_uptrend())
-    assert score == 100
-    assert len(notes) == 3  # 6개월/3개월/200일선 모두 평가
+    assert score >= 85
+    assert len(notes) == 2  # skip-month 모멘텀 + 200일선
 
 
-def test_momentum_zero_on_downtrend():
+def test_momentum_low_on_downtrend():
     score, _ = momentum_score(_downtrend())
-    assert score == 0
+    assert score <= 15
 
 
-def test_momentum_partial_data_uses_available_factors():
-    # 100일이면 6개월(126) 평가 불가, 3개월(63)만 평가 가능, 200일선 불가
+def test_momentum_continuous_not_tiered():
+    # 완만한 상승과 급한 상승이 다른 점수여야 함 (연속성)
+    idx = pd.bdate_range("2023-06-01", periods=300)
+    mild = pd.Series(np.linspace(100, 110, 300), index=idx)
+    steep = pd.Series(np.linspace(100, 180, 300), index=idx)
+    assert momentum_score(steep)[0] > momentum_score(mild)[0]
+
+
+def test_momentum_partial_data_uses_short_fallback():
+    # 100일이면 12mo skip 불가 → 3개월 대체 (1) + 200일선 불가 → notes 1개
     score, notes = momentum_score(_uptrend(100))
     assert len(notes) == 1
-    assert score == 100
+    assert 0 <= score <= 100
 
 
 def test_momentum_too_short_raises():
     with pytest.raises(InsufficientDataError):
         momentum_score(_uptrend(30))
+
+
+def test_low_vol_score_inverse():
+    rng = np.random.default_rng(0)
+    idx = pd.bdate_range("2023-06-01", periods=300)
+    low = pd.Series(100 * np.cumprod(1 + rng.normal(0.0005, 0.008, 300)), index=idx)
+    high = pd.Series(100 * np.cumprod(1 + rng.normal(0.0005, 0.035, 300)), index=idx)
+    from src.signals import low_vol_score
+    assert low_vol_score(low)[0] > low_vol_score(high)[0]
 
 
 # ---------------- apply_screen_rules ----------------

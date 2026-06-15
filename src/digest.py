@@ -54,10 +54,11 @@ def format_digest(
     # ---- 오늘의 발굴 종목 (스크리닝 상위) + 팩터 점수 ----
     if report.factors:
         lines.append("")
-        lines.append("*📈 오늘의 발굴 종목* (스크리닝 상위 · 모멘텀/밸류/퀄리티→종합)")
+        lines.append("*📈 오늘의 발굴 종목* (모멘텀/밸류/퀄리티/로우볼 → 종합)")
         for f in sorted(report.factors, key=lambda x: x.composite, reverse=True):
             lines.append(
-                f"  `{f.ticker:<5}` {f.momentum:>3}/{f.value:>3}/{f.quality:>3} → *{f.composite}*"
+                f"  `{f.ticker:<5}` {f.momentum:>3}/{f.value:>3}/{f.quality:>3}/{f.low_vol:>3} "
+                f"→ *{f.composite}*"
             )
 
     # ---- 발굴 종목 ----

@@ -121,13 +121,15 @@ def test_enrich_calls_progress_and_enriches(fresh_db, monkeypatch):
         )
     conn.commit()
 
-    # key-metrics 네트워크 호출을 합성 df 로 대체
-    fake = pd.DataFrame([{
-        "returnOnEquity": 0.20, "evToSales": 2.0, "freeCashFlowYield": 0.05,
-        "netDebtToEBITDA": 1.0, "earningsYield": 0.08, "currentRatio": 2.0,
-        "incomeQuality": 1.0,
-    }])
-    monkeypatch.setattr("src.data_fetcher.fetch_key_metrics", lambda *a, **k: fake)
+    # 병합 메트릭(key-metrics+ratios) 네트워크 호출을 합성 dict 로 대체
+    # (_enrich_one 은 src.screener.latest_fundamentals 를 호출)
+    fake = {
+        "returnOnEquity": 0.20, "returnOnInvestedCapital": 0.15, "grossProfitMargin": 0.40,
+        "evToSales": 2.0, "evToEBITDA": 9.0, "priceToBookRatio": 1.5,
+        "freeCashFlowYield": 0.05, "netDebtToEBITDA": 1.0, "earningsYield": 0.08,
+        "currentRatio": 2.0, "incomeQuality": 1.0,
+    }
+    monkeypatch.setattr("src.screener.latest_fundamentals", lambda ticker: fake)
 
     seen: list[tuple[int, int]] = []
     stats = universe.enrich(
@@ -187,14 +189,12 @@ def test_kr_not_targeted_by_fmp_enrichment(fresh_db):
 
 
 def test_enrich_empty_metrics_counts_no_data(fresh_db, monkeypatch):
-    import pandas as pd
-
     conn = universe._conn()
     universe._upsert_universe_row(
         conn, symbol="ZZZ", market="US", name="Z", sector="x", industry="x",
         price=10.0, market_cap=2e9, dividend_yield=0.0,
     )
     conn.commit()
-    monkeypatch.setattr("src.data_fetcher.fetch_key_metrics", lambda *a, **k: pd.DataFrame())
+    monkeypatch.setattr("src.screener.latest_fundamentals", lambda ticker: {})
     stats = universe.enrich()
     assert stats["no_data"] == 1 and stats["enriched"] == 0

@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS screened (
     total_score      INTEGER,
     per              REAL,                          -- KR(DART): 주가수익비율
     pbr              REAL,                          -- KR(DART): 주가순자산비율
+    detail           TEXT,                          -- 점수 분해 JSON (--check/텔레그램)
     enriched         INTEGER NOT NULL DEFAULT 0,   -- 0=발굴만, 1=보강+점수 완료
     discovered_at    TEXT,
     updated_at       TEXT,
@@ -96,9 +97,9 @@ def _conn() -> sqlite3.Connection:
     conn.executescript(_SCHEMA)
     # 기존 DB 마이그레이션: per/pbr 컬럼 없으면 추가 (9b 도입)
     existing = {r[1] for r in conn.execute("PRAGMA table_info(screened)").fetchall()}
-    for col in ("per", "pbr"):
+    for col, coltype in (("per", "REAL"), ("pbr", "REAL"), ("detail", "TEXT")):
         if col not in existing:
-            conn.execute(f"ALTER TABLE screened ADD COLUMN {col} REAL")
+            conn.execute(f"ALTER TABLE screened ADD COLUMN {col} {coltype}")
     return conn
 
 
@@ -298,13 +299,14 @@ def symbols_needing_enrichment(max_age: timedelta = ENRICH_MAX_AGE) -> list[tupl
 
 
 def _enrich_one(conn, symbol: str, market: str) -> bool:
-    """한 종목 key-metrics → 점수 → DB. 성공 True. 데이터 없으면 False."""
-    from src.data_fetcher import fetch_key_metrics
+    """한 종목 key-metrics+ratios → 점수카드 → DB. 성공 True. 데이터 없으면 False."""
+    import json
 
-    df = fetch_key_metrics(symbol, limit=1)
-    if df.empty:
+    from src.screener import health_scorecard, latest_fundamentals, value_scorecard
+
+    m = latest_fundamentals(symbol)   # key-metrics + ratios 병합
+    if not m:
         return False
-    m = df.iloc[-1].to_dict()
 
     # 발굴 단계에서 저장한 가격/섹터를 quote 대용으로 사용 (value 점수 일부에 필요)
     base = conn.execute(
@@ -314,15 +316,17 @@ def _enrich_one(conn, symbol: str, market: str) -> bool:
     price, sector, industry = base if base else (0.0, "", "")
     quote_like = {"price": price, "sector": sector, "industry": industry}
 
-    health = calculate_health_score(m)
-    value = calculate_value_score(quote_like, m)
-    total = round((health + value) / 2)
+    health = health_scorecard(m)
+    value = value_scorecard(quote_like, m)
+    total = round((health.total + value.total) / 2)
+    detail = json.dumps({"health": health.to_dict(), "value": value.to_dict()},
+                        ensure_ascii=False)
 
     conn.execute(
         """
         UPDATE screened SET
             roe=?, ev_to_sales=?, fcf_yield=?, net_debt_ebitda=?,
-            health_score=?, value_score=?, total_score=?, enriched=1, updated_at=?
+            health_score=?, value_score=?, total_score=?, detail=?, enriched=1, updated_at=?
         WHERE symbol=? AND market=?
         """,
         (
@@ -330,7 +334,7 @@ def _enrich_one(conn, symbol: str, market: str) -> bool:
             m.get("evToSales"),
             (m.get("freeCashFlowYield") or 0) * 100,
             m.get("netDebtToEBITDA"),
-            health, value, total, _utcnow(), symbol, market,
+            health.total, value.total, total, detail, _utcnow(), symbol, market,
         ),
     )
     return True
@@ -399,29 +403,36 @@ def calculate_kr_scores(fin: dict, market_cap: float) -> dict:
     debt_ratio = (debt / eq * 100) if (debt is not None and eq) else None
     op_margin = (op / rev * 100) if (op is not None and rev) else None
 
-    health = 0.0
-    if roe is not None:
-        health += min(35.0, max(0.0, roe * 2.5))            # ROE 14%+ → 만점
-    if debt_ratio is not None:
-        health += min(30.0, max(0.0, 30.0 - debt_ratio / 10))  # 부채비율 0%→30, 300%→0
-    if op_margin is not None:
-        health += min(20.0, max(0.0, op_margin * 2))        # 영업이익률 10%+ → 만점
-    if ni is not None and ni > 0:
-        health += 15.0                                       # 흑자 보너스
+    from src.screener import Component, ScoreCard
 
-    value = 0.0
-    if per is not None and per > 0:
-        value += min(40.0, max(0.0, 40.0 - per * 1.5))      # PER 낮을수록 (PER<6 만점 근처)
-        value += min(25.0, max(0.0, (1.0 / per) * 100 * 2.5))  # 이익수익률
-    if pbr is not None and pbr > 0:
-        value += min(35.0, max(0.0, 35.0 - pbr * 17.5))     # PBR<1 만점 근처
+    def _clip(v, lo, hi):
+        return max(lo, min(hi, v))
 
-    health_i = round(min(100.0, health))
-    value_i = round(min(100.0, value))
+    h = [
+        Component("ROE", _clip((roe or 0) * 2.5, 0, 35), 35,
+                  f"{roe:.1f}%" if roe is not None else "—"),
+        Component("부채비율", _clip(30.0 - (debt_ratio or 999) / 10, 0, 30), 30,
+                  f"{debt_ratio:.0f}%" if debt_ratio is not None else "—"),
+        Component("영업이익률", _clip((op_margin or 0) * 2, 0, 20), 20,
+                  f"{op_margin:.1f}%" if op_margin is not None else "—"),
+        Component("흑자", 15.0 if (ni is not None and ni > 0) else 0.0, 15,
+                  "흑자" if (ni is not None and ni > 0) else "적자"),
+    ]
+    v = [
+        Component("PER", _clip(40.0 - per * 1.5, 0, 40) if (per and per > 0) else 0, 40,
+                  f"{per:.1f}" if per else "—"),
+        Component("이익수익률", _clip((1.0 / per) * 100 * 2.5, 0, 25) if (per and per > 0) else 0, 25,
+                  f"{100/per:.1f}%" if (per and per > 0) else "—"),
+        Component("PBR", _clip(35.0 - pbr * 17.5, 0, 35) if (pbr and pbr > 0) else 0, 35,
+                  f"{pbr:.2f}" if pbr else "—"),
+    ]
+    health_card = ScoreCard(round(min(100.0, sum(c.points for c in h))), h)
+    value_card = ScoreCard(round(min(100.0, sum(c.points for c in v))), v)
     return {
-        "health_score": health_i, "value_score": value_i,
-        "total_score": round((health_i + value_i) / 2),
+        "health_score": health_card.total, "value_score": value_card.total,
+        "total_score": round((health_card.total + value_card.total) / 2),
         "roe": roe, "per": per, "pbr": pbr,
+        "detail": {"health": health_card.to_dict(), "value": value_card.to_dict()},
     }
 
 
@@ -477,13 +488,15 @@ def enrich_kr(
                     "SELECT market_cap FROM screened WHERE symbol=? AND market='KR'", (symbol,)
                 ).fetchone()
                 if fin and fin.get("equity") and mcap:
+                    import json
                     sc = calculate_kr_scores(fin, float(mcap[0]))
                     conn.execute(
                         "UPDATE screened SET roe=?, per=?, pbr=?, health_score=?, "
-                        "value_score=?, total_score=?, enriched=1, updated_at=? "
+                        "value_score=?, total_score=?, detail=?, enriched=1, updated_at=? "
                         "WHERE symbol=? AND market='KR'",
                         (sc["roe"], sc["per"], sc["pbr"], sc["health_score"],
-                         sc["value_score"], sc["total_score"], _utcnow(), symbol),
+                         sc["value_score"], sc["total_score"],
+                         json.dumps(sc["detail"], ensure_ascii=False), _utcnow(), symbol),
                     )
                     stats["enriched"] += 1
                 else:
@@ -546,6 +559,28 @@ def lookup(symbol: str) -> ScanRow | None:
         (symbol.upper(),),
     ).fetchone()
     return ScanRow(*r) if r else None
+
+
+def lookup_detail(symbol: str) -> dict | None:
+    """종목의 점수 분해 JSON (--check / 텔레그램 /stock 용). 없으면 None.
+
+    반환 형태: {"health": {total, components:[[label,pts,max,detail],...]},
+                "value": {...}}
+    """
+    import json
+
+    conn = _conn()
+    r = conn.execute(
+        "SELECT detail FROM screened WHERE symbol=? AND enriched=1 AND detail IS NOT NULL "
+        "ORDER BY CASE market WHEN 'US' THEN 0 WHEN 'KR' THEN 1 ELSE 2 END LIMIT 1",
+        (symbol.upper(),),
+    ).fetchone()
+    if not r or not r[0]:
+        return None
+    try:
+        return json.loads(r[0])
+    except (json.JSONDecodeError, TypeError):
+        return None
 
 
 def top_symbols(n: int = 6, market: str = "US") -> list[str]:

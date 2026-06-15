@@ -187,6 +187,21 @@ VaR/ES 는 수익률 시리즈만 받음 (7단계). 가격→수익률은 `retur
 
 ## 3. 가장 최근 완료 작업
 
+### 점수 엔진 정밀화 (UPGRADE_PLAN Phase 1) — ✅ 완료 (2026-06-15)
+- `screener.py`: `ScoreCard`/`Component` 도입 — 점수를 **구성요소로 분해** 반환.
+  `health_scorecard`(총이익률 GP/ROIC/ROE/순부채/이익질/유동비율),
+  `value_scorecard`(EV/EBITDA·EV/Sales·PBR·이익수익률·배당·FCF). `calculate_*` 는 int wrapper(호환)
+- **필드 교정**(검증): ROIC=`returnOnInvestedCapital`, GP마진·PBR 은 `ratios` 엔드포인트 →
+  `latest_fundamentals()` 가 key-metrics+ratios 병합 (종목당 FMP 2콜, 7일 캐시)
+- `signals.py`: momentum 연속화(skip-month 12-1M, Jegadeesh-Titman) + `low_vol_score` 추가 →
+  **4팩터**(모멘텀/밸류/퀄리티/로우볼 각 0.25). `FactorScores.low_vol` 필드
+- `universe.py`: enrich 가 병합메트릭+점수카드 → `detail`(JSON) 컬럼 저장(+마이그레이션).
+  KR `calculate_kr_scores` 도 동일 detail 구조. `lookup_detail()` 신설
+- `scan.py --check`: 점수 분해를 막대그래프로 표시 (텔레그램 /stock 재사용 형태)
+- 테스트 132개 (점수카드/모멘텀연속/로우볼 추가). ⚠️ 새 점수는 build_universe --enrich 재실행 필요
+- ⏳ UPGRADE_PLAN Phase 2~4 대기 (VIX/regime, earnings revision, 내부자/공매도, 포트폴리오, NLP)
+
+
 ### Phase 10 — 데이터 호스팅 (Turso) — ✅ 완료, 검증됨 (2026-06-13)
 노트북 이동성 + 클라우드 풀유니버스 해결. **Turso(libSQL) 임베디드 레플리카** 채택.
 - `storage.py` 백엔드 선택: `TURSO_DATABASE_URL` 있으면 libSQL(로컬 레플리카+클라우드 sync),

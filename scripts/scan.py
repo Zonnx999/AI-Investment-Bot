@@ -24,6 +24,12 @@ from src.logger import get_logger
 logger = get_logger(__name__)
 
 
+def _mini_bar(pts: float, mx: float, width: int = 10) -> str:
+    """항목 점수 비율을 막대로 (점수 분해 시각화)."""
+    filled = int(round(width * (pts / mx))) if mx else 0
+    return "█" * filled + "░" * (width - filled)
+
+
 def _fmt_mcap(market: str, mcap: float) -> str:
     """시총 표기 — 한국은 원화(조), 미국/크립토는 달러($B)."""
     if not mcap:
@@ -71,6 +77,19 @@ def main() -> int:
         rank = next((i for i, r in enumerate(peers, 1) if r.symbol == row.symbol), None)
         if rank:
             print(f"  {row.market} 내 순위: {rank}위 / {len(peers)}종목")
+
+        # 점수 분해 — '왜 이 점수인지' (텔레그램 /stock 과 동일 내용)
+        detail = universe.lookup_detail(row.symbol)
+        if detail:
+            for key, title in (("health", "🏥 건전성 분해"), ("value", "💰 저평가도 분해")):
+                card = detail.get(key, {})
+                comps = card.get("components", [])
+                if not comps:
+                    continue
+                print(f"\n  {title} (총 {card.get('total')}점)")
+                for label, pts, mx, raw in comps:
+                    bar = _mini_bar(pts, mx)
+                    print(f"    {label:<12} {pts:>4.1f}/{mx:<2.0f} {bar}  {raw}")
         return 0
 
     st = universe.stats()
