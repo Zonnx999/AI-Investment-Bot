@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 from src.digest import format_digest
 from src.predictors import LeadLagResult
 from src.signals import Alert, FactorScores, SignalReport
+from src.universe import ScanRow
 
 KST = ZoneInfo("Asia/Seoul")
 NOW = datetime(2026, 6, 14, 7, 0, tzinfo=KST)
@@ -87,3 +88,44 @@ def test_digest_handles_loss_maker_candidate():
     rep = _report(candidates=[{"ticker": "RIVN", "pe": None, "reasons": []}])
     out = format_digest(rep, [], now=NOW)
     assert "적자" in out
+
+
+# ---------------- 시장별 (Step 1: KR/US 발굴 분리) ----------------
+
+
+def _kr_pick(symbol, name, total, value, health, per, pbr) -> ScanRow:
+    return ScanRow(symbol=symbol, market="KR", name=name, sector="", price=0.0,
+                   market_cap=0.0, total_score=total, value_score=value,
+                   health_score=health, roe=None, per=per, pbr=pbr)
+
+
+def test_us_digest_has_us_market_label():
+    out = format_digest(_report(), [], now=NOW, market="us")
+    assert "🇺🇸 미국" in out
+    assert "모멘텀/밸류/퀄리티/로우볼" in out          # US 는 4팩터 표
+
+
+def test_kr_digest_renders_korean_picks_not_us_factors():
+    picks = [_kr_pick("005930", "삼성전자", 77, 80, 74, 8.6, 1.06),
+             _kr_pick("000270", "기아", 75, 88, 70, 4.2, 0.90)]
+    out = format_digest(_report(), [], now=NOW, market="kr", kr_picks=picks)
+    assert "🇰🇷 한국" in out
+    assert "삼성전자" in out and "005930" in out
+    assert "PER 8.6" in out and "PBR 1.06" in out
+    # KR 다이제스트엔 US 팩터 표(모멘텀 포함)가 안 나와야 함
+    assert "모멘텀/밸류/퀄리티/로우볼" not in out
+    assert "NVDA" not in out
+
+
+def test_kr_digest_handles_missing_per_pbr():
+    out = format_digest(_report(), [], now=NOW, market="kr",
+                        kr_picks=[_kr_pick("123456", "적자기업", 30, 40, 20, None, None)])
+    assert "PER —" in out and "PBR —" in out
+
+
+def test_kr_digest_empty_picks_keeps_common_sections():
+    out = format_digest(_report(), [_pred("SOXX 수익률", True, 0.34)], now=NOW,
+                        market="kr", kr_picks=[])
+    assert "발굴 종목 (한국)" not in out      # 빈 섹션 생략
+    assert "위험선호" in out                   # 국면(공통) 유지
+    assert "SOXX 수익률" in out                # 예측(공통) 유지

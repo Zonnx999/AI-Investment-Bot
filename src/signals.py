@@ -337,16 +337,21 @@ def select_screened_tickers(n: int = 6, market: str = "US") -> list[str]:
 def generate_signal_report(
     tickers: tuple[str, ...] = DEFAULT_SIGNAL_TICKERS,
     screen_tickers: list[str] | None = None,
+    market: str = "US",
 ) -> SignalReport:
     """일일 신호 리포트 생성 + 다음 실행을 위한 상태 저장.
 
     screen_tickers=None 이면 스크리닝 섹션 생략 (빈 리스트).
+    market: 변화 알림 baseline 을 시장별로 분리 — KR/US 다이제스트가 각자 별도
+      timeline 으로 돌아 서로의 vols/regime baseline 을 덮어쓰지 않도록. US 는 기존
+      키 유지(연속성), 그 외 시장은 suffix. tickers=() 면 팩터는 비고 국면/알림만.
     """
     from src.data_fetcher import fetch_prices
     from src.macro_analyzer import classify_regime, current_drawdown, fetch_cross_asset_panel
 
     store = get_storage()
-    prev = store.get_state(_STATE_NS, _STATE_KEY) or {}
+    state_key = _STATE_KEY if market == "US" else f"{_STATE_KEY}:{market}"
+    prev = store.get_state(_STATE_NS, state_key) or {}
     first_run = not prev
 
     # --- 시장 수준 ---
@@ -382,7 +387,7 @@ def generate_signal_report(
 
     candidates = screen_candidates(screen_tickers) if screen_tickers else []
 
-    store.put_state(_STATE_NS, _STATE_KEY, {
+    store.put_state(_STATE_NS, state_key, {
         "regime": regime.regime,
         "dd_breached": dd_state,
         "vols": vols,

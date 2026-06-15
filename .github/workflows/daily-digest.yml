@@ -9,7 +9,11 @@ on:
     - cron: "30 23 * * 0-4"   # 08:30 KST (월~금) — UTC 일~목
     - cron: "0 13 * * 1-5"    # 09:00 ET (서머타임, 3~11월)
     - cron: "0 14 * * 1-5"    # 09:00 ET (겨울, 11~3월)
-  workflow_dispatch: {}        # 수동 실행 버튼 (게이트 우회 — 언제든 테스트 전송)
+  workflow_dispatch:           # 수동 실행 버튼 (게이트 우회 — 언제든 테스트 전송)
+    inputs:
+      market:
+        description: "시장 (us=미국 / kr=한국)"
+        default: "us"
 
 # 액션 런타임을 Node 24 로 (Node 20 deprecation 경고 제거 — 2026-06 GitHub 마이그레이션)
 env:
@@ -48,24 +52,27 @@ jobs:
           TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
           TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_MARKET: ${{ github.event.inputs.market }}
         run: |
           python - <<'PY'
           import os, sys, subprocess
           from datetime import datetime
           from zoneinfo import ZoneInfo
 
-          # 수동 실행은 항상 전송 (테스트용)
+          # 수동 실행은 항상 전송 (입력 시장 사용, 기본 us)
           if os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
-              send = True
+              send, market = True, (os.environ.get("DISPATCH_MARKET") or "us")
           else:
               seoul = datetime.now(ZoneInfo("Asia/Seoul"))
               ny = datetime.now(ZoneInfo("America/New_York"))
-              # 한국 08:30 창 또는 뉴욕 09시 창 (DST 무관하게 정확히 한 번)
-              send = (seoul.hour == 8 and 25 <= seoul.minute <= 40) or \
-                     (ny.hour == 9 and ny.minute <= 15)
+              # 한국 08:30 창 → 한국 종목, 뉴욕 09시 창 → 미국 종목 (DST 무관하게 정확히 한 번)
+              kr_window = (seoul.hour == 8 and 25 <= seoul.minute <= 40)
+              us_window = (ny.hour == 9 and ny.minute <= 15)
+              send = kr_window or us_window
+              market = "kr" if kr_window else "us"
 
           if not send:
               print("전송 창이 아님 — 스킵")
               sys.exit(0)
-          sys.exit(subprocess.call([sys.executable, "scripts/send_digest.py"]))
+          sys.exit(subprocess.call([sys.executable, "scripts/send_digest.py", "--market", market]))
           PY

@@ -29,6 +29,8 @@ logger = get_logger(__name__)
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="일일 다이제스트 전송 (멀티유저 브로드캐스트)")
+    parser.add_argument("--market", choices=["us", "kr"], default="us",
+                        help="다이제스트 시장 (us=미국, kr=한국). cron 은 장 시작 창에 따라 자동 전달")
     parser.add_argument("--dry-run", action="store_true", help="전송 없이 미리보기만")
     parser.add_argument("--top", type=int, default=6, help="발굴 종목 상위 N개 (기본 6)")
     parser.add_argument("--no-sync", action="store_true",
@@ -36,7 +38,7 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.dry_run:
-        digest = build_daily_digest(top_n=args.top)
+        digest = build_daily_digest(market=args.market, top_n=args.top)
         print(digest)  # 미리보기 — stdout deliverable
         return 0
 
@@ -48,8 +50,8 @@ def main() -> int:
             print(f"구독 동기화: 요청 {sub['requests']} / 승인 {sub['approved']} "
                   f"/ 거절 {sub['denied']} / 해지 {sub['unsubscribed']}")
 
-    # 2) 전 구독자에게 브로드캐스트
-    result = send_daily_digest(top_n=args.top)
+    # 2) 전 구독자에게 브로드캐스트 (시장별)
+    result = send_daily_digest(market=args.market, top_n=args.top)
     if result["recipients"] == 0:
         print("⚠️ 구독자 없음 — TELEGRAM_CHAT_ID(소유자) 또는 /start 가입 확인")
         return 1
@@ -57,7 +59,7 @@ def main() -> int:
         print(f"⚠️ 일부 실패: 전송 {result['sent']} / 실패 {result['failed']} "
               f"(대상 {result['recipients']}) — logs/quant_bot.log 확인")
         return 1
-    print(f"✅ 브로드캐스트 완료: {result['sent']}명 전송")
+    print(f"✅ [{args.market}] 브로드캐스트 완료: {result['sent']}명 전송")
     return 0
 
 

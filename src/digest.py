@@ -25,20 +25,29 @@ logger = get_logger(__name__)
 KST = ZoneInfo("Asia/Seoul")
 
 
+_MARKET_LABEL = {"KR": "🇰🇷 한국", "US": "🇺🇸 미국"}
+
+
 def format_digest(
     report: SignalReport,
     predictions: list[LeadLagResult],
     now: datetime | None = None,
+    market: str = "US",
+    kr_picks: "list | None" = None,
 ) -> str:
     """리포트 객체들 → 텔레그램 Markdown 메시지 (순수 함수).
 
-    구성: 헤더 → 시장 국면 → 알림(있으면 최상단 강조) → 팩터 점수 →
-    발굴 종목(있으면) → 선행지표 예측(신뢰할 만한 것 우선).
+    구성: 헤더(시장 표시) → 시장 국면 → 알림 → 발굴 종목(시장별) → 선행지표 예측.
+    market="KR" 이고 kr_picks(ScanRow 리스트)가 주어지면 한국 발굴 섹션을 렌더 —
+    한국은 DART 기반 밸류/퀄리티 점수(모멘텀 미산출)라 표 구성이 미국과 다름.
+    국면·알림·예측은 글로벌 매크로라 두 시장 공통.
     """
     now = now or datetime.now(KST)
+    market = (market or "US").upper()
+    label = _MARKET_LABEL.get(market, "")
     lines: list[str] = []
 
-    lines.append(f"*📊 일일 투자 신호* — {now:%Y-%m-%d (%a) %H:%M KST}")
+    lines.append(f"*📊 일일 투자 신호* · {label} — {now:%Y-%m-%d (%a) %H:%M KST}")
     lines.append("")
     lines.append(f"*시장 국면:* {report.regime_label}")
 
@@ -51,23 +60,34 @@ def format_digest(
     elif not report.first_run:
         lines.append("_변화 알림 없음_")
 
-    # ---- 오늘의 발굴 종목 (스크리닝 상위) + 팩터 점수 ----
-    if report.factors:
-        lines.append("")
-        lines.append("*📈 오늘의 발굴 종목* (모멘텀/밸류/퀄리티/로우볼 → 종합)")
-        for f in sorted(report.factors, key=lambda x: x.composite, reverse=True):
-            lines.append(
-                f"  `{f.ticker:<5}` {f.momentum:>3}/{f.value:>3}/{f.quality:>3}/{f.low_vol:>3} "
-                f"→ *{f.composite}*"
-            )
-
-    # ---- 발굴 종목 ----
-    if report.candidates:
-        lines.append("")
-        lines.append("*💎 발굴 종목* (스크리닝 통과)")
-        for c in report.candidates[:5]:
-            pe = f"P/E {c['pe']:.1f}" if c.get("pe") else "적자"
-            lines.append(f"  `{c['ticker']}` — {pe}")
+    # ---- 오늘의 발굴 종목 (시장별) ----
+    if market == "KR":
+        if kr_picks:
+            lines.append("")
+            lines.append("*📈 오늘의 발굴 종목 (한국)* (밸류/퀄리티 → 종합)")
+            for r in kr_picks:
+                per = f"PER {r.per:.1f}" if r.per else "PER —"
+                pbr = f"PBR {r.pbr:.2f}" if r.pbr else "PBR —"
+                lines.append(
+                    f"  `{r.symbol}` {r.name} — 밸류 {r.value_score}/퀄 {r.health_score} "
+                    f"→ *{r.total_score}*  ({per}, {pbr})"
+                )
+    else:
+        if report.factors:
+            lines.append("")
+            lines.append("*📈 오늘의 발굴 종목* (모멘텀/밸류/퀄리티/로우볼 → 종합)")
+            for f in sorted(report.factors, key=lambda x: x.composite, reverse=True):
+                lines.append(
+                    f"  `{f.ticker:<5}` {f.momentum:>3}/{f.value:>3}/{f.quality:>3}/{f.low_vol:>3} "
+                    f"→ *{f.composite}*"
+                )
+        # ---- 발굴 종목 (스크리닝 통과 — US 라이브 스크리너) ----
+        if report.candidates:
+            lines.append("")
+            lines.append("*💎 발굴 종목* (스크리닝 통과)")
+            for c in report.candidates[:5]:
+                pe = f"P/E {c['pe']:.1f}" if c.get("pe") else "적자"
+                lines.append(f"  `{c['ticker']}` — {pe}")
 
     # ---- 선행지표 예측 ----
     if predictions:
@@ -91,29 +111,52 @@ def format_digest(
     return "\n".join(lines)
 
 
-def build_daily_digest(
-    tickers: tuple[str, ...] | None = None,
-    top_n: int = 6,
-) -> str:
-    """fetch + 분석 → 다이제스트 문자열.
-
-    tickers=None 이면 매일 **스크리너 발굴 상위 N개**를 팩터 대상으로 사용
-    (고정 종목이 아니라 그날 저평가 상위 종목이 자동으로 올라옴).
-    스크리너 실패 시 DEFAULT_SIGNAL_TICKERS 로 폴백. 예측 개별 실패는 스킵(로그).
-    """
+def _collect_predictions() -> list[LeadLagResult]:
+    """선행지표 예측 — 글로벌(시장 무관). 개별 실패는 스킵(로그)."""
     from src.predictors import PREDICTORS
+
+    out: list[LeadLagResult] = []
+    for name, predict in PREDICTORS.items():
+        try:
+            out.append(predict())
+        except QuantBotError as e:
+            logger.warning("예측 스킵 %s — %s", name, e)
+    return out
+
+
+def build_daily_digest(
+    market: str = "us",
+    top_n: int = 6,
+    tickers: tuple[str, ...] | None = None,
+) -> str:
+    """fetch + 분석 → 시장별 다이제스트 문자열.
+
+    market="us": 유니버스 상위 N(없으면 라이브 스크리너→기본)으로 4팩터 신호.
+    market="kr": KR 유니버스 DB(DART 점수) 상위 N을 발굴 섹션으로 — 모멘텀 미산출,
+      오프라인(API 0콜). 한국 코드는 yfinance 가격 접미사(.KS/.KQ)가 필요해 라이브
+      팩터 파이프라인을 안 태움 (Step 1 결정: DB 점수 사용).
+    국면·알림·예측은 글로벌이라 두 시장 공통.
+    """
+    from src import universe
     from src.signals import (
         DEFAULT_SIGNAL_TICKERS,
         generate_signal_report,
         select_screened_tickers,
     )
 
+    market = (market or "us").upper()
+    predictions = _collect_predictions()
+
+    if market == "KR":
+        # 팩터(가격) 없이 국면/알림만 — KR baseline 으로 (US 알림 state 와 분리)
+        report = generate_signal_report(tickers=(), screen_tickers=None, market="KR")
+        kr_picks = universe.scan(market="KR", limit=top_n)
+        return format_digest(report, predictions, market="KR", kr_picks=kr_picks)
+
+    # --- US (기본) ---
     tk = tickers
     if tk is None:
-        # 1순위: 유니버스 DB 전수스캔 상위 (오프라인, API 0콜). 비어있으면
-        # 2순위: 라이브 스크리너(40종목 워치리스트). 그것도 실패하면 기본 종목.
-        from src import universe
-
+        # 1순위: 유니버스 DB 전수스캔 상위 (오프라인). 비면 2순위 라이브 스크리너, 그다음 기본.
         screened = universe.top_symbols(n=top_n, market="US")
         if not screened:
             try:
@@ -123,23 +166,16 @@ def build_daily_digest(
                 screened = []
         tk = tuple(screened) or DEFAULT_SIGNAL_TICKERS
 
-    report = generate_signal_report(tickers=tk, screen_tickers=None)
-
-    predictions: list[LeadLagResult] = []
-    for name, predict in PREDICTORS.items():
-        try:
-            predictions.append(predict())
-        except QuantBotError as e:
-            logger.warning("예측 스킵 %s — %s", name, e)
-
-    return format_digest(report, predictions)
+    report = generate_signal_report(tickers=tk, screen_tickers=None, market="US")
+    return format_digest(report, predictions, market="US")
 
 
 def send_daily_digest(
-    tickers: tuple[str, ...] | None = None,
+    market: str = "us",
     top_n: int = 6,
+    tickers: tuple[str, ...] | None = None,
 ) -> dict[str, int]:
-    """다이제스트 1회 조립 후 **active 구독자 전원**에게 브로드캐스트 (Phase 11a).
+    """시장별 다이제스트 1회 조립 후 **active 구독자 전원**에게 브로드캐스트 (Phase 11a).
 
     무거운 조립(fetch+분석)은 한 번만, 전송은 경량 N회. 소유자는 ensure_owner 로 항상 포함.
     개별 전송 실패는 best-effort (한 명 실패가 나머지·파이프라인을 막지 않음).
@@ -150,7 +186,7 @@ def send_daily_digest(
     from src.storage import get_storage
 
     subscribers.ensure_owner()
-    text = build_daily_digest(tickers=tickers, top_n=top_n)   # 무거운 조립 1회
+    text = build_daily_digest(market=market, top_n=top_n, tickers=tickers)   # 무거운 조립 1회
     recipients = subscribers.active_subscribers()
 
     sent = failed = 0
