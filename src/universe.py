@@ -19,6 +19,8 @@ Phase 8 — 전 종목 유니버스 DB + 오프라인 전수 스크리닝.
 
 from __future__ import annotations
 
+import math
+import numbers
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -101,6 +103,52 @@ def _conn() -> sqlite3.Connection:
         if col not in existing:
             conn.execute(f"ALTER TABLE screened ADD COLUMN {col} {coltype}")
     return conn
+
+
+# ----------------------------------------------------------------------
+# 배치 쓰기 (Turso 왕복 최소화)
+# ----------------------------------------------------------------------
+#
+# libsql 임베디드 레플리카는 쓰기 statement 마다 클라우드(태평양) 왕복을 한다
+# (실측 ~1s/statement). executemany 도 내부적으로 statement 루프라 효과 없음.
+# 반면 executescript 는 다중 statement 를 **한 요청으로 배치** 전송 → 실측 ~40ms/row.
+# 따라서 재점수 UPDATE 들을 모아 executescript 한 방으로 흘려보낸다 (전수 재점수
+# 240분 → ~1-2분). executescript 는 파라미터 바인딩을 못 받으므로 값은 _sql_lit 로
+# 직렬화한다 (회사명 아포스트로피·detail JSON 따옴표·한글 안전 처리).
+#
+# 주의: 레플리카는 자기 쓰기를 sync() 전에는 로컬에 안 비춘다 → 루프 도중 방금 쓴
+# 행을 다시 읽지 말 것. 최종 반영은 호출부(build_universe)의 get_storage().sync() 가 담당.
+
+
+def _sql_lit(v) -> str:
+    """파이썬 값을 SQLite 리터럴 문자열로 직렬화 (executescript 용, 파라미터 불가).
+
+    None→NULL, 정수→그대로, 실수→유한치만(NaN/inf→NULL), 그 외→작은따옴표 문자열
+    (내부 작은따옴표는 '' 로 이스케이프 — SQLite 표준). numpy 스칼라도 numbers ABC 로 포착.
+    """
+    if v is None:
+        return "NULL"
+    if isinstance(v, numbers.Integral):       # int / numpy 정수 / bool
+        return str(int(v))
+    if isinstance(v, numbers.Real):            # float / numpy 실수
+        f = float(v)
+        return repr(f) if math.isfinite(f) else "NULL"
+    return "'" + str(v).replace("'", "''") + "'"
+
+
+def _build_update(set_cols: dict, symbol: str, market: str) -> str:
+    """screened 한 행 UPDATE 문 생성 (값은 리터럴로 인라인). 복합키로 한정."""
+    sets = ", ".join(f"{col}={_sql_lit(val)}" for col, val in set_cols.items())
+    return (f"UPDATE screened SET {sets} "
+            f"WHERE symbol={_sql_lit(symbol)} AND market={_sql_lit(market)}")
+
+
+def _flush_updates(conn, statements: list[str]) -> None:
+    """모인 UPDATE 들을 executescript 한 방으로 전송 (Turso 왕복 1회). 빈 리스트는 no-op."""
+    if not statements:
+        return
+    conn.executescript(";\n".join(statements) + ";")
+    conn.commit()
 
 
 # ----------------------------------------------------------------------
@@ -298,15 +346,19 @@ def symbols_needing_enrichment(max_age: timedelta = ENRICH_MAX_AGE) -> list[tupl
     return [(r[0], r[1]) for r in rows]
 
 
-def _enrich_one(conn, symbol: str, market: str) -> bool:
-    """한 종목 key-metrics+ratios → 점수카드 → DB. 성공 True. 데이터 없으면 False."""
+def _compute_enrich(conn, symbol: str, market: str) -> dict | None:
+    """한 종목 key-metrics+ratios → 점수카드 → UPDATE 할 컬럼 dict. 데이터 없으면 None.
+
+    순수 계산만 (DB 쓰기는 호출부가 배치로 — executescript 왕복 최소화).
+    base SELECT 는 발굴 단계 데이터(로컬 레플리카에 이미 sync 됨)라 읽기 안전.
+    """
     import json
 
     from src.screener import health_scorecard, latest_fundamentals, value_scorecard
 
     m = latest_fundamentals(symbol)   # key-metrics + ratios 병합
     if not m:
-        return False
+        return None
 
     # 발굴 단계에서 저장한 가격/섹터/배당을 quote 대용으로 사용 (value 점수에 필요).
     # value_scorecard 는 lastAnnualDividend(절대 배당액)로 배당수익률을 재계산하므로,
@@ -326,34 +378,31 @@ def _enrich_one(conn, symbol: str, market: str) -> bool:
     detail = json.dumps({"health": health.to_dict(), "value": value.to_dict()},
                         ensure_ascii=False)
 
-    conn.execute(
-        """
-        UPDATE screened SET
-            roe=?, ev_to_sales=?, fcf_yield=?, net_debt_ebitda=?,
-            health_score=?, value_score=?, total_score=?, detail=?, enriched=1, updated_at=?
-        WHERE symbol=? AND market=?
-        """,
-        (
-            (m.get("returnOnEquity") or 0) * 100,
-            m.get("evToSales"),
-            (m.get("freeCashFlowYield") or 0) * 100,
-            m.get("netDebtToEBITDA"),
-            health.total, value.total, total, detail, _utcnow(), symbol, market,
-        ),
-    )
-    return True
+    return {
+        "roe": (m.get("returnOnEquity") or 0) * 100,
+        "ev_to_sales": m.get("evToSales"),
+        "fcf_yield": (m.get("freeCashFlowYield") or 0) * 100,
+        "net_debt_ebitda": m.get("netDebtToEBITDA"),
+        "health_score": health.total,
+        "value_score": value.total,
+        "total_score": total,
+        "detail": detail,
+        "enriched": 1,
+        "updated_at": _utcnow(),
+    }
 
 
 def enrich(
     max_age: timedelta = ENRICH_MAX_AGE,
     limit: int | None = None,
-    commit_every: int = 50,
+    chunk_size: int = 200,
     on_progress: "Callable[[int, int, dict], None] | None" = None,
 ) -> dict[str, int]:
     """보강 필요한 주식들을 key-metrics 로 채움. 재개 가능.
 
-    commit_every: N종목마다 커밋 (Turso 는 쓰기가 클라우드 왕복이라 종목별 커밋이
-      매우 느림 → 배치로 왕복 횟수를 줄임. 중단 시 최대 N개만 재작업, 캐시로 저렴).
+    chunk_size: N종목마다 UPDATE 들을 executescript 한 방으로 flush (Turso 왕복 1회).
+      종목별 쓰기는 태평양 왕복이라 매우 느림(~1s/행) → 배치로 왕복 횟수를 N분의 1 로.
+      중단 시 마지막 미flush 분만 재작업, 원본은 캐시라 재계산 저렴.
     on_progress(i, total, stats): 매 종목 호출 (CLI 진행바 등). None 이면 미사용.
 
     Returns {"enriched": n, "no_data": n, "failed": n}.
@@ -365,23 +414,29 @@ def enrich(
 
     stats = {"enriched": 0, "no_data": 0, "failed": 0}
     total = len(targets)
-    logger.info("보강 시작: %d종목 (commit_every=%d)", total, commit_every)
+    logger.info("보강 시작: %d종목 (chunk_size=%d)", total, chunk_size)
 
+    batch: list[str] = []
     for i, (symbol, market) in enumerate(targets, 1):
         try:
-            ok = _enrich_one(conn, symbol, market)
-            stats["enriched" if ok else "no_data"] += 1
+            cols = _compute_enrich(conn, symbol, market)
+            if cols is None:
+                stats["no_data"] += 1
+            else:
+                batch.append(_build_update(cols, symbol, market))
+                stats["enriched"] += 1
         except DataFetchError as e:
             logger.warning("보강 실패 %s — %s", symbol, e)
             stats["failed"] += 1
-        if i % commit_every == 0:
-            conn.commit()  # 배치 커밋 → Turso 왕복 최소화
+        if len(batch) >= chunk_size:
+            _flush_updates(conn, batch)
+            batch.clear()
         if on_progress is not None:
             on_progress(i, total, stats)
         if i % 100 == 0:
             logger.info("보강 진행 %d/%d (%s)", i, total, stats)
 
-    conn.commit()  # 남은 분 커밋
+    _flush_updates(conn, batch)  # 남은 분 flush
     logger.info("보강 완료: %s", stats)
     return stats
 
@@ -455,13 +510,15 @@ def enrich_kr(
     year: int | None = None,
     max_age: timedelta = ENRICH_MAX_AGE,
     limit: int | None = None,
-    commit_every: int = 50,
+    chunk_size: int = 200,
     on_progress: "Callable[[int, int, dict], None] | None" = None,
 ) -> dict[str, int]:
     """한국 종목 DART 펀더멘털 보강 → ROE/PER/PBR 점수. 재개 가능.
 
     year=None 이면 직전 회계연도 (당해 사업보고서가 아직이면 build 시 조정).
+    chunk_size: N종목마다 executescript 한 방으로 flush (Turso 왕복 최소화 — enrich() 참고).
     """
+    import json
     from datetime import datetime as _dt
 
     from src.data_fetcher import fetch_dart_corp_codes, fetch_dart_financials
@@ -479,8 +536,9 @@ def enrich_kr(
         targets = targets[:limit]
     stats = {"enriched": 0, "no_data": 0, "failed": 0}
     total = len(targets)
-    logger.info("KR 보강 시작: %d종목 (DART %d년)", total, year)
+    logger.info("KR 보강 시작: %d종목 (DART %d년, chunk_size=%d)", total, year, chunk_size)
 
+    batch: list[str] = []
     for i, symbol in enumerate(targets, 1):
         corp_code = corp_map.get(symbol)
         if not corp_code:
@@ -492,30 +550,30 @@ def enrich_kr(
                     "SELECT market_cap FROM screened WHERE symbol=? AND market='KR'", (symbol,)
                 ).fetchone()
                 if fin and fin.get("equity") and mcap:
-                    import json
                     sc = calculate_kr_scores(fin, float(mcap[0]))
-                    conn.execute(
-                        "UPDATE screened SET roe=?, per=?, pbr=?, health_score=?, "
-                        "value_score=?, total_score=?, detail=?, enriched=1, updated_at=? "
-                        "WHERE symbol=? AND market='KR'",
-                        (sc["roe"], sc["per"], sc["pbr"], sc["health_score"],
-                         sc["value_score"], sc["total_score"],
-                         json.dumps(sc["detail"], ensure_ascii=False), _utcnow(), symbol),
-                    )
+                    batch.append(_build_update(
+                        {"roe": sc["roe"], "per": sc["per"], "pbr": sc["pbr"],
+                         "health_score": sc["health_score"], "value_score": sc["value_score"],
+                         "total_score": sc["total_score"],
+                         "detail": json.dumps(sc["detail"], ensure_ascii=False),
+                         "enriched": 1, "updated_at": _utcnow()},
+                        symbol, "KR",
+                    ))
                     stats["enriched"] += 1
                 else:
                     stats["no_data"] += 1
             except DataFetchError as e:
                 logger.warning("KR 보강 실패 %s — %s", symbol, e)
                 stats["failed"] += 1
-        if i % commit_every == 0:
-            conn.commit()
+        if len(batch) >= chunk_size:
+            _flush_updates(conn, batch)
+            batch.clear()
         if on_progress is not None:
             on_progress(i, total, stats)
         if i % 100 == 0:
             logger.info("KR 보강 진행 %d/%d (%s)", i, total, stats)
 
-    conn.commit()
+    _flush_updates(conn, batch)  # 남은 분 flush
     logger.info("KR 보강 완료: %s", stats)
     return stats
 

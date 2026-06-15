@@ -122,7 +122,7 @@ def test_enrich_calls_progress_and_enriches(fresh_db, monkeypatch):
     conn.commit()
 
     # 병합 메트릭(key-metrics+ratios) 네트워크 호출을 합성 dict 로 대체
-    # (_enrich_one 은 src.screener.latest_fundamentals 를 호출)
+    # (_compute_enrich 가 src.screener.latest_fundamentals 를 호출)
     fake = {
         "returnOnEquity": 0.20, "returnOnInvestedCapital": 0.15, "grossProfitMargin": 0.40,
         "evToSales": 2.0, "evToEBITDA": 9.0, "priceToBookRatio": 1.5,
@@ -133,11 +133,11 @@ def test_enrich_calls_progress_and_enriches(fresh_db, monkeypatch):
 
     seen: list[tuple[int, int]] = []
     stats = universe.enrich(
-        commit_every=2, on_progress=lambda i, total, s: seen.append((i, total))
+        chunk_size=2, on_progress=lambda i, total, s: seen.append((i, total))
     )
     assert stats["enriched"] == 3
     assert seen == [(1, 3), (2, 3), (3, 3)]      # 매 종목 콜백
-    # 배치 커밋(2개)+마지막 커밋 후 모두 반영됐는지
+    # 배치 flush(2개)+마지막 flush 후 모두 반영됐는지
     assert {r.symbol for r in universe.scan(market="US")} == {"AAA", "BBB", "CCC"}
 
 
@@ -198,3 +198,64 @@ def test_enrich_empty_metrics_counts_no_data(fresh_db, monkeypatch):
     monkeypatch.setattr("src.screener.latest_fundamentals", lambda ticker: {})
     stats = universe.enrich()
     assert stats["no_data"] == 1 and stats["enriched"] == 0
+
+
+# ----------------------------------------------------------------------
+# 배치 쓰기 (executescript) — SQL 리터럴 이스케이프 안전성
+# ----------------------------------------------------------------------
+
+
+def test_sql_lit_escaping():
+    import math
+
+    assert universe._sql_lit(None) == "NULL"
+    assert universe._sql_lit(42) == "42"
+    assert universe._sql_lit(True) == "1"
+    assert universe._sql_lit(3.5) == repr(3.5)
+    assert universe._sql_lit(float("nan")) == "NULL"      # NaN → NULL (점수 깨짐 방지)
+    assert universe._sql_lit(float("inf")) == "NULL"
+    assert universe._sql_lit("plain") == "'plain'"
+    assert universe._sql_lit("O'Brien") == "'O''Brien'"   # 아포스트로피 이스케이프
+    assert universe._sql_lit('say "hi"') == "'say \"hi\"'"  # 큰따옴표는 그대로 (SQL 무해)
+
+
+def test_sql_lit_handles_numpy_scalars():
+    np = pytest.importorskip("numpy")
+    assert universe._sql_lit(np.int64(7)) == "7"          # numpy 정수 → int 리터럴
+    assert universe._sql_lit(np.float64(2.0)) == repr(2.0)
+    assert universe._sql_lit(np.float64("nan")) == "NULL"
+
+
+def test_build_update_and_flush_roundtrip_with_tricky_values(fresh_db):
+    """배치 경로가 아포스트로피·따옴표·한글·NULL 을 손실/깨짐 없이 저장하는지."""
+    conn = universe._conn()
+    # 회사명에 아포스트로피, detail 에 JSON 따옴표·한글 — 이스케이프 안 하면 SQL 깨짐
+    universe._upsert_universe_row(
+        conn, symbol="MCD", market="US", name="McDonald's", sector="Food",
+        industry="x", price=250.0, market_cap=1e11, dividend_yield=2.0,
+    )
+    conn.commit()
+
+    tricky_detail = '{"health": {"note": "O\'Brien said \\"buy\\"", "메모": "저평가"}}'
+    stmt = universe._build_update(
+        {"name": "McDonald's Corp", "total_score": 88, "value_score": 90,
+         "health_score": 86, "roe": 25.5, "ev_to_sales": None,  # None → NULL
+         "detail": tricky_detail, "enriched": 1, "updated_at": universe._utcnow()},
+        "MCD", "US",
+    )
+    universe._flush_updates(conn, [stmt])
+
+    row = conn.execute(
+        "SELECT name, total_score, roe, ev_to_sales, detail FROM screened "
+        "WHERE symbol='MCD' AND market='US'"
+    ).fetchone()
+    assert row[0] == "McDonald's Corp"     # 아포스트로피 보존
+    assert row[1] == 88
+    assert row[2] == 25.5
+    assert row[3] is None                  # None → NULL → None
+    assert row[4] == tricky_detail         # 따옴표·한글 그대로
+
+
+def test_flush_updates_empty_is_noop(fresh_db):
+    conn = universe._conn()
+    universe._flush_updates(conn, [])      # 예외 없이 통과해야 함
