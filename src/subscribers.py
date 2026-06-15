@@ -239,8 +239,10 @@ def sync_subscribers(send_notifications: bool = True) -> dict[str, int]:
     conn = _conn()
 
     def notify(text: str, chat_id: str | None) -> None:
+        # 구독 안내·관리 메시지는 평문 전송 — username 의 '_' 등이 Markdown 엔티티
+        # 파싱 오류를 내지 않도록 (legacy Markdown 은 백슬래시 이스케이프 미지원).
         if send_notifications and chat_id:
-            send_safe(text, chat_id)
+            send_safe(text, chat_id, parse_mode=None)
 
     for ev in events:
         is_owner = owner is not None and ev.chat_id == owner
@@ -255,8 +257,9 @@ def sync_subscribers(send_notifications: bool = True) -> dict[str, int]:
                 upsert_request(conn, ev.chat_id, ev.name)
                 st["requests"] += 1
                 notify(_MSG_REQUESTED, ev.chat_id)
+                # 소유자에게 승인 요청 알림 — 신규 요청일 때만 (중복 알림 방지)
                 notify(f"🔔 가입 요청: {ev.name or '(이름없음)'} (chat_id={ev.chat_id})\n"
-                       f"승인: /approve {ev.chat_id}   거절: /deny {ev.chat_id}", owner)
+                       f"승인: /approve {ev.chat_id}    거절: /deny {ev.chat_id}", owner)
 
         elif ev.kind == "unsubscribe":
             set_status(conn, ev.chat_id, "inactive")

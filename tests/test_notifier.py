@@ -37,18 +37,27 @@ def no_telegram():
 
 
 class _TgHandler(BaseHTTPRequestHandler):
-    mode = "ok"               # "ok" | "error"
+    mode = "ok"               # "ok" | "error" | "parse_fail"
     last_payload: dict = {}
+    calls = 0
 
     def do_POST(self):  # noqa: N802
         length = int(self.headers.get("Content-Length", 0))
-        type(self).last_payload = json.loads(self.rfile.read(length) or b"{}")
-        if type(self).mode == "ok":
-            body = {"ok": True, "result": {"message_id": 1}}
-            code = 200
-        else:
+        payload = json.loads(self.rfile.read(length) or b"{}")
+        type(self).last_payload = payload
+        type(self).calls += 1
+        mode = type(self).mode
+        if mode == "parse_fail" and "parse_mode" in payload:
+            # Markdown 일 때만 실패 (텔레그램 parse-entities 오류 모사), 평문 재시도는 성공
+            body = {"ok": False,
+                    "description": "Bad Request: can't parse entities: Can't find end of the entity"}
+            code = 400
+        elif mode == "error":
             body = {"ok": False, "description": "Bad Request: chat not found"}
             code = 400
+        else:
+            body = {"ok": True, "result": {"message_id": 1}}
+            code = 200
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -61,6 +70,7 @@ class _TgHandler(BaseHTTPRequestHandler):
 @pytest.fixture
 def telegram_server(monkeypatch):
     _TgHandler.mode = "ok"
+    _TgHandler.calls = 0
     server = ThreadingHTTPServer(("127.0.0.1", 0), _TgHandler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{server.server_address[1]}"
@@ -111,3 +121,28 @@ def test_api_error_raises(telegram_creds, telegram_server):
 def test_send_safe_swallows_api_error(telegram_creds, telegram_server):
     telegram_server.mode = "error"
     assert send_safe("hi") is False
+
+
+# ---------------- Markdown 파싱 실패 → 평문 폴백 ----------------
+
+
+def test_markdown_parse_failure_falls_back_to_plain(telegram_creds, telegram_server):
+    telegram_server.mode = "parse_fail"
+    # username 의 '_' 처럼 동적 콘텐츠가 Markdown 을 깨뜨리는 상황
+    result = send_telegram("가입 요청: john_doe", parse_mode="Markdown")
+    assert result == {"message_id": 1}                       # 평문 재전송 성공
+    assert telegram_server.calls == 2                        # md 시도 → 평문 재시도
+    assert "parse_mode" not in telegram_server.last_payload  # 재시도는 평문
+
+
+def test_non_parse_error_does_not_retry(telegram_creds, telegram_server):
+    telegram_server.mode = "error"                           # parse 무관 에러
+    with pytest.raises(ApiHttpError):
+        send_telegram("hi", parse_mode="Markdown")
+    assert telegram_server.calls == 1                        # 폴백 재시도 없음
+
+
+def test_plain_mode_omits_parse_mode(telegram_creds, telegram_server):
+    assert send_safe("john_doe 가입 (chat_id=5)", chat_id="100", parse_mode=None) is True
+    assert telegram_server.calls == 1                        # 평문은 한 번에 성공
+    assert "parse_mode" not in telegram_server.last_payload

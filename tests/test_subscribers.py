@@ -113,8 +113,10 @@ def _wire(monkeypatch, updates):
     """get_updates → updates, send_safe → 기록. (sent 리스트 반환)"""
     sent: list[tuple[str, str]] = []
     monkeypatch.setattr("src.notifier.get_updates", lambda offset=None: updates)
-    monkeypatch.setattr("src.notifier.send_safe",
-                        lambda text, chat_id=None: sent.append((chat_id, text)) or True)
+    monkeypatch.setattr(
+        "src.notifier.send_safe",
+        lambda text, chat_id=None, parse_mode="Markdown": sent.append((chat_id, text)) or True,
+    )
     return sent
 
 

@@ -90,12 +90,25 @@ def send_telegram(
     cid = chat_id or settings.require("telegram_chat_id")
     if len(text) > MAX_MESSAGE_LEN:
         text = text[:MAX_MESSAGE_LEN] + "\n…(생략)"
-    result = _telegram_post("sendMessage", {
-        "chat_id": cid,
-        "text": text,
-        "parse_mode": parse_mode,
-        "disable_web_page_preview": disable_preview,
-    })
+
+    def _post(pm: str | None) -> dict:
+        payload: dict = {"chat_id": cid, "text": text,
+                         "disable_web_page_preview": disable_preview}
+        if pm:
+            payload["parse_mode"] = pm
+        return _telegram_post("sendMessage", payload)
+
+    try:
+        result = _post(parse_mode)
+    except ApiHttpError as e:
+        # Markdown 파싱 실패(불균형 엔티티 등) → 평문으로 재전송해 메시지 유실 방지.
+        # legacy Markdown 은 백슬래시 이스케이프를 제대로 지원하지 않으므로, 동적 콘텐츠가
+        # 서식을 깨뜨릴 때 가장 견고한 대응은 서식을 포기하고 평문으로 보내는 것.
+        if parse_mode and "parse" in str(e).lower():
+            logger.warning("Markdown 파싱 실패 — 평문으로 재전송 (chat=%s): %s", cid, e)
+            result = _post(None)
+        else:
+            raise
     logger.info("텔레그램 전송 완료 (chat=%s, %d자)", cid, len(text))
     return result
 
@@ -116,14 +129,16 @@ def get_updates(offset: int | None = None) -> list[dict[str, Any]]:
     return _telegram_post("getUpdates", payload)
 
 
-def send_safe(text: str, chat_id: str | None = None) -> bool:
+def send_safe(text: str, chat_id: str | None = None,
+              parse_mode: str | None = "Markdown") -> bool:
     """예외를 삼키는 best-effort 전송 (배치/cron/브로드캐스트 용).
 
     알림 실패가 데이터 파이프라인을 죽이지 않도록 — 실패 시 로그만 남기고 False.
     chat_id 미지정 시 settings.telegram_chat_id (소유자) 로 전송.
+    parse_mode=None 이면 평문 (안내·관리 메시지처럼 서식이 불필요/위험할 때).
     """
     try:
-        send_telegram(text, chat_id=chat_id)
+        send_telegram(text, chat_id=chat_id, parse_mode=parse_mode)
         return True
     except MissingApiKeyError as e:
         logger.warning("텔레그램 미설정 — 전송 생략 (%s)", e)
