@@ -100,22 +100,30 @@ def send_telegram(
     return result
 
 
-def get_updates() -> list[dict[str, Any]]:
-    """봇이 받은 최근 메시지들 (chat_id 발견용).
+def get_updates(offset: int | None = None) -> list[dict[str, Any]]:
+    """봇이 받은 최근 메시지들 (chat_id 발견 / 구독 명령 수거용).
 
     토큰만 있으면 호출 가능 (chat_id 불필요). 봇에게 메시지를 한 번 보낸 뒤
     호출하면 그 메시지의 chat.id 를 여기서 찾을 수 있음.
+
+    offset: 이 update_id 이상만 반환 — 이전 것은 텔레그램 서버에서 확인 처리되어
+            다음 호출부터 사라짐. cron 폴링(Phase 11a)이 '마지막 처리 update_id + 1'
+            을 넘겨 같은 메시지를 두 번 처리하지 않도록 함.
     """
-    return _telegram_post("getUpdates", {})
+    payload: dict[str, Any] = {}
+    if offset is not None:
+        payload["offset"] = offset
+    return _telegram_post("getUpdates", payload)
 
 
-def send_safe(text: str) -> bool:
-    """예외를 삼키는 best-effort 전송 (배치/cron 용).
+def send_safe(text: str, chat_id: str | None = None) -> bool:
+    """예외를 삼키는 best-effort 전송 (배치/cron/브로드캐스트 용).
 
     알림 실패가 데이터 파이프라인을 죽이지 않도록 — 실패 시 로그만 남기고 False.
+    chat_id 미지정 시 settings.telegram_chat_id (소유자) 로 전송.
     """
     try:
-        send_telegram(text)
+        send_telegram(text, chat_id=chat_id)
         return True
     except MissingApiKeyError as e:
         logger.warning("텔레그램 미설정 — 전송 생략 (%s)", e)

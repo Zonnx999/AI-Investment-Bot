@@ -138,11 +138,28 @@ def build_daily_digest(
 def send_daily_digest(
     tickers: tuple[str, ...] | None = None,
     top_n: int = 6,
-) -> bool:
-    """다이제스트 조립 + 텔레그램 전송 (best-effort). 성공 여부 반환."""
+) -> dict[str, int]:
+    """다이제스트 1회 조립 후 **active 구독자 전원**에게 브로드캐스트 (Phase 11a).
+
+    무거운 조립(fetch+분석)은 한 번만, 전송은 경량 N회. 소유자는 ensure_owner 로 항상 포함.
+    개별 전송 실패는 best-effort (한 명 실패가 나머지·파이프라인을 막지 않음).
+    Returns {"sent", "failed", "recipients"}.
+    """
+    from src import subscribers
     from src.notifier import send_safe
     from src.storage import get_storage
 
-    ok = send_safe(build_daily_digest(tickers=tickers, top_n=top_n))
-    get_storage().sync()  # 신호 상태 변경을 클라우드로 push (Turso 시)
-    return ok
+    subscribers.ensure_owner()
+    text = build_daily_digest(tickers=tickers, top_n=top_n)   # 무거운 조립 1회
+    recipients = subscribers.active_subscribers()
+
+    sent = failed = 0
+    for chat_id, _name in recipients:
+        if send_safe(text, chat_id):
+            sent += 1
+        else:
+            failed += 1
+
+    get_storage().sync()  # 신호 상태 변경 + 구독 변경을 클라우드로 push (Turso 시)
+    logger.info("브로드캐스트: 전송 %d / 실패 %d (대상 %d)", sent, failed, len(recipients))
+    return {"sent": sent, "failed": failed, "recipients": len(recipients)}

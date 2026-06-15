@@ -34,7 +34,7 @@ class Settings:
     krx_api_key: str = os.getenv("KRX_API_KEY", "")  # 한국거래소 정보데이터시스템 OpenAPI
     dart_api_key: str = os.getenv("DART_API_KEY", "")  # DART 전자공시 (한국 재무제표, Phase 9b)
 
-    # 알림 채널 (Phase 7)
+    # 알림 채널 (Phase 7) — telegram_chat_id 는 소유자(Phase 11a 승인자) 겸 항상 수신자
     telegram_bot_token: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
     telegram_chat_id: str = os.getenv("TELEGRAM_CHAT_ID", "")
 
