@@ -24,6 +24,7 @@ ENV/
 data/*.csv
 data/*.parquet
 data/*.db
+data/*.db-*
 data/*.sqlite
 !data/.gitkeep
 
