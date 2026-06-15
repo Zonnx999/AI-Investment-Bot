@@ -55,10 +55,16 @@ def main() -> int:
     parser.add_argument("--enrich", action="store_true", help="펀더멘털 보강만")
     parser.add_argument("--limit", type=int, default=None, help="이번에 보강할 종목 수 상한")
     parser.add_argument("--max-age", type=int, default=7, help="재보강 주기(일, 기본 7)")
+    parser.add_argument("--force", action="store_true",
+                        help="신선도 무시하고 전 종목 재점수 (점수 공식 변경 후). "
+                             "원본 데이터는 캐시라 API 호출 거의 없이 빠름")
     args = parser.parse_args()
 
     do_discover = args.discover or not args.enrich
     do_enrich = args.enrich or not args.discover
+
+    # --force: max_age=0 → updated_at 이 항상 cutoff(=now) 이전이라 전 종목 재보강
+    max_age = timedelta(0) if args.force else timedelta(days=args.max_age)
 
     print("=" * 70)
     print(" 유니버스 DB 빌드")
@@ -71,21 +77,23 @@ def main() -> int:
             print(f"    {mkt}: {n}종목 발굴")
 
     if do_enrich:
+        if args.force:
+            print("\n(--force) 신선도 무시 — 전 종목 재점수 (캐시 데이터로 빠름)")
         print("\n[2] 미국 보강 (FMP key-metrics → 점수)...")
-        pending = len(universe.symbols_needing_enrichment(timedelta(days=args.max_age)))
+        pending = len(universe.symbols_needing_enrichment(max_age))
         print(f"    보강 대상: {pending}종목" + (f" (이번 {args.limit}개)" if args.limit else ""))
         stats = universe.enrich(
-            max_age=timedelta(days=args.max_age), limit=args.limit,
+            max_age=max_age, limit=args.limit,
             on_progress=_make_progress_bar(),
         )
         print()
         print(f"    완료: 보강 {stats['enriched']} / 데이터없음 {stats['no_data']} / 실패 {stats['failed']}")
 
         print("\n[3] 한국 보강 (DART 펀더멘털 → ROE/PER/PBR)...")
-        kr_pending = len(universe._kr_symbols_needing_enrichment(timedelta(days=args.max_age)))
+        kr_pending = len(universe._kr_symbols_needing_enrichment(max_age))
         print(f"    보강 대상: {kr_pending}종목" + (f" (이번 {args.limit}개)" if args.limit else ""))
         kr_stats = universe.enrich_kr(
-            max_age=timedelta(days=args.max_age), limit=args.limit,
+            max_age=max_age, limit=args.limit,
             on_progress=_make_progress_bar(),
         )
         print()
@@ -99,7 +107,7 @@ def main() -> int:
     for k, v in universe.stats().items():
         print(f"    {k}: {v}")
 
-    remaining = len(universe.symbols_needing_enrichment(timedelta(days=args.max_age)))
+    remaining = len(universe.symbols_needing_enrichment(max_age))
     if remaining:
         print(f"\n  ⏳ 보강 남음 {remaining}종목 — 이어하려면: python scripts/build_universe.py --enrich")
     print("=" * 70)
