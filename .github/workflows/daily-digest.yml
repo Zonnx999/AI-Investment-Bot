@@ -42,7 +42,7 @@ jobs:
           key: quantbot-data-${{ github.run_id }}
           restore-keys: quantbot-data-
 
-      - name: Send digest (장 시작 30분 전 창에만)
+      - name: Send digest (크론 표현식으로 시장 판단)
         env:
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
@@ -53,26 +53,31 @@ jobs:
           TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           DISPATCH_MARKET: ${{ github.event.inputs.market }}
+          # 어떤 크론 표현식이 이 실행을 트리거했는지 — 시간 창 체크 대신 사용.
+          # GitHub Actions 스케줄은 수십 분~수 시간 지연될 수 있어 datetime.now() 비교가
+          # 신뢰할 수 없음. 크론 표현식 자체로 시장을 판단하면 지연에 무관하게 정확히 동작.
+          GITHUB_EVENT_SCHEDULE: ${{ github.event.schedule }}
         run: |
           python - <<'PY'
           import os, sys, subprocess
-          from datetime import datetime
-          from zoneinfo import ZoneInfo
 
-          # 수동 실행은 항상 전송 (입력 시장 사용, 기본 us)
-          if os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
+          event = os.environ.get("GITHUB_EVENT_NAME", "")
+          sched = os.environ.get("GITHUB_EVENT_SCHEDULE", "")
+
+          if event == "workflow_dispatch":
+              # 수동 실행은 항상 전송 (입력 시장 사용, 기본 us)
               send, market = True, (os.environ.get("DISPATCH_MARKET") or "us")
+          elif sched == "30 23 * * 0-4":
+              # 한국 크론 (23:30 UTC = 08:30 KST) → 한국 종목
+              send, market = True, "kr"
+          elif sched in ("0 13 * * 1-5", "0 14 * * 1-5"):
+              # 미국 크론 (서머타임/겨울 09:00 ET) → 미국 종목
+              send, market = True, "us"
           else:
-              seoul = datetime.now(ZoneInfo("Asia/Seoul"))
-              ny = datetime.now(ZoneInfo("America/New_York"))
-              # 한국 08:30 창 → 한국 종목, 뉴욕 09시 창 → 미국 종목 (DST 무관하게 정확히 한 번)
-              kr_window = (seoul.hour == 8 and 25 <= seoul.minute <= 40)
-              us_window = (ny.hour == 9 and ny.minute <= 15)
-              send = kr_window or us_window
-              market = "kr" if kr_window else "us"
+              send, market = False, "us"
 
           if not send:
-              print("전송 창이 아님 — 스킵")
+              print(f"알 수 없는 트리거 — 스킵 (event={event!r}, schedule={sched!r})")
               sys.exit(0)
           sys.exit(subprocess.call([sys.executable, "scripts/send_digest.py", "--market", market, "--no-sync"]))
           PY
