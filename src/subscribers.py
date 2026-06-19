@@ -70,12 +70,18 @@ def _utcnow() -> str:
 def _conn():
     conn = get_storage().conn
     conn.executescript(_SCHEMA)
-    # 마이그레이션: 구버전 테이블(status 없음)에 컬럼 추가
+    # 마이그레이션: 구버전 테이블(status 없음)에 컬럼 추가.
+    # Turso 임베디드 레플리카에서 WAL 손상으로 초기 sync 가 실패하면 PRAGMA table_info 가
+    # 로컬 stale 스키마를 반환(status 없음으로 보임)하지만 클라우드엔 이미 status 가 있는
+    # 경우가 있음 → ALTER TABLE 이 "duplicate column name" 으로 실패. try-except 로 내성.
     existing = {r[1] for r in conn.execute("PRAGMA table_info(subscribers)").fetchall()}
     if "status" not in existing:
-        conn.execute(
-            "ALTER TABLE subscribers ADD COLUMN status TEXT NOT NULL DEFAULT 'pending'"
-        )
+        try:
+            conn.execute(
+                "ALTER TABLE subscribers ADD COLUMN status TEXT NOT NULL DEFAULT 'pending'"
+            )
+        except Exception:  # noqa: BLE001 — Turso: 클라우드 스키마가 로컬 PRAGMA 보다 앞서 있음
+            pass
     return conn
 
 
