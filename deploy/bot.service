@@ -1,0 +1,35 @@
+# AI Investment Bot — systemd 유닛 (WSL2 또는 Linux 서버용)
+#
+# 설치:
+#   1. 아래 <...> 부분을 실제 경로로 교체
+#   2. sudo cp deploy/bot.service /etc/systemd/system/ai-investment-bot.service
+#   3. sudo systemctl daemon-reload
+#   4. sudo systemctl enable ai-investment-bot   # 부팅 시 자동 시작
+#   5. sudo systemctl start ai-investment-bot
+#
+# 로그 확인:
+#   journalctl -u ai-investment-bot -f
+#
+# WSL2 systemd 활성화 방법 (아직 안 된 경우):
+#   /etc/wsl.conf 에 아래 내용 추가 후 wsl --shutdown → 재시작
+#   [boot]
+#   systemd=true
+
+[Unit]
+Description=AI Investment Bot – Interactive Polling Worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 아래 두 줄을 실제 경로로 교체
+WorkingDirectory=<REPO_ROOT>
+ExecStart=<REPO_ROOT>/.venv/bin/python scripts/bot.py
+EnvironmentFile=<REPO_ROOT>/.env
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

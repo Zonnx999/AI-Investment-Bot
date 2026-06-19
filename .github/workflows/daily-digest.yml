@@ -74,5 +74,5 @@ jobs:
           if not send:
               print("전송 창이 아님 — 스킵")
               sys.exit(0)
-          sys.exit(subprocess.call([sys.executable, "scripts/send_digest.py", "--market", market]))
+          sys.exit(subprocess.call([sys.executable, "scripts/send_digest.py", "--market", market, "--no-sync"]))
           PY
