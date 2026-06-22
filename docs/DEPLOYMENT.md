@@ -50,6 +50,24 @@ sudo systemctl restart quant-bot                # 재시작
 ```
 - `.env` 는 봇이 WorkingDirectory 에서 load_dotenv 로 자동 로드 (EnvironmentFile 불필요).
 
+### 5.1 일일 다이제스트 (systemd timer)
+스케줄 발송은 봇과 **별도 oneshot 프로세스**. libsql 레플리카 동시쓰기 충돌(`wal_insert_begin failed`)
+방지로 **전용 레플리카 경로**(`QUANT_BOT_DB_PATH=.../data/digest_replica.db`)를 씀 — 봇과 같은 Turso 로
+sync 되어 데이터는 일치.
+- 유닛: `quant-digest@.service`(템플릿 `%i`=시장, `Environment=QUANT_BOT_DB_PATH=...digest_replica.db`,
+  `ExecStart=... send_digest.py --no-sync --market %i`) + 타이머 2개:
+  - `quant-digest-kr.timer`: `OnCalendar=Mon..Fri 08:30 Asia/Seoul`
+  - `quant-digest-us.timer`: `OnCalendar=Mon..Fri 09:00 America/New_York`
+  - systemd OnCalendar 의 **타임존 지정**으로 KST/ET·DST 자동 처리 (UTC 게이트 불필요), `Persistent=true`.
+- 관리:
+  ```
+  systemctl list-timers 'quant-digest-*'         # 다음 발송 시각
+  sudo systemctl start quant-digest@kr.service    # 즉시 1회 발송(테스트)
+  journalctl -u quant-digest@kr.service -n 30
+  ```
+- ⚠️ `.env` 에 `FRED_API_KEY`·`FMP_API_KEY` 필요(US 팩터·국면). KR 은 키 없이도 동작.
+- GitHub Actions 예약 schedule 은 **비활성**(중복 발송 방지) — 비상시 workflow_dispatch 수동.
+
 ## 6. 업데이트 배포 / 복구
 **코드 업데이트:**
 ```
@@ -69,8 +87,10 @@ sudo systemctl start quant-bot
 
 ## 7. 역할 분담 (중요 — offset 경합 방지)
 - **봇(이 서버)** = `getUpdates` 폴링 **단독 소유**. 구독 명령(/start·/stop·/approve·/deny·/pending) + 조회(/stock·/scan·/help) **실시간** 처리. 조회는 active 구독자(+소유자)만.
-- **GitHub Actions cron** = 일일 다이제스트 **발송만**: `send_digest.py --no-sync` (구독 동기화 끔).
-  - ⚠️ 봇과 cron 이 **동시에 getUpdates 폴링하면 offset 경합으로 메시지 분실**. cron 은 반드시 `--no-sync`.
+- **다이제스트 timer(이 서버, §5.1)** = 일일 발송만: `send_digest.py --no-sync` + 전용 레플리카 경로.
+  - ⚠️ `--no-sync` 필수 — 봇과 동시에 getUpdates 폴링하면 offset 경합으로 메시지 분실.
+  - ⚠️ 봇과 **다른 레플리카 파일** 필수 — 같은 파일이면 WAL 동시쓰기 충돌.
+  - (GitHub Actions 예약 발송은 비활성 — §5.1)
 - 무거운 분석(유니버스 빌드·다이제스트 조립)은 cron/로컬이 Turso 에 사전계산 → 봇은 **DB 읽기 위주(경량)**.
 
 ## 8. 시크릿 (`.env`)

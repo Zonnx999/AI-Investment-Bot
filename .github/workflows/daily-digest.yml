@@ -1,15 +1,14 @@
 name: Daily Digest
 
-# 한국·미국 장 시작 30분 전 1통씩, 총 2회/일.
-#   · 한국: KRX 09:00 개장 → 08:30 KST = 23:30 UTC (한국은 DST 없음)
-#   · 미국: NYSE 09:30 개장 → 09:00 ET. GitHub cron 은 UTC 고정이라 DST 를 못 따라가므로
-#          13:00·14:00 UTC 둘 다 트리거하고, 아래 게이트로 '뉴욕 09시'일 때만 1회 전송.
+# 스케줄 발송은 이제 Oracle 박스의 systemd timer(quant-digest-kr/us)가 담당 — docs/DEPLOYMENT.md.
+# GitHub 예약 cron 은 박스와 중복 발송을 막기 위해 비활성(아래 주석). 비상시 workflow_dispatch 로 수동 발송.
+#   (참고: 박스는 systemd OnCalendar 의 타임존 지정으로 KST/ET·DST 를 자동 처리 → UTC 게이트 불필요)
 on:
-  schedule:
-    - cron: "30 23 * * 0-4"   # 08:30 KST (월~금) — UTC 일~목
-    - cron: "0 13 * * 1-5"    # 09:00 ET (서머타임, 3~11월)
-    - cron: "0 14 * * 1-5"    # 09:00 ET (겨울, 11~3월)
-  workflow_dispatch:           # 수동 실행 버튼 (게이트 우회 — 언제든 테스트 전송)
+  # schedule:                  # ← 박스 systemd timer 로 이전, 중복 방지로 비활성
+  #   - cron: "30 23 * * 0-4"  #   08:30 KST (월~금)
+  #   - cron: "0 13 * * 1-5"   #   09:00 ET (서머타임)
+  #   - cron: "0 14 * * 1-5"   #   09:00 ET (겨울)
+  workflow_dispatch:           # 수동 실행 버튼 (비상/테스트 발송)
     inputs:
       market:
         description: "시장 (us=미국 / kr=한국)"
