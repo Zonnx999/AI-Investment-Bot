@@ -66,9 +66,12 @@ def run() -> int:
             chat_id, text = _extract(u)
             if not chat_id or not text:
                 continue
-            reply = bot_commands.respond(text, chat_id, limiter)
-            if reply:
-                send_safe(reply, chat_id)
+            try:
+                reply = bot_commands.respond(text, chat_id, limiter)
+                if reply:
+                    send_safe(reply, chat_id)
+            except Exception:  # noqa: BLE001 — poison 메시지가 봇을 크래시 루프시키지 않도록
+                logger.exception("명령 처리 실패 (chat=%s) — 건너뜀", chat_id)
 
         # 2) 구독 명령 처리 (조회 명령은 parse_updates 가 "ignore" 로 흘림)
         events, next_offset = subscribers.parse_updates(updates)
