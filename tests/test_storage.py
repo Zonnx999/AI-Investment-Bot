@@ -170,3 +170,16 @@ def test_cached_decorator_does_not_cache_empty(cache_on):
     fetch()
     fetch()
     assert calls["n"] == 2  # 빈 결과는 캐시 안 함 → 매번 재시도
+
+
+def test_add_column_if_missing_adds_then_idempotent():
+    import sqlite3
+
+    from src.storage import add_column_if_missing
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE t (a INTEGER)")
+    add_column_if_missing(conn, "t", "b", "TEXT")
+    assert {r[1] for r in conn.execute("PRAGMA table_info(t)")} == {"a", "b"}
+    add_column_if_missing(conn, "t", "b", "TEXT")   # 이미 존재 → no-op, 예외 없음
+    assert {r[1] for r in conn.execute("PRAGMA table_info(t)")} == {"a", "b"}

@@ -33,7 +33,7 @@ from src.screener import (
     calculate_health_score,
     calculate_value_score,
 )
-from src.storage import get_storage
+from src.storage import add_column_if_missing, get_storage
 
 logger = get_logger(__name__)
 
@@ -97,11 +97,9 @@ def _utcnow() -> str:
 def _conn() -> sqlite3.Connection:
     conn = get_storage().conn
     conn.executescript(_SCHEMA)
-    # 기존 DB 마이그레이션: per/pbr 컬럼 없으면 추가 (9b 도입)
-    existing = {r[1] for r in conn.execute("PRAGMA table_info(screened)").fetchall()}
+    # 기존 DB 마이그레이션 (9b 도입) — Turso stale 레플리카 안전(중복 컬럼 오류 삼킴)
     for col, coltype in (("per", "REAL"), ("pbr", "REAL"), ("detail", "TEXT")):
-        if col not in existing:
-            conn.execute(f"ALTER TABLE screened ADD COLUMN {col} {coltype}")
+        add_column_if_missing(conn, "screened", col, coltype)
     return conn
 
 

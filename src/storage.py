@@ -297,6 +297,25 @@ class Storage:
         self._conn.close()
 
 
+def add_column_if_missing(conn, table: str, column: str, coltype: str) -> None:
+    """ALTER TABLE ADD COLUMN — Turso 안전 멱등 마이그레이션.
+
+    libsql 임베디드 레플리카는 읽기(PRAGMA)는 로컬, 쓰기(ALTER)는 원격에서 일어난다.
+    로컬 레플리카가 stale 하면 PRAGMA 엔 컬럼이 없어 보여도 원격엔 이미 있어, ALTER 가
+    'duplicate column' 으로 깨질 수 있다 (실제 운영 크래시) → 그 오류만 삼켜 멱등 보장.
+    """
+    existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column in existing:
+        return
+    try:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+    except Exception as e:  # noqa: BLE001 — libsql: 원격엔 이미 존재할 수 있음(로컬 PRAGMA stale)
+        if "duplicate column" in str(e).lower():
+            logger.debug("%s.%s 이미 존재 — 마이그레이션 스킵 (stale 로컬 PRAGMA)", table, column)
+        else:
+            raise
+
+
 # ---------------- 프로세스 싱글톤 ----------------
 
 _storage: Storage | None = None

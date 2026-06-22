@@ -34,7 +34,7 @@ from datetime import datetime, timezone
 from src.config import settings
 from src.exceptions import DataFetchError
 from src.logger import get_logger
-from src.storage import get_storage
+from src.storage import add_column_if_missing, get_storage
 
 logger = get_logger(__name__)
 
@@ -70,12 +70,8 @@ def _utcnow() -> str:
 def _conn():
     conn = get_storage().conn
     conn.executescript(_SCHEMA)
-    # 마이그레이션: 구버전 테이블(status 없음)에 컬럼 추가
-    existing = {r[1] for r in conn.execute("PRAGMA table_info(subscribers)").fetchall()}
-    if "status" not in existing:
-        conn.execute(
-            "ALTER TABLE subscribers ADD COLUMN status TEXT NOT NULL DEFAULT 'pending'"
-        )
+    # 마이그레이션: 구버전 테이블(status 없음)에 컬럼 추가 — Turso stale 레플리카 안전(중복 삼킴)
+    add_column_if_missing(conn, "subscribers", "status", "TEXT NOT NULL DEFAULT 'pending'")
     return conn
 
 
