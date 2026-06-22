@@ -1,4 +1,4 @@
-# Current State — 2026-06-22 기준
+# Current State — 2026-06-23 기준
 
 > 새 에이전트는 **이 파일 + `CLAUDE.md`(작업 규칙) + `ROADMAP.md`(다음 작업)** 만 읽으면 됩니다.
 > 봇 서버 운영은 **`docs/DEPLOYMENT.md`** (Oracle 호스팅 런북).
@@ -40,15 +40,15 @@
 - 작업 리듬(사용자 합의): Phase 단위로 끝낼 때마다 그 부분 리뷰. scoring/enrich/fetch 등
   '정확성 직결' 코드는 작성 직후 한 번 더 검토 + 실데이터 스모크 (`CLAUDE.md §4.10`).
 
-### 사용자 작업 대기 (상태 확인 필요)
-- GitHub 저장소 **Secrets 등록**: `FRED_API_KEY` / `FMP_API_KEY` / `TELEGRAM_BOT_TOKEN` /
-  `TELEGRAM_CHAT_ID` (+ 클라우드 풀유니버스용 `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN`).
-  → 등록 안 되면 클라우드 다이제스트가 40종목 워치리스트로 폴백.
-- 🟡 **Phase 11a 멀티유저 브로드캐스트 (소유자 승인제) — 검증 대기** (구현·실 Turso 스모크 완료):
-  1) 친구(또는 본인 다른 계정)가 봇에게 `/start` → 2) 소유자(`TELEGRAM_CHAT_ID`)에게 "가입 요청
-  (이름, chat_id)" 알림 도착 → 3) 소유자가 봇에 `/approve <chat_id>` → 4) `python scripts/send_digest.py`
-  실행 시 그 친구가 다이제스트 수신. 소유자는 승인 없이 항상 수신. **추가 시크릿 불필요.**
-  (소유자 전용 명령: `/approve <id>` · `/deny <id>` · `/pending`. 명령은 다음 실행 때 반영.)
+### 운영 현황 / 인계 (2026-06-22~23)
+- ✅ **봇·다이제스트 Oracle 서버에 배포·가동 중** — 운영 전반은 **`docs/DEPLOYMENT.md`** (런북).
+  - `quant-bot`(systemd) = 실시간 명령 폴링 / `quant-digest-kr|us`(systemd timer) = 평일 자동 발송.
+  - 친구 승인·수신 실제 동작 확인됨. 봇 명령: `/start`·`/stop`·(소유자)`/approve`·`/deny`·`/pending`·`/subscribers` /
+    (구독자)`/stock`·`/scan`·`/help`·`/menu`(버튼 메뉴).
+- ⏳ **남은 사용자 작업**:
+  - GitHub Secrets — 이제 GitHub 예약 발송은 끔(박스가 담당). workflow_dispatch 수동 발송용으로만 의미.
+  - 박스 `.env` 에 `FRED_API_KEY`·`FMP_API_KEY` (US 다이제스트 팩터·국면용). KR 은 키 없이도 동작.
+- ⏳ **다음 기능 후보** (`ROADMAP.md §1`): 인라인 `[승인][거절]` 버튼(승인 부담↓), `/news`, `/regime`·`/predict` 즉답.
 
 ---
 
@@ -138,9 +138,15 @@ QuantBotError
 | 점수 엔진 정밀화 | ScoreCard 분해, 4팩터, 필드 교정(ROIC/PBR/GP마진), `detail` 저장 | ✅ (06-15) |
 | 코드리뷰 대응 | 데코레이터 오배치·음수배수·배당누락 등 실버그 수정 | ✅ (06-15) |
 | Turso 재점수 배치 | per-row 왕복 → executescript 배치 (240분→~2-3분) | ✅ (06-15) |
+| 시장별 다이제스트 | 한국창→KR 종목 / 미국창→US 종목 (cron `--market` 자동) | ✅ (06-15) |
+| Phase 11a 멀티유저 | 소유자 승인제(`subscribers`, pending/active/inactive), getUpdates 폴링+offset | ✅ (06-22) |
+| Phase 11b 인터랙티브 봇 | `bot_commands`+`scripts/bot.py` 폴링 워커, `/stock`·`/scan`·`/help`, rate limit | ✅ (06-22) |
+| 텔레그램 견고화 | Markdown 평문 폴백, 조회 구독자 게이팅, reply 키보드 버튼, `/subscribers` | ✅ (06-22) |
+| 서버 배포 | Oracle Always Free(systemd `quant-bot`) + 다이제스트 systemd timer | ✅ (06-22) `docs/DEPLOYMENT.md` |
 
 > ⚠️ 한계 기록: FMP 엔 실제 KOSPI/KOSDAQ 없음(→ KRX/DART 로 해결). 크립토 점수는 주식과 비교
-> 불가(스캔에서 시장별 분리). 클라우드 러너 ephemeral → 변화 알림 상태는 actions/cache best-effort.
+> 불가(스캔에서 시장별 분리). 봇/다이제스트는 **서로 다른 libsql 레플리카 파일** 필수(WAL 충돌).
+> 다이제스트 cron 은 `--no-sync`(봇이 getUpdates 단독 소유). libsql 함정은 `CLAUDE.md §4.10 #9~#11`.
 
 ---
 

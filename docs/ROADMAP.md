@@ -3,33 +3,32 @@
 > 현재 상태·완료 상세는 `CURRENT_STATE.md` + `git log`. 이 파일은 **앞으로 할 일**에 집중합니다.
 > 작업 규칙(phase-gate·리뷰 톤·결정 시 옵션 제시)은 `CLAUDE.md §4`.
 
-**권장 순서**: Phase 10 ✅ → 9(KRX) ✅ → **11a(멀티유저 브로드캐스트, 다음)** → 11b(실시간 봇) → 12(대시보드).
-11a 는 새 인프라 없이 가능해 우선순위 높음. 11b(실시간)는 항상 켜진 호스트 결정 후.
+**권장 순서**: Phase 10·9·11a·11b ✅ (Oracle 서버 가동 중) → **11b 마무리(인라인 버튼·뉴스)** → 12(대시보드).
+운영 런북은 `docs/DEPLOYMENT.md`.
 
 ---
 
 ## 1. 다음 작업 (액티브)
 
-### Phase 11a — 멀티유저 브로드캐스트 ⭐ — 🟡 구현 완료 (2026-06-15), 검증/사인오프 대기
-가입 = **소유자 승인제** (유출될 코드 없음, 소유자가 한 명씩 승인). `src/subscribers.py`.
-- [x] Turso `subscribers` 테이블 (chat_id PK, name, status[pending|active|inactive])
-- [x] cron 실행마다 `getUpdates(offset)` 로 명령 수거 (offset 은 `state` 영속 → 재처리 방지)
-- [x] 명령: `/start`(요청→소유자 알림) · `/stop`(해지) · 소유자 전용 `/approve <id>`·`/deny <id>`·`/pending`
-- [x] 권한: approve/deny/pending 은 발신자 == `TELEGRAM_CHAT_ID`(소유자) 일 때만 (비소유자 무시)
-- [x] 디제스트 1회 조립 후 active 구독자 브로드캐스트 (`send_daily_digest` + `send_safe(text, chat_id)`)
-- [x] 순수 파싱/오케스트레이터 분리 + 오프라인 테스트 14개 + 실 Turso 스모크(마이그레이션·라이프사이클)
-- [ ] **사용자 검증 대기**: 친구가 `/start` → 너에게 승인요청 알림 → `/approve <chat_id>` →
-      `python scripts/send_digest.py` 로 브로드캐스트 확인 (자세히 `CURRENT_STATE.md §2`)
-- 한계: 명령은 다음 cron 폴링 때 반영(실시간 아님) → 실시간 조회는 11b
+### Phase 11a — 멀티유저 브로드캐스트 — ✅ 완료 (소유자 승인제, 배포·가동 중)
+`src/subscribers.py`. `subscribers` 테이블(status pending/active/inactive), getUpdates+offset, `/start`·`/stop`·
+소유자 `/approve`·`/deny`·`/pending`·`/subscribers`. 친구 승인·수신 실동작 확인.
 
-### Phase 11b — 실시간 인터랙티브 (항상 켜진 호스트 필요)
-- [ ] 호스팅 결정: 폴링 워커 (Fly.io 무료 / Oracle Always Free / 집 상시 PC).
-      웹훅(서버리스)은 pandas/scipy 무거워 콜드스타트 불리 → **폴링 권장**
-- [ ] 분리 설계: 무거운 분석은 cron 이 Turso 에 사전계산 → 봇 응답기는 **DB 읽기 위주**(경량)
-- [ ] 명령어: `/stock <티커>`(점수+근거 상세, `lookup_detail` 활용), `/news <티커>`, `/scan [시장]`, `/subscribe`
-- [ ] 뉴스: `NEWS_API_KEY` 또는 FMP 뉴스 (응답 캐시 + 유저별 rate limit)
-- [ ] (선택) 뉴스에 Haiku 센티먼트 분류 — LLM 의 합리적 자리
-- [ ] 남용 방지: 유저별 rate limit, 외부 API 직접 호출 최소화(사전계산 DB 우선)
+### Phase 11b — 실시간 인터랙티브 봇 — ✅ 대부분 완료 (배포·가동 중), 일부 잔여
+`src/bot_commands.py` + `scripts/bot.py`(폴링 워커, systemd `quant-bot`). `docs/DEPLOYMENT.md`.
+- [x] 폴링 워커(getUpdates long-poll) — Oracle Always Free(E2.1.Micro). 무거운 분석은 사전계산, 봇은 DB 읽기 위주
+- [x] `/stock <티커>`(점수+근거, `lookup_detail`) · `/scan [us|kr]` · `/help`·`/menu` · 유저별 rate limit
+- [x] 조회는 **active 구독자(+소유자)만** (게이팅), reply 키보드 버튼(타이핑↓), Markdown 평문 폴백
+- [ ] **인라인 `[승인][거절]` 버튼** — 가입요청 알림에서 탭 승인 (callback_query 처리 필요) ← 다음 1순위
+- [ ] `/news <티커>` — `NEWS_API_KEY`/FMP 뉴스 (응답 캐시 + rate limit), (선택) Haiku 센티먼트
+- [ ] (선택) `/regime`·`/predict`·`/me`(내 상태) 즉답 — 단 국면/예측은 라이브 fetch라 봇에 약간 무거움
+
+### Phase 12 — 대시보드 통합 (모든 정보 한 화면)
+`dashboard/index.html`(현재 스크리너 전용) 을 확장.
+- [ ] 국면/리스크/예측/유니버스 스캔/종목 상세 탭 추가
+- [ ] 데이터 소스: `daily_update`/`scan` 결과 JSON 출력 → 정적 페이지가 fetch
+- [ ] 호스팅: GitHub Pages (정적) — Turso DB 와 연계 (⚠️ public repo 전환 시 시크릿/IP 노출 주의)
+- [ ] 역할 분담: 봇 push=요약 알림, 대시보드=심층 탐색
 
 ### Phase 12 — 대시보드 통합 (모든 정보 한 화면)
 `dashboard/index.html`(현재 스크리너 전용) 을 확장.
