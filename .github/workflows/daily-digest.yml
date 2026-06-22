@@ -74,5 +74,7 @@ jobs:
           if not send:
               print("전송 창이 아님 — 스킵")
               sys.exit(0)
-          sys.exit(subprocess.call([sys.executable, "scripts/send_digest.py", "--market", market]))
+          # --no-sync: 구독 동기화(getUpdates)는 상시 봇(scripts/bot.py)이 단독 소유 →
+          # cron 은 발송만. 둘 다 폴링하면 offset 경합으로 메시지를 서로 가로챔(Phase 11b).
+          sys.exit(subprocess.call([sys.executable, "scripts/send_digest.py", "--market", market, "--no-sync"]))
           PY
