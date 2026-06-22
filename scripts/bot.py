@@ -73,7 +73,14 @@ def run() -> int:
         if not updates:
             continue
 
-        # 1) 조회 명령 즉답 — /stock·/scan 은 active 구독자(또는 소유자)만, /help 는 공개
+        # 0) 버튼(reply keyboard) 라벨 → 명령으로 정규화 — 조회·구독 파싱이 모두 같은 명령을
+        #    보도록 raw update 의 text 를 치환 (탭 = 명령 입력과 동일 흐름)
+        for u in updates:
+            msg = u.get("message") or u.get("edited_message")
+            if msg and msg.get("text") in bot_commands.BUTTON_TO_COMMAND:
+                msg["text"] = bot_commands.BUTTON_TO_COMMAND[msg["text"]]
+
+        # 1) 조회 명령 즉답 — /stock·/scan 은 active 구독자(또는 소유자)만, /help·/menu 는 공개
         for u in updates:
             chat_id, text = _extract(u)
             if not chat_id or not text:
@@ -86,7 +93,10 @@ def run() -> int:
                     continue
                 reply = bot_commands.respond(text, chat_id, limiter)
                 if reply:
-                    send_safe(reply, chat_id)
+                    # help/menu 응답에 버튼 메뉴 부착 (소유자는 관리자 버튼 포함)
+                    kb = (bot_commands.main_keyboard(owner is not None and chat_id == owner)
+                          if cmd.kind == "help" else None)
+                    send_safe(reply, chat_id, reply_markup=kb)
             except Exception:  # noqa: BLE001 — poison 메시지가 봇을 크래시 루프시키지 않도록
                 logger.exception("명령 처리 실패 (chat=%s) — 건너뜀", chat_id)
 

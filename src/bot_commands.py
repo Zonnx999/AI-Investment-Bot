@@ -51,9 +51,30 @@ def parse_command(text: str) -> Command:
         return Command("stock", arg)
     if cmd == "/scan":
         return Command("scan", arg)
-    if cmd == "/help":
+    if cmd in ("/help", "/menu"):
         return Command("help")
     return Command("unknown")
+
+
+# 버튼(reply keyboard) 라벨 → 명령. 봇 루프가 수신 텍스트를 이 표로 정규화한 뒤 디스패치.
+BUTTON_TO_COMMAND = {
+    "🇺🇸 미국 추천": "/scan us",
+    "🇰🇷 한국 추천": "/scan kr",
+    "❓ 도움말": "/help",
+    "📋 구독자": "/subscribers",   # 관리자 — subscribers.apply_events 가 처리
+    "⏳ 승인 대기": "/pending",    # 관리자
+}
+
+
+def main_keyboard(is_owner: bool = False) -> dict:
+    """지속형 reply keyboard. 탭하면 라벨이 전송되고 BUTTON_TO_COMMAND 로 명령화됨.
+
+    소유자에겐 관리자 버튼(구독자/대기 목록) 추가. /stock 은 인자가 필요해 버튼 대신 직접 입력.
+    """
+    rows = [["🇺🇸 미국 추천", "🇰🇷 한국 추천"], ["❓ 도움말"]]
+    if is_owner:
+        rows.append(["📋 구독자", "⏳ 승인 대기"])
+    return {"keyboard": rows, "resize_keyboard": True}
 
 
 # ---------------------------------------------------------------------------
@@ -64,8 +85,9 @@ HELP_TEXT = (
     "📖 *명령어*\n"
     "`/stock <티커>` — 종목 점수와 근거 (예: `/stock AAPL`, `/stock 005930`)\n"
     "`/scan [us|kr]` — 시장 저평가 상위 (기본 us)\n"
-    "`/help` — 이 도움말\n"
-    "\n구독: `/start` 가입 요청 · `/stop` 해지"
+    "`/menu` — 버튼 메뉴 열기\n"
+    "\n구독: `/start` 가입 요청 · `/stop` 해지\n"
+    "\n👇 아래 버튼으로도 이용할 수 있어요."
 )
 
 _MKT_FLAG = {"US": "🇺🇸", "KR": "🇰🇷", "CRYPTO": "🪙"}

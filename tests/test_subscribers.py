@@ -225,3 +225,27 @@ def test_apply_events_handles_authorization_and_state(fresh_db, owner_set, monke
     st = subscribers.apply_events(events)
     assert st["requests"] == 1 and st["approved"] == 1 and st["ignored_admin"] == 1
     assert subscribers.active_subscribers() == [("100", "alice")]
+
+
+def test_parse_subscribers_command_is_list():
+    events, _ = subscribers.parse_updates([_upd(1, "/subscribers")])
+    assert events[0].kind == "list"
+
+
+def test_apply_events_list_owner_only(fresh_db, owner_set, monkeypatch):
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "src.notifier.send_safe",
+        lambda text, chat_id=None, parse_mode="Markdown", reply_markup=None:
+            sent.append((chat_id, text)) or True,
+    )
+    conn = subscribers._conn()
+    subscribers.set_status(conn, "100", "active", name="alice")
+    conn.commit()
+
+    subscribers.apply_events([subscribers.SubEvent(1, "1", "owner", "list")])      # 소유자
+    assert any(cid == "1" and "alice" in txt and "구독자" in txt for cid, txt in sent)
+
+    sent.clear()
+    st = subscribers.apply_events([subscribers.SubEvent(2, "999", "x", "list")])   # 비소유자
+    assert st["ignored_admin"] == 1 and sent == []

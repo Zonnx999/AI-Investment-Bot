@@ -146,3 +146,9 @@ def test_plain_mode_omits_parse_mode(telegram_creds, telegram_server):
     assert send_safe("john_doe 가입 (chat_id=5)", chat_id="100", parse_mode=None) is True
     assert telegram_server.calls == 1                        # 평문은 한 번에 성공
     assert "parse_mode" not in telegram_server.last_payload
+
+
+def test_reply_markup_included_in_payload(telegram_creds, telegram_server):
+    kb = {"keyboard": [["🇺🇸 미국 추천"]], "resize_keyboard": True}
+    send_telegram("메뉴", reply_markup=kb)
+    assert telegram_server.last_payload["reply_markup"] == kb

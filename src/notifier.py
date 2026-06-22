@@ -81,11 +81,13 @@ def send_telegram(
     chat_id: str | None = None,
     parse_mode: str = "Markdown",
     disable_preview: bool = True,
+    reply_markup: dict | None = None,
 ) -> dict:
     """설정된 채팅으로 메시지 전송.
 
     chat_id 미지정 시 settings.telegram_chat_id 사용.
     4096자 초과 시 안전 길이로 자름 (텔레그램 제한).
+    reply_markup: 버튼(ReplyKeyboardMarkup/InlineKeyboardMarkup) dict — 있으면 그대로 전송.
     """
     cid = chat_id or settings.require("telegram_chat_id")
     if len(text) > MAX_MESSAGE_LEN:
@@ -96,6 +98,8 @@ def send_telegram(
                          "disable_web_page_preview": disable_preview}
         if pm:
             payload["parse_mode"] = pm
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
         return _telegram_post("sendMessage", payload)
 
     try:
@@ -134,15 +138,16 @@ def get_updates(offset: int | None = None, timeout: int = 0) -> list[dict[str, A
 
 
 def send_safe(text: str, chat_id: str | None = None,
-              parse_mode: str | None = "Markdown") -> bool:
+              parse_mode: str | None = "Markdown", reply_markup: dict | None = None) -> bool:
     """예외를 삼키는 best-effort 전송 (배치/cron/브로드캐스트 용).
 
     알림 실패가 데이터 파이프라인을 죽이지 않도록 — 실패 시 로그만 남기고 False.
     chat_id 미지정 시 settings.telegram_chat_id (소유자) 로 전송.
     parse_mode=None 이면 평문 (안내·관리 메시지처럼 서식이 불필요/위험할 때).
+    reply_markup: 버튼 dict (선택).
     """
     try:
-        send_telegram(text, chat_id=chat_id, parse_mode=parse_mode)
+        send_telegram(text, chat_id=chat_id, parse_mode=parse_mode, reply_markup=reply_markup)
         return True
     except MissingApiKeyError as e:
         logger.warning("텔레그램 미설정 — 전송 생략 (%s)", e)

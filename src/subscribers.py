@@ -59,7 +59,7 @@ class SubEvent:
     update_id: int | None
     chat_id: str            # 명령을 보낸 사람
     name: str
-    kind: str               # request | unsubscribe | approve | deny | pending | ignore
+    kind: str               # request | unsubscribe | approve | deny | pending | list | ignore
     target: str | None = None   # approve/deny 의 대상 chat_id
 
 
@@ -100,6 +100,8 @@ def _classify(text: str) -> tuple[str, str | None]:
         return "deny", arg
     if cmd == "/pending":
         return "pending", None
+    if cmd == "/subscribers":
+        return "list", None
     return "ignore", None
 
 
@@ -252,11 +254,17 @@ def apply_events(events: list[SubEvent], send_notifications: bool = True) -> dic
             st["unsubscribed"] += 1
             notify(_MSG_UNSUBSCRIBED, ev.chat_id)
 
-        elif ev.kind in ("approve", "deny", "pending"):
+        elif ev.kind in ("approve", "deny", "pending", "list"):
             if not is_owner:
                 st["ignored_admin"] += 1            # 비소유자의 관리명령 무시
                 continue
-            if ev.kind == "pending":
+            if ev.kind == "list":
+                rows = active_subscribers()
+                body = ("📋 구독자 없음" if not rows else
+                        f"📋 구독자 {len(rows)}명:\n" + "\n".join(
+                            f"• {nm or '(이름없음)'} ({cid})" for cid, nm in rows))
+                notify(body, owner)
+            elif ev.kind == "pending":
                 rows = pending_requests()
                 body = ("승인 대기 없음" if not rows else
                         "승인 대기:\n" + "\n".join(

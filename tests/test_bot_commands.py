@@ -141,3 +141,25 @@ def test_respond_stock_dispatch(fresh_db):
     _seed(conn, "AAPL", detail=_DETAIL)
     out = bc.respond("/stock AAPL", "1")
     assert out is not None and "AAPL" in out
+
+
+# ---------------- 버튼 / 메뉴 ----------------
+
+
+def test_menu_alias_is_help():
+    assert bc.parse_command("/menu").kind == "help"
+
+
+def test_button_labels_map_to_commands():
+    assert bc.BUTTON_TO_COMMAND["🇺🇸 미국 추천"] == "/scan us"
+    assert bc.BUTTON_TO_COMMAND["🇰🇷 한국 추천"] == "/scan kr"
+    assert bc.BUTTON_TO_COMMAND["📋 구독자"] == "/subscribers"
+
+
+def test_main_keyboard_owner_gets_admin_row():
+    base = bc.main_keyboard(is_owner=False)
+    assert base["resize_keyboard"] is True
+    flat_user = [b for row in base["keyboard"] for b in row]
+    assert "📋 구독자" not in flat_user                 # 일반 사용자엔 관리자 버튼 없음
+    flat_owner = [b for row in bc.main_keyboard(is_owner=True)["keyboard"] for b in row]
+    assert "📋 구독자" in flat_owner and "⏳ 승인 대기" in flat_owner
