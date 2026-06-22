@@ -21,6 +21,7 @@ from __future__ import annotations
 import time
 
 from src import bot_commands, subscribers
+from src.config import settings
 from src.exceptions import DataFetchError, MissingApiKeyError
 from src.logger import get_logger
 from src.notifier import get_updates, send_safe
@@ -34,6 +35,9 @@ RATE_MAX_CALLS = 8          # 유저별
 RATE_WINDOW_SEC = 60.0
 
 
+_GATE_MSG = "🔒 구독자 전용입니다. /start 로 가입 요청 후 소유자 승인을 받으면 이용할 수 있어요."
+
+
 def _extract(update: dict) -> tuple[str | None, str]:
     """update → (chat_id 문자열, 텍스트). 메시지/텍스트 없으면 (None, "")."""
     msg = update.get("message") or update.get("edited_message") or {}
@@ -43,9 +47,17 @@ def _extract(update: dict) -> tuple[str | None, str]:
     return (str(chat_id) if chat_id is not None else None), text
 
 
+def _is_subscriber(chat_id: str, owner: str | None) -> bool:
+    """active 구독자 또는 소유자면 True (조회 명령 접근 제어). 소유자는 승인 없이 허용."""
+    if owner and chat_id == owner:
+        return True
+    return subscribers.get_status(subscribers._conn(), chat_id) == "active"
+
+
 def run() -> int:
     store = get_storage()
     subscribers.ensure_owner()                       # 소유자 항상 active
+    owner = str(settings.telegram_chat_id) if settings.telegram_chat_id else None
     limiter = bot_commands.RateLimiter(max_calls=RATE_MAX_CALLS, window_sec=RATE_WINDOW_SEC)
     offset = store.get_state(subscribers._OFFSET_NS, subscribers._OFFSET_KEY)
     logger.info("봇 시작 (offset=%s, long-poll=%ds)", offset, LONG_POLL_SEC)
@@ -61,12 +73,17 @@ def run() -> int:
         if not updates:
             continue
 
-        # 1) 조회 명령 즉답 (rate limit 적용)
+        # 1) 조회 명령 즉답 — /stock·/scan 은 active 구독자(또는 소유자)만, /help 는 공개
         for u in updates:
             chat_id, text = _extract(u)
             if not chat_id or not text:
                 continue
             try:
+                cmd = bot_commands.parse_command(text)
+                if cmd.kind in ("stock", "scan") and not _is_subscriber(chat_id, owner):
+                    if limiter.allow(chat_id):       # 게이트 안내도 rate limit (남용 방지)
+                        send_safe(_GATE_MSG, chat_id)
+                    continue
                 reply = bot_commands.respond(text, chat_id, limiter)
                 if reply:
                     send_safe(reply, chat_id)
