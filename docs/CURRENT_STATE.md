@@ -1,6 +1,7 @@
-# Current State — 2026-06-15 기준
+# Current State — 2026-06-22 기준
 
 > 새 에이전트는 **이 파일 + `CLAUDE.md`(작업 규칙) + `ROADMAP.md`(다음 작업)** 만 읽으면 됩니다.
+> 봇 서버 운영은 **`docs/DEPLOYMENT.md`** (Oracle 호스팅 런북).
 > 완료 작업의 **상세 변경 내역은 `git log`** 에 있습니다 — 여기엔 현재 상태·핸드오버·API 참조만 둡니다.
 
 ---
@@ -13,7 +14,10 @@
 - **전 종목 유니버스 DB** (US 2190 / KR 517 / CRYPTO 68) → **오프라인 전수 스캔(API 0콜)** 으로 저평가 발굴.
 - **점수**: 4팩터(모멘텀·밸류·퀄리티·로우볼) + health/value 스코어카드(구성요소 분해, `detail` JSON).
 - **Turso(libSQL) 클라우드 호스팅** — 노트북 이동성 + 클라우드 풀유니버스.
-- **다음 작업**: `ROADMAP.md §1` — Phase 11a(멀티유저 브로드캐스트) 권장.
+- **시장별 다이제스트**: 한국 창→KR 종목, 미국 창→US 종목 (cron 이 창에 따라 `--market` 자동 전달).
+- **Phase 11a 멀티유저(소유자 승인제)** + **11b 상시 인터랙티브 봇** — Oracle 서버에 systemd
+  `quant-bot` 으로 **배포·가동 중**(`docs/DEPLOYMENT.md`). `/start`·`/approve`·`/stock`·`/scan`·`/help`.
+- **다음 작업**: `ROADMAP.md §1` — 11b 마무리(승인 인라인 버튼 등) → Phase 12(대시보드).
 
 ---
 
