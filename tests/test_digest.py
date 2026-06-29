@@ -57,7 +57,7 @@ def test_digest_shows_alerts_when_present():
 
 def test_digest_no_alert_line_when_none():
     out = format_digest(_report(alerts=[]), [], now=NOW)
-    assert "변화 알림 없음" in out
+    assert "어제와 큰 변화 없음" in out
 
 
 def test_digest_reliable_predictions_shown_weak_counted():
@@ -90,6 +90,29 @@ def test_digest_handles_loss_maker_candidate():
     assert "적자" in out
 
 
+def test_digest_injects_us_company_names():
+    # names 맵이 주어지면 US 발굴 종목에 회사명을 곁들임 (B)
+    out = format_digest(_report(), [], now=NOW, names={"NVDA": "NVIDIA Corp"})
+    assert "NVIDIA Corp" in out
+
+
+def test_digest_factor_legend_present():
+    # 점수 의미 범례 한 줄 (C)
+    out = format_digest(_report(), [], now=NOW)
+    assert "높을수록 매력적" in out
+
+
+def test_digest_prediction_direction_icon():
+    # 예측 가독성 (E): 상승 → 📈, 하락 → 📉
+    up = format_digest(_report(), [_pred("BTC 수익률", True, 0.6)], now=NOW)
+    assert "📈" in up
+    down = _pred("XLE 수익률", True, 0.5)
+    down.direction = "하락 ↓"
+    out = format_digest(_report(), [down], now=NOW)
+    assert "📉" in out
+    assert "개월 선행" in out   # 'M' → '개월 선행' 풀어쓰기
+
+
 # ---------------- 시장별 (Step 1: KR/US 발굴 분리) ----------------
 
 
@@ -102,7 +125,7 @@ def _kr_pick(symbol, name, total, value, health, per, pbr) -> ScanRow:
 def test_us_digest_has_us_market_label():
     out = format_digest(_report(), [], now=NOW, market="us")
     assert "🇺🇸 미국" in out
-    assert "모멘텀/밸류/퀄리티/로우볼" in out          # US 는 4팩터 표
+    assert "모멘텀" in out          # US 는 4팩터(모멘텀 포함) 표
 
 
 def test_kr_digest_renders_korean_picks_not_us_factors():
@@ -113,7 +136,7 @@ def test_kr_digest_renders_korean_picks_not_us_factors():
     assert "삼성전자" in out and "005930" in out
     assert "PER 8.6" in out and "PBR 1.06" in out
     # KR 다이제스트엔 US 팩터 표(모멘텀 포함)가 안 나와야 함
-    assert "모멘텀/밸류/퀄리티/로우볼" not in out
+    assert "모멘텀" not in out
     assert "NVDA" not in out
 
 

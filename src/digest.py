@@ -28,66 +28,108 @@ KST = ZoneInfo("Asia/Seoul")
 _MARKET_LABEL = {"KR": "🇰🇷 한국", "US": "🇺🇸 미국"}
 
 
+def _direction_icon(direction: str) -> str:
+    """예측 방향 문자열(예: '상승 ↑') → 한눈에 들어오는 아이콘."""
+    if "상승" in direction or "↑" in direction:
+        return "📈"
+    if "하락" in direction or "↓" in direction:
+        return "📉"
+    return "🔮"
+
+
+_ALERT_ICON = {"info": "ℹ️", "warning": "⚠️", "critical": "🚨"}
+
+
+def _alert_line(alert) -> str:
+    """알림 → 유저용 한 줄. Alert.__str__ 의 `[category]` 영문 태그(로그용)는
+    빼고 심각도 아이콘 + 메시지만 — 다이제스트 가독성 위해 디스플레이에서만 정제."""
+    return f"  {_ALERT_ICON.get(alert.severity, 'ℹ️')} {alert.message}"
+
+
 def format_digest(
     report: SignalReport,
     predictions: list[LeadLagResult],
     now: datetime | None = None,
     market: str = "US",
     kr_picks: "list | None" = None,
+    names: "dict[str, str] | None" = None,
 ) -> str:
     """리포트 객체들 → 텔레그램 Markdown 메시지 (순수 함수).
 
-    구성: 헤더(시장 표시) → 시장 국면 → 알림 → 발굴 종목(시장별) → 선행지표 예측.
+    구성: 헤더 → 오늘의 변화(알림, 가장 중요해 맨 위) → 시장 국면 →
+    발굴 종목(시장별) → 선행지표 예측.
     market="KR" 이고 kr_picks(ScanRow 리스트)가 주어지면 한국 발굴 섹션을 렌더 —
     한국은 DART 기반 밸류/퀄리티 점수(모멘텀 미산출)라 표 구성이 미국과 다름.
     국면·알림·예측은 글로벌 매크로라 두 시장 공통.
+
+    names: 티커 → 회사명 맵(선택). US 발굴/스크리닝 종목에 회사명을 곁들임
+    (순수 함수 유지를 위해 조회는 build_daily_digest 가 담당, 여기엔 주입만).
     """
     now = now or datetime.now(KST)
     market = (market or "US").upper()
     label = _MARKET_LABEL.get(market, "")
+    names = names or {}
     lines: list[str] = []
 
-    lines.append(f"*📊 일일 투자 신호* · {label} — {now:%Y-%m-%d (%a) %H:%M KST}")
-    lines.append("")
-    lines.append(f"*시장 국면:* {report.regime_label}")
+    # ---- 헤더 ----
+    lines.append(f"*📊 일일 투자 신호* · {label}")
+    lines.append(f"_{now:%Y-%m-%d (%a) %H:%M KST}_")
 
-    # ---- 알림 (가장 중요 — 변화가 있으면 맨 위로) ----
+    # ---- 오늘의 변화 (가장 중요 — 맨 위) ----
     if report.alerts:
         lines.append("")
-        lines.append("*🔔 알림*")
+        lines.append("*🔔 오늘의 변화*")
         for a in report.alerts:
-            lines.append(f"  {a}")
+            lines.append(_alert_line(a))
     elif not report.first_run:
-        lines.append("_변화 알림 없음_")
+        lines.append("")
+        lines.append("✅ _어제와 큰 변화 없음_")
+
+    # ---- 시장 국면 ----
+    lines.append("")
+    lines.append(f"*🌤 시장 국면:* {report.regime_label}")
 
     # ---- 오늘의 발굴 종목 (시장별) ----
     if market == "KR":
         if kr_picks:
             lines.append("")
-            lines.append("*📈 오늘의 발굴 종목 (한국)* (밸류/퀄리티 → 종합)")
+            lines.append("*📈 오늘의 발굴 종목 (한국)*")
             for r in kr_picks:
                 per = f"PER {r.per:.1f}" if r.per else "PER —"
                 pbr = f"PBR {r.pbr:.2f}" if r.pbr else "PBR —"
+                lines.append(f"  `{r.symbol}` *{r.name}* — 종합 *{r.total_score}*")
                 lines.append(
-                    f"  `{r.symbol}` {r.name} — 밸류 {r.value_score}/퀄 {r.health_score} "
-                    f"→ *{r.total_score}*  ({per}, {pbr})"
+                    f"     밸류 {r.value_score} · 퀄리티 {r.health_score}  ({per}, {pbr})"
                 )
+            lines.append("  └ _밸류·퀄리티 종합 (0~100, 높을수록 저평가·우량)_")
     else:
         if report.factors:
             lines.append("")
-            lines.append("*📈 오늘의 발굴 종목* (모멘텀/밸류/퀄리티/로우볼 → 종합)")
+            lines.append("*📈 오늘의 발굴 종목*")
             for f in sorted(report.factors, key=lambda x: x.composite, reverse=True):
-                lines.append(
-                    f"  `{f.ticker:<5}` {f.momentum:>3}/{f.value:>3}/{f.quality:>3}/{f.low_vol:>3} "
-                    f"→ *{f.composite}*"
+                nm = names.get(f.ticker, "")
+                head = (
+                    f"  `{f.ticker}` *{nm}* — 종합 *{f.composite}*"
+                    if nm
+                    else f"  `{f.ticker}` — 종합 *{f.composite}*"
                 )
+                lines.append(head)
+                lines.append(
+                    f"     모멘텀 {f.momentum} · 밸류 {f.value} · "
+                    f"퀄리티 {f.quality} · 로우볼 {f.low_vol}"
+                )
+            lines.append("  └ _모멘텀·밸류·퀄리티·로우볼 종합 (0~100, 높을수록 매력적)_")
         # ---- 발굴 종목 (스크리닝 통과 — US 라이브 스크리너) ----
         if report.candidates:
             lines.append("")
-            lines.append("*💎 발굴 종목* (스크리닝 통과)")
+            lines.append("*💎 스크리닝 통과*")
             for c in report.candidates[:5]:
                 pe = f"P/E {c['pe']:.1f}" if c.get("pe") else "적자"
-                lines.append(f"  `{c['ticker']}` — {pe}")
+                nm = names.get(c["ticker"], "")
+                if nm:
+                    lines.append(f"  `{c['ticker']}` *{nm}* — {pe}")
+                else:
+                    lines.append(f"  `{c['ticker']}` — {pe}")
 
     # ---- 선행지표 예측 ----
     if predictions:
@@ -97,9 +139,10 @@ def format_digest(
         lines.append("*🔮 선행지표 예측*")
         if reliable:
             for p in sorted(reliable, key=lambda x: x.r_squared, reverse=True):
+                icon = _direction_icon(p.direction)
                 lines.append(
-                    f"  {p.target_name}: {p.direction} "
-                    f"(선행 {p.best_lag_months}M, R² {p.r_squared:.2f})"
+                    f"  {icon} {p.target_name}: {p.direction} "
+                    f"({p.best_lag_months}개월 선행, 신뢰도 R² {p.r_squared:.2f})"
                 )
         else:
             lines.append("  _신뢰할 만한 예측 없음 (R²<0.3)_")
@@ -109,6 +152,26 @@ def format_digest(
     lines.append("")
     lines.append("_상관 기반 통계 모델 — 투자 결정은 본인 판단_")
     return "\n".join(lines)
+
+
+def _us_names(symbols: list[str]) -> dict[str, str]:
+    """US 티커 → 회사명 맵 (유니버스 DB 조회). 미보강/미발견은 생략.
+
+    조회는 로컬 레플리카 읽기(원격 쓰기 아님)라 소수 종목엔 비용 미미.
+    개별 조회 실패는 best-effort — 이름은 부가정보라 없으면 티커만 표시.
+    """
+    from src import universe
+
+    out: dict[str, str] = {}
+    for s in dict.fromkeys(symbols):   # 중복 제거(순서 유지)
+        try:
+            row = universe.lookup(s)
+        except QuantBotError as e:
+            logger.debug("회사명 조회 스킵 %s — %s", s, e)
+            continue
+        if row and row.name:
+            out[s] = row.name
+    return out
 
 
 def _collect_predictions() -> list[LeadLagResult]:
@@ -167,7 +230,10 @@ def build_daily_digest(
         tk = tuple(screened) or DEFAULT_SIGNAL_TICKERS
 
     report = generate_signal_report(tickers=tk, screen_tickers=None, market="US")
-    return format_digest(report, predictions, market="US")
+    names = _us_names(
+        [f.ticker for f in report.factors] + [c["ticker"] for c in report.candidates]
+    )
+    return format_digest(report, predictions, market="US", names=names)
 
 
 def send_daily_digest(
