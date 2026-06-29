@@ -2,11 +2,14 @@
 
 개인용 퀀트 리서치 자동화 봇. 매일 아침 시장 국면·자산군 동향·종목 리스크·가치주 신호를 자동으로 계산해 보여주는 도구입니다.
 
-> **챗봇이 아닙니다.** 결정론적 신호 생성 + 자동 알림 시스템입니다. LLM 은 나중에 뉴스 센티먼트 분류나 일일 요약 한 줄 정도의 선택적 레이어로만 쓸 계획입니다 (Phase 8+).
+> **챗봇이 아닙니다.** 결정론적 신호 생성 + 자동 알림 시스템입니다. LLM 은 선택적 양념 레이어(일일 요약 한 줄 등)로만 쓸 계획 — 현재 미사용, MiniMax-M3/NVIDIA 후보로 방향만 잡힌 상태입니다 ([ROADMAP §2.1](docs/ROADMAP.md)).
+
+**📊 라이브 대시보드: https://zonnx999.github.io/AI-Investment-Bot/**
 
 - 프로젝트 규칙: [CLAUDE.md](CLAUDE.md) (에이전트가 가장 먼저 읽는 파일)
 - 현재 작업 상태: [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md)
 - 다음 작업: [docs/ROADMAP.md](docs/ROADMAP.md)
+- 서버 운영 런북: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
 
 ## 철학
 
@@ -14,6 +17,14 @@
 - **에드워드 소프 (리스크 관리)**: "이 종목 얼마나 떨어질 수 있나"를 통계적으로 사전 계산. VaR / CVaR / MDD / Monte Carlo / 시나리오 분석.
 - **신호 자동화**: 매일 한 번 데이터 받고 분석 돌리고 결과 push. 사용자가 명령어 칠 필요 없게.
 - **대체 데이터**: 가격뿐 아니라 거시지표·한국 수출·M2 같은 선행지표로 펀더멘털 예측 (Phase 6).
+
+## 현재 동작 (2026-06)
+
+- **매일 아침 텔레그램 다이제스트** — 시장 국면 + 변화 알림 + 발굴 종목 + 선행지표 예측 (KR 08:30 / US 09:00 KST).
+- **상시 인터랙티브 봇** (Oracle 서버, systemd) — 소유자 승인제 멀티유저. `/stock` `/scan` `/help`, 소유자 `/approve` `/announce`.
+- **전 종목 유니버스 스캔** — US/KR/크립토, Turso(libSQL) 클라우드 DB, 오프라인 전수 스캔(API 0콜).
+- **라이브 대시보드** — GitHub Pages, Actions 자동 배포(매일 갱신).
+- 자세한 모듈 맵·현재 상태는 [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md).
 
 ## 폴더 구조
 
@@ -56,14 +67,14 @@ AI-Investment-Bot/
 │   ├── diag_fmp.py            # FMP 엔드포인트 접근 진단
 │   └── demo_exceptions.py     # 예외 체계 검증 데모
 │
-├── dashboard/
-│   ├── index.html             # 가치주 대시보드 (스크리너 결과 시각화)
-│   └── screener_data.json     # screen_value.py 가 자동 생성 (gitignore)
+├── dashboard/                 # 정적 대시보드 (GitHub Pages, Actions 자동 배포)
+│   ├── index.html             # 5탭: 한국 / 미국 / 크립토 / 시장국면 / 선행지표
+│   └── *_data.json            # export_dashboard.py 가 Turso 에서 생성 (kr/us/crypto/regime/predictions)
 │
 ├── data/                  # 데이터 캐시 (gitignore)
 ├── notebooks/             # 실험용 노트북 (gitignore)
 ├── logs/                  # quant_bot.log (gitignore)
-└── tests/                 # pytest — 오프라인 테스트 99개 (python -m pytest)
+└── tests/                 # pytest — 오프라인 테스트 216개 (python -m pytest)
 ```
 
 ## 첫 실행 (Quick Start)

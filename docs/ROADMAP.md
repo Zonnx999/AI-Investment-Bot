@@ -3,8 +3,8 @@
 > 현재 상태·완료 상세는 `CURRENT_STATE.md` + `git log`. 이 파일은 **앞으로 할 일**에 집중합니다.
 > 작업 규칙(phase-gate·리뷰 톤·결정 시 옵션 제시)은 `CLAUDE.md §4`.
 
-**권장 순서**: Phase 10·9·11a·11b ✅ (Oracle 서버 가동 중) → **11b 마무리(인라인 버튼·뉴스)** → 12(대시보드).
-운영 런북은 `docs/DEPLOYMENT.md`.
+**권장 순서**: Phase 4–12 ✅ (Oracle 서버 가동 중, 대시보드 라이브) → **11b 잔여(인라인 승인버튼·`/news`)** → 선택 백로그(§2).
+운영 런북은 `docs/DEPLOYMENT.md`. 대시보드: https://zonnx999.github.io/AI-Investment-Bot/
 
 ---
 
@@ -25,14 +25,7 @@
 - [ ] `/news <티커>` — `NEWS_API_KEY`/FMP 뉴스 (응답 캐시 + rate limit), (선택) Haiku 센티먼트
 - [ ] (선택) `/regime`·`/predict`·`/me`(내 상태) 즉답 — 단 국면/예측은 라이브 fetch라 봇에 약간 무거움
 
-### Phase 12 — 대시보드 통합 (모든 정보 한 화면)
-`dashboard/index.html`(현재 스크리너 전용) 을 확장.
-- [ ] 국면/리스크/예측/유니버스 스캔/종목 상세 탭 추가
-- [ ] 데이터 소스: `daily_update`/`scan` 결과 JSON 출력 → 정적 페이지가 fetch
-- [ ] 호스팅: GitHub Pages (정적) — Turso DB 와 연계 (⚠️ public repo 전환 시 시크릿/IP 노출 주의)
-- [ ] 역할 분담: 봇 push=요약 알림, 대시보드=심층 탐색
-
-### Phase 12 — 대시보드 통합 ✅ (2026-06-23)
+### Phase 12 — 대시보드 통합 ✅ (2026-06-23, Pages 라이브 06-29)
 `dashboard/index.html` 재작성 + `scripts/export_dashboard.py` 신규.
 - [x] 탭: 🇰🇷 한국 / 🇺🇸 미국 / ₿ 크립토 / 📊 시장 국면 / 📈 선행지표 (아시아 탭 제거)
 - [x] Turso DB → 시장별 별도 JSON (kr/us/crypto_data.json) lazy load
@@ -45,15 +38,27 @@
 
 ---
 
-## 2. 부록 — 우선순위 낮은 선택 단계
-- **LLM 요약 한 줄** — 다이제스트 맨 위 한 문단. 후보: MiniMax-M3(NVIDIA API) 또는 Haiku.
+## 2. 부록 — 선택 기능 / 백로그
+
+### 2.1 다음 후보 기능
+- **LLM 요약 한 줄** — 다이제스트 맨 위 한 문단. 후보: **MiniMax-M3(NVIDIA API, `MINIMAX_API_KEY` 이미 .env 에 있음)** 또는 Haiku.
   방향만 합의(2026-06-29, 구현 대기): 결정론적 다이제스트 **위 표현 레이어만** — 숫자·티커 생성/수정 금지,
   API 실패/레이트리밋 시 **요약 생략 폴백**(다이제스트는 그대로 발송, §4.10 #10 사상), 하루 1회 호출.
-  배선: `src/llm.py`(NVIDIA 호출+폴백, http 세션 재사용) + `config.NVIDIA_API_KEY` + http 마스킹 등록.
-  구현 전 NVIDIA 카탈로그서 모델 id 검증(§4.10 #3).
+  배선: `src/llm.py`(호출+폴백, http 세션 재사용) + `config` 에 키 로딩 + http 마스킹 등록. 구현 전 모델 id 검증(§4.10 #3).
 - **백테스트 프레임워크** — Phase 5 신호 / Phase 6 예측의 과거 성과 검증 (예측 R² 우려 정량 해소)
-- **Streamlit 웹 UI** — Phase 12 대시보드로 대체되면 skip
-- **미구현(새 의존성 대기)**: Google Trends(pytrends, 불안정), SEC EDGAR 13F(파싱 부담·45일 지연)
+- **지표 확장** (구 UPGRADE_PLAN P2) — VIX/DXY → `classify_regime` 보강, earnings revision, short interest 알림
+- **포트폴리오 최적화 엔진** (구 P3) — 자산군 비중 산출 (All Weather 비중 검증과 연결)
+- **알파 신호** (구 P4) — insider trading 알림, earnings-call NLP(LLM), 한국 BOK ECOS API(`ECOS_API_KEY`)
+- **미구현(의존성 대기)**: Google Trends(pytrends, 불안정), SEC EDGAR 13F(파싱·45일 지연)
+- **Streamlit** — Phase 12 대시보드로 대체됨, skip
+
+### 2.2 코드 개선 backlog (출처: 코드리뷰 2026-06-23 — [BUG] 5건은 06-29 수정 완료)
+- **점수 정확성**: KR PBR 공식 완화(중대형주에 가혹, PBR 2.0→0점), KR 배당 DART 연동(현재 0 고정),
+  빈 fundamentals 는 0점 대신 skip(현재 누락=조용한 저점), 음수 earningsYield→PER `None` 명시
+- **DRY/구조**: `_clip`·`_MARKET_LABEL` → `utils`, vol 계산 중복 → `FactorScores.vol_pct`,
+  `subscribers` private 심볼 public API + 봇 conn 재사용(매 메시지 Turso 왕복↓), `run()→NoReturn`,
+  `symbols_needing_enrichment(market)` 파라미터화
+- **견고성**: Markdown 폴백을 `status_code==400` 기반으로(현 "parse" 문자열 매칭은 취약), `drawdown_alerts` 단일 호출 리팩토링
 
 ---
 

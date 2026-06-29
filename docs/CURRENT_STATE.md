@@ -17,12 +17,14 @@
 - **시장별 다이제스트**: 한국 창→KR 종목, 미국 창→US 종목 (cron 이 창에 따라 `--market` 자동 전달).
 - **Phase 11a 멀티유저(소유자 승인제)** + **11b 상시 인터랙티브 봇** — Oracle 서버에 systemd
   `quant-bot` 으로 **배포·가동 중**(`docs/DEPLOYMENT.md`). `/start`·`/approve`·`/stock`·`/scan`·`/help`.
-- **Phase 12 대시보드 구현 완료 (2026-06-23)**. `dashboard/index.html` 재작성 + `scripts/export_dashboard.py` 신규.
-  `.github/workflows/dashboard-export.yml` (매일 09:30 KST, JSON 갱신 + **Actions 로 Pages 배포**).
-  GitHub Pages 활성화 (사용자 작업, 1회): Settings → Pages → Source = **"GitHub Actions"**.
-  (⚠️ branch 배포는 `/` 또는 `/docs` 폴더만 지원 → `/dashboard` 서빙은 Actions 아티팩트 방식. 06-29)
-- **(2026-06-29)** 코드리뷰 미해결 버그 5건 수정 + 다이제스트 UX 개선(회사명·범례·시각적 위계·예측 가독성) + `/announce` 소유자 공지 추가.
-- **다음 작업**: GitHub Pages 활성화(사용자 작업) → 11b 잔여(인라인 승인버튼·`/news`). 선택: LLM 한 줄 요약(MiniMax-M3/NVIDIA, 방향만 합의·대기 — `ROADMAP §2`).
+- **Phase 12 대시보드 — 라이브** 🟢 https://zonnx999.github.io/AI-Investment-Bot/
+  `dashboard/index.html`(5탭) + `scripts/export_dashboard.py` + `.github/workflows/dashboard-export.yml`
+  (매일 09:30 KST JSON 갱신 + **Actions 로 Pages 배포**). Pages Source = "GitHub Actions" (설정 완료).
+- **서버 자동 배포**: `scripts/server_autopull.sh` + systemd timer → `main` push 시 ~5분 내 박스 자동 반영
+  (설정은 `docs/DEPLOYMENT.md §6.1`).
+- **(2026-06-29)** 코드리뷰 버그 5건 수정 + 다이제스트 UX(회사명·범례·위계·예측) + `/announce` 소유자 공지 + 문서 정리(CODE_REVIEW·UPGRADE_PLAN 제거).
+- **MINIMAX_API_KEY** `.env` 에 추가됨 — LLM 한 줄 요약용(MiniMax-M3/NVIDIA). 구현은 대기(`ROADMAP §2.1`).
+- **다음 작업**: 11b 잔여(인라인 승인버튼·`/news`) 또는 LLM 한 줄 요약. 코드 개선 backlog는 `ROADMAP §2.2`.
 
 ---
 
@@ -149,7 +151,7 @@ QuantBotError
 | Phase 11b 인터랙티브 봇 | `bot_commands`+`scripts/bot.py` 폴링 워커, `/stock`·`/scan`·`/help`, rate limit | ✅ (06-22) |
 | 텔레그램 견고화 | Markdown 평문 폴백, 조회 구독자 게이팅, reply 키보드 버튼, `/subscribers` | ✅ (06-22) |
 | 서버 배포 | Oracle Always Free(systemd `quant-bot`) + 다이제스트 systemd timer | ✅ (06-22) `docs/DEPLOYMENT.md` |
-| 코드리뷰 버그수정 | `_safe` NaN/문자열·company_screener 에러dict·DART 계정명·KOSDAQ 발굴 격리 (+테스트8, `docs/CODE_REVIEW.md`) | ✅ (06-29) |
+| 코드리뷰 버그수정 | `_safe` NaN/문자열·company_screener 에러dict·DART 계정명·KOSDAQ 발굴 격리 (+테스트8, 커밋 `beac21e`) | ✅ (06-29) |
 | 다이제스트 UX + 공지 | 회사명·범례·시각적 위계·예측 가독성 / `/announce` 소유자 공지 브로드캐스트 (+테스트10) | ✅ (06-29) |
 
 > ⚠️ 한계 기록: FMP 엔 실제 KOSPI/KOSDAQ 없음(→ KRX/DART 로 해결). 크립토 점수는 주식과 비교
