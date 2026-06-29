@@ -176,6 +176,52 @@ def test_discover_kr_filters_common_stocks_and_floor(fresh_db, monkeypatch):
     assert row[0][0] == "005930" and row[0][4] == 0   # 발굴만, 미보강 (DART 대기)
 
 
+def test_discover_kr_survives_kosdaq_failure(fresh_db, monkeypatch):
+    # KOSDAQ 일별매매 API 실패 시 KOSPI 만으로 발굴 계속 — 예외가 위로 새면
+    # discover() 가 통째 죽어 CRYPTO 발굴까지 중단됨 (#버그수정)
+    from src.exceptions import DataFetchError
+
+    kospi = [
+        {"ISU_CD": "005930", "ISU_NM": "삼성전자", "TDD_CLSPRC": "70000",
+         "MKTCAP": "400000000000000", "SECT_TP_NM": ""},
+    ]
+    base = {
+        "KOSPI": [{"ISU_SRT_CD": "005930", "SECUGRP_NM": "주권", "KIND_STKCERT_TP_NM": "보통주"}],
+        "KOSDAQ": [],
+    }
+
+    def fake_daily(market, bas_dd):
+        if market == "KOSDAQ":
+            raise DataFetchError("KOSDAQ 일별매매 실패", source="KRX")
+        return kospi
+
+    monkeypatch.setattr("src.data_fetcher.fetch_krx_daily", fake_daily)
+    monkeypatch.setattr("src.data_fetcher.fetch_krx_base_info", lambda market, bas_dd: base[market])
+
+    n = universe.discover(markets=("KR",))["KR"]
+    assert n == 1   # KOSDAQ 실패해도 KOSPI 삼성전자는 발굴됨 (예외 전파 안 함)
+
+
+def test_discover_kr_block_isolates_failure(fresh_db, monkeypatch):
+    # 기본정보(_common_stock_codes) 등 다른 KRX 호출 실패도 discover() 를 죽이지 않음
+    from src.exceptions import DataFetchError
+
+    kospi = [
+        {"ISU_CD": "005930", "ISU_NM": "삼성전자", "TDD_CLSPRC": "70000",
+         "MKTCAP": "400000000000000", "SECT_TP_NM": ""},
+    ]
+    monkeypatch.setattr("src.data_fetcher.fetch_krx_daily",
+                        lambda market, bas_dd: kospi if market == "KOSPI" else [])
+
+    def boom(market, bas_dd):
+        raise DataFetchError("KRX 기본정보 실패", source="KRX")
+
+    monkeypatch.setattr("src.data_fetcher.fetch_krx_base_info", boom)
+
+    counts = universe.discover(markets=("KR",))   # 예외 없이 반환되어야 함
+    assert counts["KR"] == 0
+
+
 def test_kr_not_targeted_by_fmp_enrichment(fresh_db):
     # KR 행은 FMP key-metrics 보강 대상에서 제외 (DART 로 별도)
     conn = universe._conn()

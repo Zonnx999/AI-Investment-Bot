@@ -30,6 +30,7 @@ JSON 스키마 (dashboard/index.html 호환)
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Iterable, TypedDict
 
@@ -139,9 +140,23 @@ KR_WATCHLIST: tuple[str, ...] = (
 
 
 def _safe(d: dict, key: str, default: float = 0.0) -> float:
-    """dict.get 후 None 을 default 로 치환 + float 변환."""
+    """dict.get 후 None/비숫자/NaN/Inf 를 default 로 치환 + float 변환.
+
+    FMP/pandas 응답은 결측을 None 뿐 아니라 ``"N/A"`` 같은 문자열이나
+    ``float('nan')`` (pandas ``to_dict()``) 으로도 준다. 거르지 않으면
+    (1) ``float("N/A")`` → ValueError 크래시, (2) NaN 이 ``_clip`` 을 그대로
+    통과해(``min(hi, nan)==hi``) 해당 컴포넌트에 **만점**을 줘 총점이 과대계상된다.
+    """
     v = d.get(key)
-    return float(default if v is None else v)
+    if v is None:
+        return float(default)
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return float(default)
+    if math.isnan(f) or math.isinf(f):
+        return float(default)
+    return f
 
 
 def _clip(v: float, lo: float, hi: float) -> float:

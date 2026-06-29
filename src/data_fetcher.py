@@ -521,7 +521,10 @@ def fetch_company_screener(
     if actively_trading:
         params["isActivelyTrading"] = "true"
     data = _fmp_get("company-screener", params)
-    if not data:
+    # FMP 가 200 + 에러 dict({"Error Message": ...}) 를 줄 때가 있음 → dict 를
+    # 이터레이트하면 key(str)에 .get() 호출로 AttributeError 크래시. list 아니면 빈 결과.
+    # (_fmp_to_dataframe 에는 같은 가드가 있지만 이 함수는 그걸 안 거침)
+    if not isinstance(data, list):
         return []
     if exclude_funds:
         data = [d for d in data if not (d.get("isEtf") or d.get("isFund"))]
@@ -743,8 +746,13 @@ def _parse_dart_accounts(items: list[dict]) -> dict:
             bucket[nm] = val
 
     base = cfs or ofs
+    # 흑자 기업은 괄호 없는 '당기순이익' 으로 보고하기도 함 → 표준형 우선 + 폴백.
+    # (값 0.0 을 None 으로 덮지 않도록 `or` 가 아니라 명시적 None 체크)
+    net_income = base.get("당기순이익(손실)")
+    if net_income is None:
+        net_income = base.get("당기순이익")
     return {
-        "net_income": base.get("당기순이익(손실)"),
+        "net_income": net_income,
         "equity": base.get("자본총계"),
         "debt": base.get("부채총계"),
         "revenue": base.get("매출액"),

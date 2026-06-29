@@ -237,7 +237,13 @@ def _discover_kr(conn, floor: float = KR_MARKET_CAP_FLOOR) -> int:
     if not bas_dd:
         logger.warning("KRX 최근 영업일 데이터를 찾지 못함 — KR 발굴 스킵")
         return 0
-    kosdaq = fetch_krx_daily("KOSDAQ", bas_dd)
+    try:
+        kosdaq = fetch_krx_daily("KOSDAQ", bas_dd)
+    except DataFetchError as e:
+        # KOSPI 실패가 (None, []) 로 우아하게 처리되는 것과 일관 — KOSDAQ 만 실패하면
+        # KOSPI 발굴은 계속한다 (이 예외가 위로 새면 discover() KR 블록을 거쳐 CRYPTO 발굴까지 중단).
+        logger.warning("KOSDAQ 발굴 실패 — KOSPI 만으로 진행: %s", e)
+        kosdaq = []
     common = _common_stock_codes(bas_dd)
 
     n = 0
@@ -293,7 +299,13 @@ def discover(
             counts["US"] = len(rows)
 
         elif mkt == "KR":
-            counts["KR"] = _discover_kr(conn)
+            # US/CRYPTO 와 동일하게 시장 단위로 격리 — 기본정보(_common_stock_codes)
+            # 등 다른 KRX 호출이 실패해도 CRYPTO 발굴까지 막지 않도록.
+            try:
+                counts["KR"] = _discover_kr(conn)
+            except DataFetchError as e:
+                logger.warning("발굴 실패 KR — %s", e)
+                counts["KR"] = 0
 
         elif mkt == "CRYPTO":
             try:

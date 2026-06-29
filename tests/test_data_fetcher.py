@@ -40,3 +40,28 @@ def test_fmp_get_requires_key_before_any_network(no_api_keys):
 
     with pytest.raises(MissingApiKeyError):
         _fmp_get("quote", {"symbol": "CPNG"})
+
+
+# ---------------- fetch_company_screener 방어 ----------------
+
+
+def test_company_screener_rejects_error_dict(monkeypatch):
+    """FMP 200 + 에러 dict 면 dict 이터레이션(AttributeError) 대신 빈 리스트 (#버그수정)."""
+    import src.data_fetcher as df
+
+    monkeypatch.setattr(df, "_fmp_get", lambda *a, **k: {"Error Message": "Invalid API KEY."})
+    assert df.fetch_company_screener() == []
+
+
+def test_company_screener_filters_funds(monkeypatch):
+    """정상 list 경로: ETF/펀드는 걸러내고 일반 종목만."""
+    import src.data_fetcher as df
+
+    rows = [
+        {"symbol": "AAA", "isEtf": False, "isFund": False},
+        {"symbol": "SPY", "isEtf": True, "isFund": False},
+        {"symbol": "FND", "isEtf": False, "isFund": True},
+    ]
+    monkeypatch.setattr(df, "_fmp_get", lambda *a, **k: rows)
+    out = df.fetch_company_screener(exclude_funds=True)
+    assert [d["symbol"] for d in out] == ["AAA"]

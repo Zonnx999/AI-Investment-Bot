@@ -46,6 +46,18 @@ def test_parse_handles_missing_and_bad_amounts():
     assert out["net_income"] is None
 
 
+def test_parse_net_income_without_parens():
+    # 흑자 기업이 괄호 없는 '당기순이익' 으로 보고해도 잡아야 함 (#버그수정)
+    out = _parse_dart_accounts(_items("CFS", **{"당기순이익": "120", "자본총계": "1,000"}))
+    assert out["net_income"] == 120.0
+
+
+def test_parse_net_income_prefers_parens_form():
+    # 표준형 '당기순이익(손실)' 이 있으면 그것을 우선 (둘 다 있을 때)
+    items = _items("CFS", **{"당기순이익(손실)": "100", "당기순이익": "999"})
+    assert _parse_dart_accounts(items)["net_income"] == 100.0
+
+
 # ---------------- calculate_kr_scores ----------------
 
 

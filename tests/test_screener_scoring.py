@@ -5,6 +5,7 @@ from __future__ import annotations
 from src.screener import (
     Component,
     ScoreCard,
+    _safe,
     calculate_health_score,
     calculate_value_score,
     health_scorecard,
@@ -107,3 +108,23 @@ def test_positive_ev_ebitda_still_scores():
     card = value_scorecard(quote, {"evToEBITDA": 5.0, "priceToBookRatio": 1.0})
     ev = next(c for c in card.components if c.label == "EV/EBITDA")
     assert ev.points > 0
+
+
+# ---------------- _safe (결측/비숫자 방어) ----------------
+
+
+def test_safe_handles_non_numeric_and_nan():
+    """'N/A' 문자열·NaN·Inf 는 크래시/만점이 아니라 default 로 (#버그수정)."""
+    assert _safe({"x": "N/A"}, "x") == 0.0            # 문자열 → ValueError 안 나고 default
+    assert _safe({"x": float("nan")}, "x", 1.0) == 1.0  # NaN → default(만점 방지)
+    assert _safe({"x": float("inf")}, "x") == 0.0     # Inf → default
+    assert _safe({}, "x", 5.0) == 5.0                 # 키 없음 → default
+    assert _safe({"x": None}, "x", 5.0) == 5.0        # None → default
+    assert _safe({"x": "12.5"}, "x") == 12.5          # 정상 숫자 문자열은 변환
+
+
+def test_nan_metric_scores_zero_not_full():
+    """NaN 컴포넌트가 _clip 통과해 만점 받던 버그 — 이제 0점."""
+    card = health_scorecard({"grossProfitMargin": float("nan")})
+    gp = next(c for c in card.components if c.label == "총이익률(GP)")
+    assert gp.points == 0.0   # NaN → default(0) → 0점 (이전엔 만점 25)
