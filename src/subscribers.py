@@ -59,8 +59,8 @@ class SubEvent:
     update_id: int | None
     chat_id: str            # 명령을 보낸 사람
     name: str
-    kind: str               # request | unsubscribe | approve | deny | pending | list | ignore
-    target: str | None = None   # approve/deny 의 대상 chat_id
+    kind: str               # request|unsubscribe|approve|deny|pending|list|announce|ignore
+    target: str | None = None   # approve/deny 의 대상 chat_id, 또는 announce 의 공지 본문
 
 
 def _utcnow() -> str:
@@ -102,6 +102,10 @@ def _classify(text: str) -> tuple[str, str | None]:
         return "pending", None
     if cmd == "/subscribers":
         return "list", None
+    if cmd == "/announce":
+        # 공지 본문 = 명령 뒤 전체(여러 단어). 권한(소유자)·전송은 apply_events 가 판정.
+        body = text.split(None, 1)[1].strip() if len(parts) > 1 else None
+        return "announce", body
     return "ignore", None
 
 
@@ -213,6 +217,19 @@ _MSG_DENIED = "가입이 거절되었습니다."
 _MSG_UNSUBSCRIBED = "👋 구독이 해지되었습니다. 다시 받으려면 /start"
 
 
+def _broadcast(text: str) -> dict[str, int]:
+    """active 구독자 전원에게 평문 전송 (#10 — 공지/관리 메시지는 평문). best-effort.
+
+    소유자도 active 라 함께 받음(전송본 그대로 확인). 개별 실패는 카운트만.
+    Returns {"sent","failed","recipients"}.
+    """
+    from src.notifier import send_safe
+
+    recipients = active_subscribers()
+    sent = sum(1 for cid, _nm in recipients if send_safe(text, cid, parse_mode=None))
+    return {"sent": sent, "failed": len(recipients) - sent, "recipients": len(recipients)}
+
+
 def apply_events(events: list[SubEvent], send_notifications: bool = True) -> dict[str, int]:
     """파싱된 구독 이벤트들을 DB 에 반영 + 알림. (fetch/offset 무관 — 재사용 가능)
 
@@ -223,7 +240,8 @@ def apply_events(events: list[SubEvent], send_notifications: bool = True) -> dic
     from src.notifier import send_safe
 
     owner = str(settings.telegram_chat_id) if settings.telegram_chat_id else None
-    st = {"requests": 0, "approved": 0, "denied": 0, "unsubscribed": 0, "ignored_admin": 0}
+    st = {"requests": 0, "approved": 0, "denied": 0, "unsubscribed": 0,
+          "ignored_admin": 0, "announced": 0}
     conn = _conn()
 
     def notify(text: str, chat_id: str | None) -> None:
@@ -253,6 +271,19 @@ def apply_events(events: list[SubEvent], send_notifications: bool = True) -> dic
             set_status(conn, ev.chat_id, "inactive")
             st["unsubscribed"] += 1
             notify(_MSG_UNSUBSCRIBED, ev.chat_id)
+
+        elif ev.kind == "announce":
+            # 소유자 전용 공지 — active 구독자 전원에게 평문 브로드캐스트.
+            if not is_owner:
+                st["ignored_admin"] += 1
+                continue
+            if not ev.target:
+                notify("사용법: /announce <공지 내용> — active 구독자 전원에게 전송", owner)
+            elif send_notifications:
+                result = _broadcast(f"📢 공지\n\n{ev.target}")
+                st["announced"] += 1
+                tail = f" (실패 {result['failed']})" if result["failed"] else ""
+                notify(f"📢 공지 전송: {result['sent']}/{result['recipients']}명{tail}", owner)
 
         elif ev.kind in ("approve", "deny", "pending", "list"):
             if not is_owner:
@@ -305,7 +336,8 @@ def sync_subscribers(send_notifications: bool = True) -> dict[str, int]:
         updates = get_updates(offset=offset)
     except DataFetchError as e:
         logger.warning("getUpdates 실패 — 구독 동기화 스킵: %s", e)
-        return {"requests": 0, "approved": 0, "denied": 0, "unsubscribed": 0, "ignored_admin": 0}
+        return {"requests": 0, "approved": 0, "denied": 0, "unsubscribed": 0,
+                "ignored_admin": 0, "announced": 0}
 
     events, next_offset = parse_updates(updates)
     st = apply_events(events, send_notifications=send_notifications)

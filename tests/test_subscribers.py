@@ -210,7 +210,8 @@ def test_sync_survives_getupdates_failure(fresh_db, owner_set, monkeypatch):
 
     monkeypatch.setattr("src.notifier.get_updates", boom)
     st = subscribers.sync_subscribers()
-    assert st == {"requests": 0, "approved": 0, "denied": 0, "unsubscribed": 0, "ignored_admin": 0}
+    assert st == {"requests": 0, "approved": 0, "denied": 0, "unsubscribed": 0,
+                  "ignored_admin": 0, "announced": 0}
 
 
 def test_apply_events_handles_authorization_and_state(fresh_db, owner_set, monkeypatch):
@@ -249,3 +250,65 @@ def test_apply_events_list_owner_only(fresh_db, owner_set, monkeypatch):
     sent.clear()
     st = subscribers.apply_events([subscribers.SubEvent(2, "999", "x", "list")])   # 비소유자
     assert st["ignored_admin"] == 1 and sent == []
+
+
+# ---------------- /announce (소유자 공지 브로드캐스트) ----------------
+
+
+def test_classify_announce_captures_full_body():
+    events, _ = subscribers.parse_updates([_upd(1, "/announce 서버 점검 안내 입니다")])
+    assert events[0].kind == "announce"
+    assert events[0].target == "서버 점검 안내 입니다"   # 여러 단어 본문 전체
+    e2, _ = subscribers.parse_updates([_upd(2, "/announce")])
+    assert e2[0].kind == "announce" and e2[0].target is None   # 본문 없음
+
+
+def _capture_send(monkeypatch) -> list[tuple[str, str]]:
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "src.notifier.send_safe",
+        lambda text, chat_id=None, parse_mode="Markdown": sent.append((chat_id, text)) or True,
+    )
+    return sent
+
+
+def test_announce_owner_broadcasts_to_active(fresh_db, owner_set, monkeypatch):
+    sent = _capture_send(monkeypatch)
+    conn = subscribers._conn()
+    subscribers.set_status(conn, "100", "active", name="alice")
+    subscribers.set_status(conn, "200", "active", name="bob")
+    conn.commit()
+
+    st = subscribers.apply_events(
+        [subscribers.SubEvent(1, "1", "owner", "announce", "서버 업데이트 완료")]
+    )
+    assert st["announced"] == 1
+    bodies = {cid: txt for cid, txt in sent}
+    assert "📢 공지" in bodies["100"] and "서버 업데이트 완료" in bodies["100"]
+    assert "📢 공지" in bodies["200"]                       # active 전원 수신
+    assert any(cid == "1" and "공지 전송" in txt for cid, txt in sent)   # 소유자에 결과 보고
+
+
+def test_announce_non_owner_ignored(fresh_db, owner_set, monkeypatch):
+    sent = _capture_send(monkeypatch)
+    conn = subscribers._conn()
+    subscribers.set_status(conn, "100", "active", name="alice")
+    conn.commit()
+
+    st = subscribers.apply_events(
+        [subscribers.SubEvent(1, "999", "mallory", "announce", "해킹 공지")]
+    )
+    assert st["ignored_admin"] == 1 and st["announced"] == 0
+    assert sent == []                                       # 비소유자 → 아무에게도 전송 안 됨
+
+
+def test_announce_empty_body_shows_usage(fresh_db, owner_set, monkeypatch):
+    sent = _capture_send(monkeypatch)
+    conn = subscribers._conn()
+    subscribers.set_status(conn, "100", "active", name="alice")
+    conn.commit()
+
+    st = subscribers.apply_events([subscribers.SubEvent(1, "1", "owner", "announce", None)])
+    assert st["announced"] == 0
+    assert any(cid == "1" and "사용법" in txt for cid, txt in sent)   # 소유자에 사용법
+    assert all(cid != "100" for cid, _ in sent)                       # 구독자 전송 없음
