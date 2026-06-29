@@ -77,6 +77,56 @@ sudo systemctl restart quant-bot
 - editable 설치라 `src/` 변경 자동 반영. **새 의존성**이 추가됐으면 `source .venv/bin/activate && pip install -e ".[hosting]"` 재실행.
 - `git reset --hard` 안전: `.env` 는 미추적이라 보존됨.
 
+### 6.1 자동 업데이트 (server auto-pull timer)
+위 수동 절차를 systemd timer 로 자동화. `scripts/server_autopull.sh` 가 주기적으로 `git fetch`
+후 origin/main 이 앞설 때만 reset + (pyproject 변경 시) pip + 봇 재시작. 변경 없으면 아무 것도
+안 함. **ubuntu 유저로 실행**(deploy key 접근), `restart` 만 passwordless sudo.
+
+1) restart 전용 passwordless sudo — `sudo visudo -f /etc/sudoers.d/quant-autopull`:
+```
+ubuntu ALL=(root) NOPASSWD: /usr/bin/systemctl restart quant-bot
+```
+(경로는 `which systemctl` 로 확인 — 보통 `/usr/bin/systemctl`)
+
+2) 서비스 `/etc/systemd/system/quant-autopull.service`:
+```
+[Unit]
+Description=quant-bot auto-pull (git fetch + reset + restart on change)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/AI-Investment-Bot
+ExecStart=/home/ubuntu/AI-Investment-Bot/scripts/server_autopull.sh
+```
+
+3) 타이머 `/etc/systemd/system/quant-autopull.timer` (5분 주기):
+```
+[Unit]
+Description=Run quant-bot auto-pull every 5 min
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+4) 활성화:
+```
+sudo systemctl daemon-reload
+sudo systemctl enable --now quant-autopull.timer
+```
+- 다음 실행 시각: `systemctl list-timers quant-autopull.timer`
+- 마지막 실행 로그: `journalctl -u quant-autopull.service -n 20`
+- 즉시 1회 테스트: `sudo systemctl start quant-autopull.service`
+- 끄기: `sudo systemctl disable --now quant-autopull.timer`
+- ⚠️ 이제 `main` 에 push 하면 ~5분 내 박스가 **자동 반영** → 수동 배포 불필요. 단 자동 재시작이
+  바로 적용되므로 **DB 스키마/마이그레이션 변경은 안전 확인 후** push (CLAUDE §4.10 #9).
+
 **레플리카 손상 복구** (`malformed WAL` 등 — Turso 임베디드 레플리카 파일 깨짐):
 ```
 sudo systemctl stop quant-bot
