@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>멀티탭 가치주 스크리너</title>
+    <title>AI Investment Bot — 대시보드</title>
     <style>
         :root {
             color-scheme: light;
@@ -13,53 +13,35 @@
             --danger: #dc2626;
             --border: #e5e7eb;
             --text-muted: #6b7280;
+            --bg-page: #f9fafb;
+            --bg-card: #ffffff;
         }
 
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
 
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-            background: #f9fafb;
+            background: var(--bg-page);
             color: #1f2937;
             line-height: 1.5;
         }
 
-        .container {
-            max-width: 1600px;
-            margin: 0 auto;
-            padding: 20px;
-        }
+        .container { max-width: 1600px; margin: 0 auto; padding: 20px; }
 
-        .header {
-            margin-bottom: 30px;
-        }
+        .header { margin-bottom: 24px; }
+        h1 { font-size: 28px; font-weight: 700; margin-bottom: 4px; }
+        .subtitle { color: var(--text-muted); font-size: 13px; }
 
-        h1 {
-            font-size: 32px;
-            margin-bottom: 8px;
-            font-weight: 700;
-        }
-
-        .subtitle {
-            color: var(--text-muted);
-            font-size: 14px;
-            margin-bottom: 20px;
-        }
-
+        /* 탭 */
         .tabs {
             display: flex;
-            gap: 8px;
+            gap: 4px;
             margin-bottom: 20px;
             border-bottom: 2px solid var(--border);
             flex-wrap: wrap;
         }
-
         .tab-btn {
-            padding: 12px 24px;
+            padding: 10px 20px;
             border: none;
             background: none;
             cursor: pointer;
@@ -68,640 +50,723 @@
             color: var(--text-muted);
             border-bottom: 3px solid transparent;
             margin-bottom: -2px;
-            transition: all 0.2s;
+            transition: all 0.15s;
+            white-space: nowrap;
         }
+        .tab-btn:hover { color: var(--primary); }
+        .tab-btn.active { color: var(--primary); border-bottom-color: var(--primary); }
 
-        .tab-btn:hover {
-            color: var(--primary);
-        }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
 
-        .tab-btn.active {
-            color: var(--primary);
-            border-bottom-color: var(--primary);
-        }
-
-        .tab-content {
-            display: none;
-        }
-
-        .tab-content.active {
-            display: block;
-        }
-
+        /* 컨트롤 */
         .controls {
             display: flex;
-            gap: 12px;
-            margin-bottom: 20px;
+            gap: 10px;
+            margin-bottom: 16px;
             align-items: center;
             flex-wrap: wrap;
         }
-
         .search-box {
             flex: 1;
-            min-width: 200px;
-            padding: 10px 16px;
+            min-width: 180px;
+            padding: 8px 14px;
             border: 1px solid var(--border);
             border-radius: 6px;
-            font-size: 14px;
+            font-size: 13px;
         }
-
         .filter-btn {
-            padding: 10px 16px;
+            padding: 8px 14px;
             border: 1px solid var(--border);
-            background: white;
+            background: var(--bg-card);
             border-radius: 6px;
             cursor: pointer;
             font-size: 12px;
-            transition: all 0.2s;
+            transition: all 0.15s;
+            white-space: nowrap;
         }
+        .filter-btn:hover { border-color: var(--primary); color: var(--primary); }
+        .filter-btn.active { background: var(--primary); color: white; border-color: var(--primary); }
 
-        .filter-btn:hover {
-            border-color: var(--primary);
-            color: var(--primary);
-        }
-
-        .filter-btn.active {
-            background: var(--primary);
-            color: white;
-            border-color: var(--primary);
-        }
-
+        /* 통계 카드 */
         .stats {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 16px;
-            margin-bottom: 20px;
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 12px;
+            margin-bottom: 16px;
         }
-
         .stat-card {
-            background: white;
-            padding: 16px;
+            background: var(--bg-card);
+            padding: 14px;
             border-radius: 8px;
             border: 1px solid var(--border);
         }
+        .stat-label { color: var(--text-muted); font-size: 11px; text-transform: uppercase; margin-bottom: 6px; }
+        .stat-value { font-size: 22px; font-weight: 600; color: var(--primary); }
 
-        .stat-label {
-            color: var(--text-muted);
-            font-size: 12px;
-            text-transform: uppercase;
-            margin-bottom: 8px;
-        }
-
-        .stat-value {
-            font-size: 24px;
-            font-weight: 600;
-            color: var(--primary);
-        }
-
+        /* 테이블 */
         .table-container {
-            background: white;
+            background: var(--bg-card);
             border-radius: 8px;
             border: 1px solid var(--border);
             overflow: hidden;
-            max-height: 800px;
+            max-height: 760px;
             overflow-y: auto;
         }
-
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            font-size: 13px;
-        }
-
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
         th {
             background: #f3f4f6;
-            padding: 12px 16px;
+            padding: 10px 14px;
             text-align: left;
             font-weight: 600;
             color: #374151;
             border-bottom: 1px solid var(--border);
-            cursor: pointer;
-            user-select: none;
             position: sticky;
             top: 0;
             white-space: nowrap;
         }
+        th.sortable { cursor: pointer; user-select: none; }
+        th.sortable:hover { background: #e5e7eb; }
+        td { padding: 10px 14px; border-bottom: 1px solid var(--border); }
+        tr:last-child td { border-bottom: none; }
+        tr:hover td { background: #f9fafb; }
 
-        th:hover {
-            background: #e5e7eb;
-        }
+        .sym { font-weight: 600; color: var(--primary); font-size: 12px; }
+        .co-name { color: #4b5563; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .sector-tag { font-size: 11px; color: var(--text-muted); }
 
-        td {
-            padding: 12px 16px;
-            border-bottom: 1px solid var(--border);
-        }
-
-        tr:hover {
-            background: #f9fafb;
-        }
-
-        .symbol {
-            font-weight: 600;
-            color: var(--primary);
-        }
-
-        .company-name {
-            color: #4b5563;
-        }
-
-        .score {
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            padding: 4px 12px;
+        /* 점수 배지 */
+        .badge {
+            display: inline-block;
+            padding: 2px 10px;
             border-radius: 4px;
             font-weight: 600;
             font-size: 12px;
         }
+        .badge-excellent { background: #d1fae5; color: #065f46; }
+        .badge-good      { background: #bfdbfe; color: #1e40af; }
+        .badge-fair      { background: #fed7aa; color: #92400e; }
+        .badge-poor      { background: #fecaca; color: #7f1d1d; }
 
-        .score-excellent {
-            background: #d1fae5;
-            color: #065f46;
-        }
+        /* 방향 배지 (예측) */
+        .dir-up   { color: var(--success); font-weight: 600; }
+        .dir-down { color: var(--danger);  font-weight: 600; }
+        .dir-flat { color: var(--text-muted); }
 
-        .score-good {
-            background: #bfdbfe;
-            color: #1e40af;
-        }
-
-        .score-fair {
-            background: #fed7aa;
-            color: #92400e;
-        }
-
-        .score-poor {
-            background: #fecaca;
-            color: #7f1d1d;
-        }
-
-        .metric {
-            font-size: 12px;
-            color: var(--text-muted);
-        }
-
-        .metric.positive {
-            color: var(--success);
-            font-weight: 500;
-        }
-
-        .metric.negative {
-            color: var(--danger);
-            font-weight: 500;
-        }
-
-        .loading {
+        /* 로딩 / 빈 상태 */
+        .loading, .no-data {
             text-align: center;
             padding: 60px 20px;
             color: var(--text-muted);
-            font-size: 16px;
+            font-size: 15px;
         }
-
         .spinner {
             display: inline-block;
-            width: 20px;
-            height: 20px;
+            width: 18px; height: 18px;
             border: 3px solid var(--border);
             border-top-color: var(--primary);
             border-radius: 50%;
-            animation: spin 1s linear infinite;
-            margin-right: 10px;
+            animation: spin 0.8s linear infinite;
+            margin-right: 8px;
+            vertical-align: middle;
         }
+        @keyframes spin { to { transform: rotate(360deg); } }
 
-        @keyframes spin {
-            to { transform: rotate(360deg); }
-        }
-
+        /* 정보 박스 */
         .info-box {
             background: #eff6ff;
             border: 1px solid #bfdbfe;
             border-radius: 6px;
-            padding: 12px 16px;
-            margin-bottom: 16px;
+            padding: 10px 14px;
+            margin-bottom: 14px;
             font-size: 13px;
             color: #1e40af;
         }
+        .warn-box {
+            background: #fff7ed;
+            border: 1px solid #fdba74;
+            border-radius: 6px;
+            padding: 10px 14px;
+            margin-bottom: 14px;
+            font-size: 13px;
+            color: #c2410c;
+        }
 
-        .legend {
+        /* 국면 배지 */
+        .regime-badge {
+            display: inline-block;
+            font-size: 18px;
+            font-weight: 700;
+            padding: 8px 18px;
+            border-radius: 8px;
+            margin-bottom: 16px;
+        }
+        .regime-risk-on  { background: #d1fae5; color: #065f46; }
+        .regime-caution  { background: #fef9c3; color: #713f12; }
+        .regime-neutral  { background: #f3f4f6; color: #374151; }
+        .regime-risk-off { background: #fecaca; color: #7f1d1d; }
+
+        /* 시장 국면 패널 */
+        .panel-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
             gap: 12px;
-            margin-top: 20px;
-            padding: 16px;
-            background: #f9fafb;
+            margin: 16px 0;
+        }
+        .panel-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 14px;
+        }
+        .panel-name { font-weight: 600; margin-bottom: 8px; font-size: 14px; }
+        .panel-metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; }
+        .panel-metric-label { color: var(--text-muted); font-size: 11px; }
+        .panel-metric-value { font-size: 13px; font-weight: 500; }
+
+        /* 신호 리스트 */
+        .signal-list { list-style: none; margin: 8px 0; }
+        .signal-list li { padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+        .signal-list li:last-child { border-bottom: none; }
+
+        /* R² 배지 */
+        .r2-high { color: var(--success); font-weight: 600; }
+        .r2-mid  { color: var(--warning); font-weight: 600; }
+        .r2-low  { color: var(--text-muted); }
+
+        /* 업데이트 시각 */
+        .update-time { color: var(--text-muted); font-size: 11px; text-align: right; margin-top: 10px; }
+
+        /* 범례 */
+        .legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 16px;
+            margin-top: 16px;
+            padding: 12px 14px;
+            background: var(--bg-page);
             border-radius: 8px;
             border: 1px solid var(--border);
             font-size: 12px;
         }
-
-        .legend-item {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-
-        .legend-dot {
-            width: 12px;
-            height: 12px;
-            border-radius: 2px;
-        }
-
-        .update-time {
-            color: var(--text-muted);
-            font-size: 12px;
-            text-align: right;
-            margin-top: 12px;
-        }
-
-        .no-data {
-            text-align: center;
-            padding: 60px 20px;
-            color: var(--text-muted);
-        }
+        .legend-item { display: flex; align-items: center; gap: 6px; }
+        .legend-dot { width: 12px; height: 12px; border-radius: 2px; }
     </style>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <h1>💰 멀티탭 가치주 스크리너</h1>
-            <p class="subtitle">전국가 종목 실시간 분석 (한국 | 미국 | 아시아 | 크립토)</p>
-        </div>
-
-        <!-- 탭 -->
-        <div class="tabs">
-            <button class="tab-btn active" onclick="switchTab('korea')">🇰🇷 한국</button>
-            <button class="tab-btn" onclick="switchTab('us')">🇺🇸 미국</button>
-            <button class="tab-btn" onclick="switchTab('asia')">🌏 아시아</button>
-            <button class="tab-btn" onclick="switchTab('crypto')">₿ 크립토</button>
-        </div>
-
-        <!-- 한국 탭 -->
-        <div id="korea-tab" class="tab-content active">
-            <div class="info-box">
-                📊 한국 거래소 상장 종목 | 하루 2회 업데이트 (09:10, 21:10)
-            </div>
-            <div class="controls">
-                <input type="text" id="korea-search" class="search-box" placeholder="종목명 또는 코드 검색...">
-                <button class="filter-btn active" onclick="filterKorea('all')">모두</button>
-                <button class="filter-btn" onclick="filterKorea('excellent')">우수(60+)</button>
-                <button class="filter-btn" onclick="filterKorea('good')">좋음(50-59)</button>
-            </div>
-            <div class="stats">
-                <div class="stat-card">
-                    <div class="stat-label">분석 중인 종목</div>
-                    <div class="stat-value" id="korea-total">-</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-label">우수 종목</div>
-                    <div class="stat-value" id="korea-excellent">-</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-label">평균 점수</div>
-                    <div class="stat-value" id="korea-avg">-</div>
-                </div>
-            </div>
-            <div class="table-container">
-                <table>
-                    <thead>
-                        <tr>
-                            <th onclick="sortKorea('symbol')">코드 🔄</th>
-                            <th>회사명</th>
-                            <th onclick="sortKorea('price')">가격 🔄</th>
-                            <th onclick="sortKorea('health_score')">건전성 🔄</th>
-                            <th onclick="sortKorea('value_score')">저평가 🔄</th>
-                            <th onclick="sortKorea('total_score')">종합 🔄</th>
-                            <th>주요지표</th>
-                        </tr>
-                    </thead>
-                    <tbody id="korea-table">
-                        <tr><td colspan="7" class="loading"><span class="spinner"></span>데이터 로딩 중...</td></tr>
-                    </tbody>
-                </table>
-            </div>
-            <div class="update-time">마지막 업데이트: <span id="korea-update">-</span></div>
-        </div>
-
-        <!-- 미국 탭 -->
-        <div id="us-tab" class="tab-content">
-            <div class="info-box">
-                📊 뉴욕증권거래소 상장 종목 | 하루 2회 업데이트 (09:10, 21:10)
-            </div>
-            <div class="controls">
-                <input type="text" id="us-search" class="search-box" placeholder="종목명 또는 티커 검색...">
-                <button class="filter-btn active" onclick="filterUS('all')">모두</button>
-                <button class="filter-btn" onclick="filterUS('excellent')">우수(60+)</button>
-                <button class="filter-btn" onclick="filterUS('good')">좋음(50-59)</button>
-            </div>
-            <div class="stats">
-                <div class="stat-card">
-                    <div class="stat-label">분석 중인 종목</div>
-                    <div class="stat-value" id="us-total">-</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-label">우수 종목</div>
-                    <div class="stat-value" id="us-excellent">-</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-label">평균 점수</div>
-                    <div class="stat-value" id="us-avg">-</div>
-                </div>
-            </div>
-            <div class="table-container">
-                <table>
-                    <thead>
-                        <tr>
-                            <th onclick="sortUS('symbol')">티커 🔄</th>
-                            <th>회사명</th>
-                            <th onclick="sortUS('price')">가격 🔄</th>
-                            <th onclick="sortUS('health_score')">건전성 🔄</th>
-                            <th onclick="sortUS('value_score')">저평가 🔄</th>
-                            <th onclick="sortUS('total_score')">종합 🔄</th>
-                            <th>주요지표</th>
-                        </tr>
-                    </thead>
-                    <tbody id="us-table">
-                        <tr><td colspan="7" class="loading"><span class="spinner"></span>데이터 로딩 중...</td></tr>
-                    </tbody>
-                </table>
-            </div>
-            <div class="update-time">마지막 업데이트: <span id="us-update">-</span></div>
-        </div>
-
-        <!-- 아시아 탭 -->
-        <div id="asia-tab" class="tab-content">
-            <div class="info-box">
-                📊 일본, 중국, 인도 거래소 상장 종목 | 하루 2회 업데이트 (09:10, 21:10)
-            </div>
-            <div class="controls">
-                <input type="text" id="asia-search" class="search-box" placeholder="종목명 검색...">
-                <button class="filter-btn active" onclick="filterAsia('all')">모두</button>
-                <button class="filter-btn" onclick="filterAsia('excellent')">우수(60+)</button>
-                <button class="filter-btn" onclick="filterAsia('good')">좋음(50-59)</button>
-            </div>
-            <div class="stats">
-                <div class="stat-card">
-                    <div class="stat-label">분석 중인 종목</div>
-                    <div class="stat-value" id="asia-total">-</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-label">우수 종목</div>
-                    <div class="stat-value" id="asia-excellent">-</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-label">평균 점수</div>
-                    <div class="stat-value" id="asia-avg">-</div>
-                </div>
-            </div>
-            <div class="table-container">
-                <table>
-                    <thead>
-                        <tr>
-                            <th onclick="sortAsia('symbol')">코드 🔄</th>
-                            <th>회사명</th>
-                            <th onclick="sortAsia('price')">가격 🔄</th>
-                            <th onclick="sortAsia('health_score')">건전성 🔄</th>
-                            <th onclick="sortAsia('value_score')">저평가 🔄</th>
-                            <th onclick="sortAsia('total_score')">종합 🔄</th>
-                            <th>주요지표</th>
-                        </tr>
-                    </thead>
-                    <tbody id="asia-table">
-                        <tr><td colspan="7" class="loading"><span class="spinner"></span>데이터 로딩 중...</td></tr>
-                    </tbody>
-                </table>
-            </div>
-            <div class="update-time">마지막 업데이트: <span id="asia-update">-</span></div>
-        </div>
-
-        <!-- 크립토 탭 -->
-        <div id="crypto-tab" class="tab-content">
-            <div class="info-box">
-                📊 상위 50개 암호화폐 | 하루 2회 업데이트 (09:10, 21:10)
-            </div>
-            <div class="controls">
-                <input type="text" id="crypto-search" class="search-box" placeholder="암호화폐명 검색...">
-                <button class="filter-btn active" onclick="filterCrypto('all')">모두</button>
-                <button class="filter-btn" onclick="filterCrypto('excellent')">상위(60+)</button>
-                <button class="filter-btn" onclick="filterCrypto('good')">중위(40-59)</button>
-            </div>
-            <div class="stats">
-                <div class="stat-card">
-                    <div class="stat-label">분석 중인 암호화폐</div>
-                    <div class="stat-value" id="crypto-total">-</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-label">상위 등급</div>
-                    <div class="stat-value" id="crypto-excellent">-</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-label">평균 점수</div>
-                    <div class="stat-value" id="crypto-avg">-</div>
-                </div>
-            </div>
-            <div class="table-container">
-                <table>
-                    <thead>
-                        <tr>
-                            <th onclick="sortCrypto('symbol')">심볼 🔄</th>
-                            <th>이름</th>
-                            <th onclick="sortCrypto('rank')">순위 🔄</th>
-                            <th onclick="sortCrypto('price')">가격 🔄</th>
-                            <th onclick="sortCrypto('rank_score')">순위점수 🔄</th>
-                            <th onclick="sortCrypto('total_score')">종합 🔄</th>
-                            <th>변동률</th>
-                        </tr>
-                    </thead>
-                    <tbody id="crypto-table">
-                        <tr><td colspan="7" class="loading"><span class="spinner"></span>데이터 로딩 중...</td></tr>
-                    </tbody>
-                </table>
-            </div>
-            <div class="update-time">마지막 업데이트: <span id="crypto-update">-</span></div>
-        </div>
-
-        <!-- 범례 -->
-        <div class="legend">
-            <div class="legend-item">
-                <div class="legend-dot score-excellent"></div>
-                <span><strong>우수</strong> (60+) - 강력 추천</span>
-            </div>
-            <div class="legend-item">
-                <div class="legend-dot score-good"></div>
-                <span><strong>좋음</strong> (50-59) - 추천</span>
-            </div>
-            <div class="legend-item">
-                <div class="legend-dot score-fair"></div>
-                <span><strong>중간</strong> (40-49) - 검토</span>
-            </div>
-            <div class="legend-item">
-                <div class="legend-dot score-poor"></div>
-                <span><strong>약함</strong> (40-) - 비추천</span>
-            </div>
-        </div>
+<div class="container">
+    <div class="header">
+        <h1>AI Investment Bot 대시보드</h1>
+        <p class="subtitle">결정론적 신호 · 레이 달리오 All Weather 영감 · 매일 갱신</p>
     </div>
 
-    <script>
-        let allData = {};
-        let currentTab = 'korea';
-        let sortColumns = {
-            korea: 'total_score',
-            us: 'total_score',
-            asia: 'total_score',
-            crypto: 'total_score'
-        };
-        let sortAscending = {
-            korea: false,
-            us: false,
-            asia: false,
-            crypto: false
-        };
+    <!-- 탭 -->
+    <div class="tabs">
+        <button class="tab-btn active" onclick="switchTab(event,'korea')">🇰🇷 한국</button>
+        <button class="tab-btn" onclick="switchTab(event,'us')">🇺🇸 미국</button>
+        <button class="tab-btn" onclick="switchTab(event,'crypto')">₿ 크립토</button>
+        <button class="tab-btn" onclick="switchTab(event,'regime')">📊 시장 국면</button>
+        <button class="tab-btn" onclick="switchTab(event,'predictions')">📈 선행지표</button>
+    </div>
 
-        async function loadData() {
-            try {
-                // JSON 파일에서 데이터 로드
-                const response = await fetch('screener_data.json');
-                if (!response.ok) throw new Error('데이터 파일을 찾을 수 없습니다');
+    <!-- 한국 탭 -->
+    <div id="korea-tab" class="tab-content active">
+        <div class="info-box">한국 거래소(KOSPI·KOSDAQ) 중대형주 · DART 재무 기반 점수 · 하루 1회 갱신</div>
+        <div class="controls">
+            <input type="text" id="korea-search" class="search-box" placeholder="종목코드 또는 회사명 검색..." oninput="onSearch('korea')">
+            <button class="filter-btn active" onclick="filterTable('korea','all',this)">모두</button>
+            <button class="filter-btn" onclick="filterTable('korea','excellent',this)">우수 (60+)</button>
+            <button class="filter-btn" onclick="filterTable('korea','good',this)">좋음 (50–59)</button>
+        </div>
+        <div class="stats">
+            <div class="stat-card"><div class="stat-label">분석 종목</div><div class="stat-value" id="korea-total">—</div></div>
+            <div class="stat-card"><div class="stat-label">우수 (60+)</div><div class="stat-value" id="korea-excellent">—</div></div>
+            <div class="stat-card"><div class="stat-label">평균 점수</div><div class="stat-value" id="korea-avg">—</div></div>
+        </div>
+        <div class="table-container">
+            <table>
+                <thead><tr>
+                    <th class="sortable" onclick="sortTable('korea','symbol')">코드 <span id="sort-korea-symbol"></span></th>
+                    <th>회사명</th>
+                    <th class="sortable" onclick="sortTable('korea','price')">주가 (₩) <span id="sort-korea-price"></span></th>
+                    <th class="sortable" onclick="sortTable('korea','health_score')">건전성 <span id="sort-korea-health_score"></span></th>
+                    <th class="sortable" onclick="sortTable('korea','value_score')">저평가 <span id="sort-korea-value_score"></span></th>
+                    <th class="sortable" onclick="sortTable('korea','total_score')">종합 <span id="sort-korea-total_score">↓</span></th>
+                    <th>PER / PBR / ROE</th>
+                </tr></thead>
+                <tbody id="korea-table"><tr><td colspan="7" class="loading"><span class="spinner"></span>로딩 중...</td></tr></tbody>
+            </table>
+        </div>
+        <div class="update-time">마지막 갱신: <span id="korea-update">—</span></div>
+    </div>
 
-                allData = await response.json();
+    <!-- 미국 탭 -->
+    <div id="us-tab" class="tab-content">
+        <div class="info-box">NYSE · NASDAQ 상장 중대형주 · FMP key-metrics 기반 점수 · 하루 1회 갱신</div>
+        <div class="controls">
+            <input type="text" id="us-search" class="search-box" placeholder="티커 또는 회사명 검색..." oninput="onSearch('us')">
+            <button class="filter-btn active" onclick="filterTable('us','all',this)">모두</button>
+            <button class="filter-btn" onclick="filterTable('us','excellent',this)">우수 (60+)</button>
+            <button class="filter-btn" onclick="filterTable('us','good',this)">좋음 (50–59)</button>
+        </div>
+        <div class="stats">
+            <div class="stat-card"><div class="stat-label">분석 종목</div><div class="stat-value" id="us-total">—</div></div>
+            <div class="stat-card"><div class="stat-label">우수 (60+)</div><div class="stat-value" id="us-excellent">—</div></div>
+            <div class="stat-card"><div class="stat-label">평균 점수</div><div class="stat-value" id="us-avg">—</div></div>
+        </div>
+        <div class="table-container">
+            <table>
+                <thead><tr>
+                    <th class="sortable" onclick="sortTable('us','symbol')">티커 <span id="sort-us-symbol"></span></th>
+                    <th>회사명</th>
+                    <th class="sortable" onclick="sortTable('us','price')">주가 ($) <span id="sort-us-price"></span></th>
+                    <th class="sortable" onclick="sortTable('us','health_score')">건전성 <span id="sort-us-health_score"></span></th>
+                    <th class="sortable" onclick="sortTable('us','value_score')">저평가 <span id="sort-us-value_score"></span></th>
+                    <th class="sortable" onclick="sortTable('us','total_score')">종합 <span id="sort-us-total_score">↓</span></th>
+                    <th>배당 / ROE</th>
+                </tr></thead>
+                <tbody id="us-table"><tr><td colspan="7" class="loading"><span class="spinner"></span>탭 클릭 시 로드됩니다</td></tr></tbody>
+            </table>
+        </div>
+        <div class="update-time">마지막 갱신: <span id="us-update">—</span></div>
+    </div>
 
-                // 각 탭별 데이터 구성
-                organizeData();
-                renderAllTabs();
-                updateStats();
-            } catch (error) {
-                console.error('데이터 로드 실패:', error);
-                // 로컬 데이터 없으면 샘플 데이터 표시
-                showSampleData();
+    <!-- 크립토 탭 -->
+    <div id="crypto-tab" class="tab-content">
+        <div class="info-box">CoinGecko 시총 상위 암호화폐 · 순위·변동성 기반 점수 · 하루 1회 갱신</div>
+        <div class="controls">
+            <input type="text" id="crypto-search" class="search-box" placeholder="심볼 또는 이름 검색..." oninput="onSearch('crypto')">
+            <button class="filter-btn active" onclick="filterTable('crypto','all',this)">모두</button>
+            <button class="filter-btn" onclick="filterTable('crypto','top',this)">상위 (60+)</button>
+            <button class="filter-btn" onclick="filterTable('crypto','mid',this)">중위 (40–59)</button>
+        </div>
+        <div class="stats">
+            <div class="stat-card"><div class="stat-label">분석 종목</div><div class="stat-value" id="crypto-total">—</div></div>
+            <div class="stat-card"><div class="stat-label">상위 (60+)</div><div class="stat-value" id="crypto-excellent">—</div></div>
+            <div class="stat-card"><div class="stat-label">평균 점수</div><div class="stat-value" id="crypto-avg">—</div></div>
+        </div>
+        <div class="table-container">
+            <table>
+                <thead><tr>
+                    <th class="sortable" onclick="sortTable('crypto','symbol')">심볼 <span id="sort-crypto-symbol"></span></th>
+                    <th>이름</th>
+                    <th class="sortable" onclick="sortTable('crypto','price')">가격 ($) <span id="sort-crypto-price"></span></th>
+                    <th class="sortable" onclick="sortTable('crypto','market_cap')">시총 ($) <span id="sort-crypto-market_cap"></span></th>
+                    <th class="sortable" onclick="sortTable('crypto','rank_score')">순위점수 <span id="sort-crypto-rank_score"></span></th>
+                    <th class="sortable" onclick="sortTable('crypto','total_score')">종합 <span id="sort-crypto-total_score">↓</span></th>
+                    <th>변동성점수</th>
+                </tr></thead>
+                <tbody id="crypto-table"><tr><td colspan="7" class="loading"><span class="spinner"></span>탭 클릭 시 로드됩니다</td></tr></tbody>
+            </table>
+        </div>
+        <div class="update-time">마지막 갱신: <span id="crypto-update">—</span></div>
+    </div>
+
+    <!-- 시장 국면 탭 -->
+    <div id="regime-tab" class="tab-content">
+        <div id="regime-content"><div class="loading"><span class="spinner"></span>탭 클릭 시 로드됩니다</div></div>
+    </div>
+
+    <!-- 선행지표 예측 탭 -->
+    <div id="predictions-tab" class="tab-content">
+        <div id="predictions-content"><div class="loading"><span class="spinner"></span>탭 클릭 시 로드됩니다</div></div>
+    </div>
+
+    <!-- 범례 (스크리너 탭 공통) -->
+    <div class="legend" id="screener-legend">
+        <div class="legend-item"><div class="legend-dot badge-excellent"></div><span><strong>우수</strong> 60+ — 강력 추천</span></div>
+        <div class="legend-item"><div class="legend-dot badge-good"></div><span><strong>좋음</strong> 50–59 — 추천</span></div>
+        <div class="legend-item"><div class="legend-dot badge-fair"></div><span><strong>중간</strong> 40–49 — 검토</span></div>
+        <div class="legend-item"><div class="legend-dot badge-poor"></div><span><strong>약함</strong> 40 미만 — 비추천</span></div>
+    </div>
+</div>
+
+<script>
+    // ----------------------------------------------------------------
+    // 상태 관리
+    // ----------------------------------------------------------------
+    const DATA_URLS = {
+        korea:       'kr_data.json',
+        us:          'us_data.json',
+        crypto:      'crypto_data.json',
+        regime:      'regime_data.json',
+        predictions: 'predictions_data.json',
+    };
+
+    const state = {
+        korea:  { raw: [], filtered: [], sortCol: 'total_score', sortAsc: false, filter: 'all', search: '' },
+        us:     { raw: [], filtered: [], sortCol: 'total_score', sortAsc: false, filter: 'all', search: '' },
+        crypto: { raw: [], filtered: [], sortCol: 'total_score', sortAsc: false, filter: 'all', search: '' },
+    };
+
+    const loadedTabs = new Set();
+    let currentTab = 'korea';
+
+    // ----------------------------------------------------------------
+    // 탭 전환
+    // ----------------------------------------------------------------
+    function switchTab(e, tab) {
+        document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+        e.currentTarget.classList.add('active');
+        document.getElementById(tab + '-tab').classList.add('active');
+        currentTab = tab;
+
+        const isScreener = ['korea','us','crypto'].includes(tab);
+        document.getElementById('screener-legend').style.display = isScreener ? 'flex' : 'none';
+
+        if (!loadedTabs.has(tab)) loadTabData(tab);
+    }
+
+    async function loadTabData(tab) {
+        loadedTabs.add(tab);
+        try {
+            const res = await fetch(DATA_URLS[tab]);
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const data = await res.json();
+
+            if (tab === 'korea' || tab === 'us' || tab === 'crypto') {
+                state[tab].raw = data.items || [];
+                applyFilterAndSort(tab);
+                setUpdateTime(tab, data.generated_at);
+            } else if (tab === 'regime') {
+                renderRegime(data);
+            } else if (tab === 'predictions') {
+                renderPredictions(data);
+            }
+        } catch (err) {
+            console.error(`[${tab}] 데이터 로드 실패:`, err);
+            showError(tab, err.message);
+        }
+    }
+
+    function showError(tab, msg) {
+        if (tab === 'regime') {
+            document.getElementById('regime-content').innerHTML =
+                `<div class="warn-box">시장 국면 데이터를 불러올 수 없습니다: ${msg}<br>
+                <code>python scripts/export_dashboard.py</code> 를 실행 후 새로고침하세요.</div>`;
+        } else if (tab === 'predictions') {
+            document.getElementById('predictions-content').innerHTML =
+                `<div class="warn-box">선행지표 데이터를 불러올 수 없습니다: ${msg}</div>`;
+        } else {
+            document.getElementById(tab + '-table').innerHTML =
+                `<tr><td colspan="7" class="no-data">데이터를 불러올 수 없습니다: ${msg}<br>
+                <code>python scripts/export_dashboard.py</code> 를 실행 후 새로고침하세요.</td></tr>`;
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // 필터 / 정렬 / 검색
+    // ----------------------------------------------------------------
+    function filterTable(market, filter, btn) {
+        state[market].filter = filter;
+        document.querySelectorAll(`#${market}-tab .filter-btn`)
+            .forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        applyFilterAndSort(market);
+    }
+
+    function sortTable(market, col) {
+        const s = state[market];
+        if (s.sortCol === col) {
+            s.sortAsc = !s.sortAsc;
+        } else {
+            s.sortCol = col;
+            s.sortAsc = false;
+        }
+        updateSortIndicators(market);
+        applyFilterAndSort(market);
+    }
+
+    function onSearch(market) {
+        const q = document.getElementById(market + '-search').value.toLowerCase().trim();
+        state[market].search = q;
+        applyFilterAndSort(market);
+    }
+
+    function applyFilterAndSort(market) {
+        const s = state[market];
+        let list = s.raw;
+
+        // 검색
+        if (s.search) {
+            list = list.filter(x =>
+                (x.symbol || '').toLowerCase().includes(s.search) ||
+                (x.name || '').toLowerCase().includes(s.search)
+            );
+        }
+
+        // 점수 필터
+        if (s.filter === 'excellent') {
+            list = list.filter(x => (x.total_score || 0) >= 60);
+        } else if (s.filter === 'good') {
+            list = list.filter(x => (x.total_score || 0) >= 50 && (x.total_score || 0) < 60);
+        } else if (s.filter === 'top') {
+            list = list.filter(x => (x.total_score || 0) >= 60);
+        } else if (s.filter === 'mid') {
+            list = list.filter(x => (x.total_score || 0) >= 40 && (x.total_score || 0) < 60);
+        }
+
+        // 정렬
+        const col = s.sortCol;
+        list = [...list].sort((a, b) => {
+            const av = a[col] ?? (s.sortAsc ? Infinity : -Infinity);
+            const bv = b[col] ?? (s.sortAsc ? Infinity : -Infinity);
+            if (av < bv) return s.sortAsc ? -1 : 1;
+            if (av > bv) return s.sortAsc ? 1 : -1;
+            return 0;
+        });
+
+        s.filtered = list;
+        renderScreenerTable(market);
+        updateStats(market);
+    }
+
+    function updateSortIndicators(market) {
+        // 모든 정렬 인디케이터 초기화
+        document.querySelectorAll(`[id^="sort-${market}-"]`).forEach(el => el.textContent = '');
+        const s = state[market];
+        const el = document.getElementById(`sort-${market}-${s.sortCol}`);
+        if (el) el.textContent = s.sortAsc ? '↑' : '↓';
+    }
+
+    // ----------------------------------------------------------------
+    // 테이블 렌더링
+    // ----------------------------------------------------------------
+    function scoreBadge(score) {
+        const s = score || 0;
+        if (s >= 60) return 'badge-excellent';
+        if (s >= 50) return 'badge-good';
+        if (s >= 40) return 'badge-fair';
+        return 'badge-poor';
+    }
+
+    function fmtPrice(v, currency) {
+        if (v == null) return '—';
+        if (currency === 'KRW') return '₩' + Math.round(v).toLocaleString('ko-KR');
+        // USD: 1달러 미만이면 소수점 4자리, 이상이면 2자리
+        return '$' + (v < 1 ? v.toFixed(4) : v.toFixed(2));
+    }
+
+    function fmtNum(v, digits = 1) {
+        return v != null ? v.toFixed(digits) : '—';
+    }
+
+    function fmtMcap(v) {
+        if (v == null) return '—';
+        if (v >= 1e12) return '$' + (v / 1e12).toFixed(1) + 'T';
+        if (v >= 1e9)  return '$' + (v / 1e9).toFixed(1) + 'B';
+        if (v >= 1e6)  return '$' + (v / 1e6).toFixed(0) + 'M';
+        return '$' + v.toFixed(0);
+    }
+
+    function renderScreenerTable(market) {
+        const items = state[market].filtered;
+        const tbody = document.getElementById(market + '-table');
+
+        if (items.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="7" class="no-data">조건에 맞는 종목이 없습니다</td></tr>';
+            return;
+        }
+
+        let html = '';
+        for (const it of items) {
+            const cls = scoreBadge(it.total_score);
+            const hcls = scoreBadge(it.health_score);
+            const vcls = scoreBadge(it.value_score);
+
+            if (market === 'korea') {
+                html += `<tr>
+                    <td><span class="sym">${it.symbol || ''}</span></td>
+                    <td><div class="co-name">${it.name || ''}</div><div class="sector-tag">${it.sector || ''}</div></td>
+                    <td>${fmtPrice(it.price, 'KRW')}</td>
+                    <td><span class="badge ${hcls}">${it.health_score ?? '—'}</span></td>
+                    <td><span class="badge ${vcls}">${it.value_score ?? '—'}</span></td>
+                    <td><span class="badge ${cls}">${it.total_score ?? '—'}</span></td>
+                    <td style="font-size:12px;color:var(--text-muted)">
+                        PER ${fmtNum(it.per)} &nbsp;PBR ${fmtNum(it.pbr,2)}<br>ROE ${fmtNum(it.roe)}%
+                    </td>
+                </tr>`;
+            } else if (market === 'us') {
+                html += `<tr>
+                    <td><span class="sym">${it.symbol || ''}</span></td>
+                    <td><div class="co-name">${it.name || ''}</div><div class="sector-tag">${it.sector || ''}</div></td>
+                    <td>${fmtPrice(it.price, 'USD')}</td>
+                    <td><span class="badge ${hcls}">${it.health_score ?? '—'}</span></td>
+                    <td><span class="badge ${vcls}">${it.value_score ?? '—'}</span></td>
+                    <td><span class="badge ${cls}">${it.total_score ?? '—'}</span></td>
+                    <td style="font-size:12px;color:var(--text-muted)">
+                        배당 ${fmtNum(it.dividend_yield)}%<br>ROE ${fmtNum(it.roe)}%
+                    </td>
+                </tr>`;
+            } else {
+                html += `<tr>
+                    <td><span class="sym">${it.symbol || ''}</span></td>
+                    <td class="co-name">${it.name || ''}</td>
+                    <td>${fmtPrice(it.price, 'USD')}</td>
+                    <td>${fmtMcap(it.market_cap)}</td>
+                    <td><span class="badge ${scoreBadge(it.rank_score)}">${it.rank_score ?? '—'}</span></td>
+                    <td><span class="badge ${cls}">${it.total_score ?? '—'}</span></td>
+                    <td style="font-size:12px"><span class="badge ${scoreBadge(it.volatility_score)}">${it.volatility_score ?? '—'}</span></td>
+                </tr>`;
             }
         }
+        tbody.innerHTML = html;
+    }
 
-        function organizeData() {
-            // 한국, 미국, 아시아 그룹화
-            if (allData['한국']) allData['한국'] = allData['한국'] || [];
-            if (allData['미국']) allData['미국'] = allData['미국'] || [];
-            if (allData['크립토']) allData['크립토'] = allData['크립토'] || [];
+    function updateStats(market) {
+        const items = state[market].raw;
+        const el = (id) => document.getElementById(id);
+        const total = items.length;
+        const excellent = items.filter(x => (x.total_score || 0) >= 60).length;
+        const avg = total > 0
+            ? Math.round(items.reduce((s, x) => s + (x.total_score || 0), 0) / total)
+            : '—';
+        el(market + '-total').textContent = total.toLocaleString();
+        el(market + '-excellent').textContent = excellent.toLocaleString();
+        el(market + '-avg').textContent = avg;
+    }
+
+    function setUpdateTime(market, isoStr) {
+        const el = document.getElementById(market + '-update');
+        if (!el || !isoStr) return;
+        try {
+            el.textContent = new Date(isoStr).toLocaleString('ko-KR',
+                { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+        } catch { el.textContent = isoStr; }
+    }
+
+    // ----------------------------------------------------------------
+    // 시장 국면 렌더링
+    // ----------------------------------------------------------------
+    function renderRegime(data) {
+        if (data.error || !data.label) {
+            document.getElementById('regime-content').innerHTML =
+                `<div class="warn-box">시장 국면 데이터 없음: ${data.error || '알 수 없음'}</div>`;
+            return;
         }
 
-        function switchTab(tab) {
-            currentTab = tab;
-            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
-            document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+        const regimeCls = data.score >= 2 ? 'regime-risk-on'
+            : data.score === 1             ? 'regime-caution'
+            : data.score === 0             ? 'regime-neutral'
+            : data.score === -1            ? 'regime-caution'
+            :                                'regime-risk-off';
 
-            event.target.classList.add('active');
-            document.getElementById(tab + '-tab').classList.add('active');
+        const panelCards = (data.panel || []).map(p => `
+            <div class="panel-card">
+                <div class="panel-name">${p.name}</div>
+                <div class="panel-metrics">
+                    <span class="panel-metric-label">6개월 수익률</span>
+                    <span class="panel-metric-value" style="color:${(p.return_6m||0)>=0?'var(--success)':'var(--danger)'}">
+                        ${p.return_6m != null ? (p.return_6m >= 0 ? '+' : '') + p.return_6m.toFixed(1) + '%' : '—'}
+                    </span>
+                    <span class="panel-metric-label">변동성</span>
+                    <span class="panel-metric-value">${p.vol != null ? p.vol.toFixed(1) + '%' : '—'}</span>
+                    <span class="panel-metric-label">샤프</span>
+                    <span class="panel-metric-value">${p.sharpe != null ? p.sharpe.toFixed(2) : '—'}</span>
+                    <span class="panel-metric-label">현재 낙폭</span>
+                    <span class="panel-metric-value" style="color:${(p.drawdown||0)<-5?'var(--danger)':'inherit'}">
+                        ${p.drawdown != null ? p.drawdown.toFixed(1) + '%' : '—'}
+                    </span>
+                </div>
+            </div>
+        `).join('');
+
+        const signals = (data.signals || []).map(s =>
+            `<li>${s}</li>`
+        ).join('');
+
+        const failures = data.failures && data.failures.length
+            ? `<div class="warn-box" style="margin-top:12px">평가 실패 지표: ${data.failures.join(', ')}</div>`
+            : '';
+
+        const genAt = data.generated_at
+            ? `<div class="update-time">갱신: ${new Date(data.generated_at).toLocaleString('ko-KR',
+                {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})}</div>`
+            : '';
+
+        document.getElementById('regime-content').innerHTML = `
+            <div class="regime-badge ${regimeCls}">${data.label}</div>
+            <p style="color:var(--text-muted);font-size:13px;margin-bottom:12px">
+                점수: ${data.score > 0 ? '+' : ''}${data.score} &nbsp;·&nbsp;
+                3개 거시 지표 합산 (장단기 금리차 / 하이일드 스프레드 / 실업수당 청구)
+            </p>
+            <ul class="signal-list">${signals}</ul>
+            ${failures}
+            <h3 style="margin:20px 0 12px;font-size:14px">All Weather 자산군 패널 (6개월)</h3>
+            <div class="panel-grid">${panelCards}</div>
+            ${genAt}
+        `;
+    }
+
+    // ----------------------------------------------------------------
+    // 선행지표 예측 렌더링
+    // ----------------------------------------------------------------
+    function renderPredictions(data) {
+        if (!data.items || data.items.length === 0) {
+            document.getElementById('predictions-content').innerHTML =
+                `<div class="warn-box">예측 데이터가 없습니다.<br>
+                <code>python scripts/export_dashboard.py</code> 를 실행 후 새로고침하세요.</div>`;
+            return;
         }
 
-        function getScoreBadge(score) {
-            if (score >= 60) return 'score-excellent';
-            if (score >= 50) return 'score-good';
-            if (score >= 40) return 'score-fair';
-            return 'score-poor';
-        }
+        const rows = data.items.map(p => {
+            const r2cls = p.r_squared >= 0.3 ? 'r2-high' : p.r_squared >= 0.15 ? 'r2-mid' : 'r2-low';
+            const dircls = p.direction.includes('↑') ? 'dir-up'
+                : p.direction.includes('↓') ? 'dir-down' : 'dir-flat';
+            const reliableBadge = p.reliable
+                ? '<span class="badge badge-excellent" style="font-size:11px">신뢰</span>'
+                : '<span class="badge badge-fair" style="font-size:11px">참고용</span>';
+            return `<tr>
+                <td style="font-weight:600;font-size:13px">${p.name || ''}</td>
+                <td style="font-size:12px;color:var(--text-muted)">${p.leading}</td>
+                <td style="font-size:12px;color:var(--text-muted)">${p.target}</td>
+                <td>${p.best_lag_months}개월</td>
+                <td class="${r2cls}">${p.r_squared != null ? p.r_squared.toFixed(2) : '—'}</td>
+                <td class="${dircls}">${p.direction}</td>
+                <td style="font-size:12px">${p.predicted_change_pct != null ? (p.predicted_change_pct >= 0 ? '+' : '') + p.predicted_change_pct.toFixed(1) + '%' : '—'}</td>
+                <td>${reliableBadge}</td>
+            </tr>`;
+        }).join('');
 
-        function renderTable(tabName, data, tableId) {
-            const table = document.getElementById(tableId);
-            if (!data || data.length === 0) {
-                table.innerHTML = '<tr><td colspan="7" class="no-data">데이터가 없습니다</td></tr>';
-                return;
-            }
+        const genAt = data.generated_at
+            ? new Date(data.generated_at).toLocaleString('ko-KR',
+                {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})
+            : '—';
 
-            let html = '';
-            for (const item of data) {
-                const scoreBadge = getScoreBadge(item.total_score || 0);
+        document.getElementById('predictions-content').innerHTML = `
+            <div class="info-box">
+                선행지표 → 목표 자산 lead-lag 회귀 예측. 상관관계 기반이며 인과관계가 아닙니다.
+                R² 0.30 이상(초록)만 신뢰, 나머지는 참고용으로 판단하세요.
+            </div>
+            <div class="table-container" style="max-height:none">
+                <table>
+                    <thead><tr>
+                        <th>관계</th>
+                        <th>선행지표</th>
+                        <th>목표 자산</th>
+                        <th>선행 Lag</th>
+                        <th>R²</th>
+                        <th>방향</th>
+                        <th>예측 변화율</th>
+                        <th>신뢰도</th>
+                    </tr></thead>
+                    <tbody>${rows}</tbody>
+                </table>
+            </div>
+            <div class="update-time">갱신: ${genAt}</div>
+            <div style="margin-top:12px;font-size:12px;color:var(--text-muted)">
+                ⚠️ 이 예측은 월간 YoY 기반 통계 모델입니다. 표본 수가 적고 과최적화 위험이 있으므로
+                R²와 표본 수(N)를 함께 보고 판단하세요.
+            </div>
+        `;
+    }
 
-                if (tabName === 'crypto') {
-                    html += `
-                        <tr>
-                            <td><span class="symbol">${item.symbol || ''}</span></td>
-                            <td class="company-name">${item.name || ''}</td>
-                            <td>${item.rank || '-'}</td>
-                            <td>$${(item.price || 0).toFixed(2)}</td>
-                            <td><span class="score ${scoreBadge}">${item.rank_score || 0}</span></td>
-                            <td><span class="score ${scoreBadge}">${item.total_score || 0}</span></td>
-                            <td class="metric ${item.change_24h > 0 ? 'positive' : 'negative'}">
-                                ${(item.change_24h || 0).toFixed(2)}%
-                            </td>
-                        </tr>
-                    `;
-                } else {
-                    const dividend = item.dividend || 0;
-                    html += `
-                        <tr>
-                            <td><span class="symbol">${item.symbol || ''}</span></td>
-                            <td class="company-name">${(item.company_name || '').substring(0, 25)}</td>
-                            <td>$${(item.price || 0).toFixed(2)}</td>
-                            <td><span class="score ${getScoreBadge(item.health_score || 0)}">${item.health_score || 0}</span></td>
-                            <td><span class="score ${getScoreBadge(item.value_score || 0)}">${item.value_score || 0}</span></td>
-                            <td><span class="score ${scoreBadge}">${item.total_score || 0}</span></td>
-                            <td>
-                                <div class="metric positive">배당: ${dividend.toFixed(2)}%</div>
-                                <div class="metric">ROE: ${(item.roe || 0).toFixed(1)}%</div>
-                            </td>
-                        </tr>
-                    `;
-                }
-            }
-            table.innerHTML = html;
-        }
-
-        function renderAllTabs() {
-            renderTable('korea', allData['한국'] || [], 'korea-table');
-            renderTable('us', allData['미국'] || [], 'us-table');
-            renderTable('asia', (allData['일본'] || []).concat(allData['중국'] || []).concat(allData['인도'] || []), 'asia-table');
-            renderTable('crypto', allData['크립토'] || [], 'crypto-table');
-
-            updateTimes();
-        }
-
-        function updateStats() {
-            // 한국
-            const kr = allData['한국'] || [];
-            document.getElementById('korea-total').textContent = kr.length;
-            document.getElementById('korea-excellent').textContent = kr.filter(s => s.total_score >= 60).length;
-            document.getElementById('korea-avg').textContent = kr.length > 0 ? Math.round(kr.reduce((a, b) => a + (b.total_score || 0), 0) / kr.length) : '-';
-
-            // 미국
-            const us = allData['미국'] || [];
-            document.getElementById('us-total').textContent = us.length;
-            document.getElementById('us-excellent').textContent = us.filter(s => s.total_score >= 60).length;
-            document.getElementById('us-avg').textContent = us.length > 0 ? Math.round(us.reduce((a, b) => a + (b.total_score || 0), 0) / us.length) : '-';
-
-            // 아시아
-            const asia = (allData['일본'] || []).concat(allData['중국'] || []).concat(allData['인도'] || []);
-            document.getElementById('asia-total').textContent = asia.length;
-            document.getElementById('asia-excellent').textContent = asia.filter(s => s.total_score >= 60).length;
-            document.getElementById('asia-avg').textContent = asia.length > 0 ? Math.round(asia.reduce((a, b) => a + (b.total_score || 0), 0) / asia.length) : '-';
-
-            // 크립토
-            const crypto = allData['크립토'] || [];
-            document.getElementById('crypto-total').textContent = crypto.length;
-            document.getElementById('crypto-excellent').textContent = crypto.filter(s => s.total_score >= 60).length;
-            document.getElementById('crypto-avg').textContent = crypto.length > 0 ? Math.round(crypto.reduce((a, b) => a + (b.total_score || 0), 0) / crypto.length) : '-';
-        }
-
-        function updateTimes() {
-            const now = new Date();
-            const timeStr = now.toLocaleString('ko-KR', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-            document.getElementById('korea-update').textContent = timeStr;
-            document.getElementById('us-update').textContent = timeStr;
-            document.getElementById('asia-update').textContent = timeStr;
-            document.getElementById('crypto-update').textContent = timeStr;
-        }
-
-        function filterKorea(filter) {}
-        function filterUS(filter) {}
-        function filterAsia(filter) {}
-        function filterCrypto(filter) {}
-        function sortKorea(col) {}
-        function sortUS(col) {}
-        function sortAsia(col) {}
-        function sortCrypto(col) {}
-
-        function showSampleData() {
-            document.getElementById('korea-table').innerHTML = '<tr><td colspan="7" class="loading">Python 스크립트를 실행하여 데이터를 생성해주세요</td></tr>';
-        }
-
-        // 페이지 로드
-        loadData();
-    </script>
+    // ----------------------------------------------------------------
+    // 초기 로드
+    // ----------------------------------------------------------------
+    document.getElementById('screener-legend').style.display = 'flex';
+    loadTabData('korea');
+</script>
 </body>
 </html>

@@ -30,12 +30,14 @@
 - [ ] 호스팅: GitHub Pages (정적) — Turso DB 와 연계 (⚠️ public repo 전환 시 시크릿/IP 노출 주의)
 - [ ] 역할 분담: 봇 push=요약 알림, 대시보드=심층 탐색
 
-### Phase 12 — 대시보드 통합 (모든 정보 한 화면)
-`dashboard/index.html`(현재 스크리너 전용) 을 확장.
-- [ ] 국면/리스크/예측/유니버스 스캔/종목 상세 탭 추가
-- [ ] 데이터 소스: `daily_update`/`scan` 결과 JSON 출력 → 정적 페이지가 fetch
-- [ ] 호스팅: GitHub Pages (정적) — Turso DB 와 연계
-- [ ] 역할 분담: 봇 push=요약 알림, 대시보드=심층 탐색
+### Phase 12 — 대시보드 통합 ✅ (2026-06-23)
+`dashboard/index.html` 재작성 + `scripts/export_dashboard.py` 신규.
+- [x] 탭: 🇰🇷 한국 / 🇺🇸 미국 / ₿ 크립토 / 📊 시장 국면 / 📈 선행지표 (아시아 탭 제거)
+- [x] Turso DB → 시장별 별도 JSON (kr/us/crypto_data.json) lazy load
+- [x] sort/filter 구현, ₩ 가격 표기, 범례
+- [x] 시장 국면 탭 (regime_data.json), 선행지표 탭 (predictions_data.json)
+- [x] CI: `.github/workflows/dashboard-export.yml` (매일 09:30 KST 커밋·푸시)
+- [ ] **사용자 작업 대기**: GitHub Settings → Pages → main / /dashboard 폴더 활성화
 
 ---
 

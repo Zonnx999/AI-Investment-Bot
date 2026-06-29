@@ -17,7 +17,10 @@
 - **시장별 다이제스트**: 한국 창→KR 종목, 미국 창→US 종목 (cron 이 창에 따라 `--market` 자동 전달).
 - **Phase 11a 멀티유저(소유자 승인제)** + **11b 상시 인터랙티브 봇** — Oracle 서버에 systemd
   `quant-bot` 으로 **배포·가동 중**(`docs/DEPLOYMENT.md`). `/start`·`/approve`·`/stock`·`/scan`·`/help`.
-- **다음 작업**: `ROADMAP.md §1` — 11b 마무리(승인 인라인 버튼 등) → Phase 12(대시보드).
+- **Phase 12 대시보드 구현 완료 (2026-06-23)**. `dashboard/index.html` 재작성 + `scripts/export_dashboard.py` 신규.
+  `.github/workflows/dashboard-export.yml` (매일 09:30 KST, GitHub Pages JSON 갱신).
+  GitHub Pages 활성화 필요: Settings → Pages → main branch → /dashboard 폴더.
+- **다음 작업**: `ROADMAP.md §1` — Phase 11 마무리(다른 모델 작업 중) 또는 Phase 12 후속(GitHub Pages 활성화).
 
 ---
 
@@ -138,6 +141,7 @@ QuantBotError
 | 점수 엔진 정밀화 | ScoreCard 분해, 4팩터, 필드 교정(ROIC/PBR/GP마진), `detail` 저장 | ✅ (06-15) |
 | 코드리뷰 대응 | 데코레이터 오배치·음수배수·배당누락 등 실버그 수정 | ✅ (06-15) |
 | Turso 재점수 배치 | per-row 왕복 → executescript 배치 (240분→~2-3분) | ✅ (06-15) |
+| Phase 12 대시보드 | export_dashboard.py + index.html 재작성(5탭·lazy load·sort/filter·₩표기) + CI | ✅ (06-23) |
 | 시장별 다이제스트 | 한국창→KR 종목 / 미국창→US 종목 (cron `--market` 자동) | ✅ (06-15) |
 | Phase 11a 멀티유저 | 소유자 승인제(`subscribers`, pending/active/inactive), getUpdates 폴링+offset | ✅ (06-22) |
 | Phase 11b 인터랙티브 봇 | `bot_commands`+`scripts/bot.py` 폴링 워커, `/stock`·`/scan`·`/help`, rate limit | ✅ (06-22) |

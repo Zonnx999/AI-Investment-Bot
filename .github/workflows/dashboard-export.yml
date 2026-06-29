@@ -1,0 +1,54 @@
+name: Dashboard Export
+
+# 매일 09:30 KST (= 00:30 UTC, 월~금) — Oracle 서버 KR 다이제스트(23:30 UTC) 직후.
+# Turso 에서 최신 데이터를 읽어 dashboard/*.json 을 갱신 → GitHub Pages 자동 반영.
+on:
+  schedule:
+    - cron: "30 0 * * 1-5"   # 09:30 KST 월~금
+  workflow_dispatch: {}       # 수동 실행 버튼 (테스트·즉시 갱신)
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: write   # main 브랜치에 dashboard/*.json 커밋·푸시 허용
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: pip install -e ".[hosting]"   # libsql 포함 — Turso 클라우드 DB 접근
+
+      # yfinance / FRED 응답을 캐시해 API 중복 호출 방지 (best-effort)
+      - name: Restore data cache
+        uses: actions/cache@v4
+        with:
+          path: data
+          key: quantbot-dashboard-${{ github.run_id }}
+          restore-keys: quantbot-dashboard-
+
+      - name: Export dashboard JSON
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+        run: python scripts/export_dashboard.py
+
+      - name: Commit dashboard JSON files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add dashboard/kr_data.json dashboard/us_data.json dashboard/crypto_data.json dashboard/regime_data.json dashboard/predictions_data.json
+          git diff --staged --quiet || git commit -m "chore: update dashboard data [skip ci]"
+          git push
