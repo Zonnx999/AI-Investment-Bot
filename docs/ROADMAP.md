@@ -39,7 +39,9 @@
 - [x] sort/filter 구현, ₩ 가격 표기, 범례
 - [x] 시장 국면 탭 (regime_data.json), 선행지표 탭 (predictions_data.json)
 - [x] CI: `.github/workflows/dashboard-export.yml` (매일 09:30 KST 커밋·푸시)
-- [ ] **사용자 작업 대기**: GitHub Settings → Pages → main / /dashboard 폴더 활성화
+- [x] **Actions 기반 Pages 배포** — `dashboard-export.yml` 에 configure/upload/deploy-pages 추가 (06-29)
+- [ ] **사용자 작업 대기 (1회)**: GitHub Settings → Pages → Source = "GitHub Actions"
+      (⚠️ branch 배포는 `/`·`/docs` 만 → `/dashboard` 서빙 불가, 그래서 Actions 방식)
 
 ---
 

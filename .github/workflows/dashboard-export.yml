@@ -12,10 +12,20 @@ env:
 
 permissions:
   contents: write   # main 브랜치에 dashboard/*.json 커밋·푸시 허용
+  pages: write      # GitHub Pages 배포
+  id-token: write   # deploy-pages OIDC 인증
+
+# Pages 동시 배포 충돌 방지 (진행 중 배포는 취소 안 함 — 데이터 커밋 보존)
+concurrency:
+  group: pages
+  cancel-in-progress: false
 
 jobs:
   export:
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -52,3 +62,18 @@ jobs:
           git add dashboard/kr_data.json dashboard/us_data.json dashboard/crypto_data.json dashboard/regime_data.json dashboard/predictions_data.json
           git diff --staged --quiet || git commit -m "chore: update dashboard data [skip ci]"
           git push
+
+      # --- GitHub Pages 배포 (Settings → Pages → Source: "GitHub Actions" 필요) ---
+      # branch 배포는 / 또는 /docs 폴더만 지원 → dashboard/ 서빙은 Actions 아티팩트로.
+      # 같은 job 의 dashboard/ 에 방금 내보낸 JSON 이 이미 있으므로 재checkout 불필요.
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload dashboard artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dashboard
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

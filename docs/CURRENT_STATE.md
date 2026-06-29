@@ -18,8 +18,9 @@
 - **Phase 11a 멀티유저(소유자 승인제)** + **11b 상시 인터랙티브 봇** — Oracle 서버에 systemd
   `quant-bot` 으로 **배포·가동 중**(`docs/DEPLOYMENT.md`). `/start`·`/approve`·`/stock`·`/scan`·`/help`.
 - **Phase 12 대시보드 구현 완료 (2026-06-23)**. `dashboard/index.html` 재작성 + `scripts/export_dashboard.py` 신규.
-  `.github/workflows/dashboard-export.yml` (매일 09:30 KST, GitHub Pages JSON 갱신).
-  GitHub Pages 활성화 필요: Settings → Pages → main branch → /dashboard 폴더.
+  `.github/workflows/dashboard-export.yml` (매일 09:30 KST, JSON 갱신 + **Actions 로 Pages 배포**).
+  GitHub Pages 활성화 (사용자 작업, 1회): Settings → Pages → Source = **"GitHub Actions"**.
+  (⚠️ branch 배포는 `/` 또는 `/docs` 폴더만 지원 → `/dashboard` 서빙은 Actions 아티팩트 방식. 06-29)
 - **(2026-06-29)** 코드리뷰 미해결 버그 5건 수정 + 다이제스트 UX 개선(회사명·범례·시각적 위계·예측 가독성) + `/announce` 소유자 공지 추가.
 - **다음 작업**: GitHub Pages 활성화(사용자 작업) → 11b 잔여(인라인 승인버튼·`/news`). 선택: LLM 한 줄 요약(MiniMax-M3/NVIDIA, 방향만 합의·대기 — `ROADMAP §2`).
 
