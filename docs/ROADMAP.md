@@ -19,6 +19,8 @@
 - [x] 폴링 워커(getUpdates long-poll) — Oracle Always Free(E2.1.Micro). 무거운 분석은 사전계산, 봇은 DB 읽기 위주
 - [x] `/stock <티커>`(점수+근거, `lookup_detail`) · `/scan [us|kr]` · `/help`·`/menu` · 유저별 rate limit
 - [x] 조회는 **active 구독자(+소유자)만** (게이팅), reply 키보드 버튼(타이핑↓), Markdown 평문 폴백
+- [x] **`/announce` 소유자 공지** — active 구독자 전원에 평문 브로드캐스트(업데이트·정정 알림). 소유자 게이트 (06-29)
+- [x] **다이제스트 UX** — 회사명·점수 범례·시각적 위계·예측 가독성 (06-29)
 - [ ] **인라인 `[승인][거절]` 버튼** — 가입요청 알림에서 탭 승인 (callback_query 처리 필요) ← 다음 1순위
 - [ ] `/news <티커>` — `NEWS_API_KEY`/FMP 뉴스 (응답 캐시 + rate limit), (선택) Haiku 센티먼트
 - [ ] (선택) `/regime`·`/predict`·`/me`(내 상태) 즉답 — 단 국면/예측은 라이브 fetch라 봇에 약간 무거움
@@ -42,7 +44,11 @@
 ---
 
 ## 2. 부록 — 우선순위 낮은 선택 단계
-- **LLM 요약 한 줄** — 다이제스트 맨 위 Haiku 한 문단 (월 $1 미만). 11b 뉴스 센티먼트와 묶을 수 있음
+- **LLM 요약 한 줄** — 다이제스트 맨 위 한 문단. 후보: MiniMax-M3(NVIDIA API) 또는 Haiku.
+  방향만 합의(2026-06-29, 구현 대기): 결정론적 다이제스트 **위 표현 레이어만** — 숫자·티커 생성/수정 금지,
+  API 실패/레이트리밋 시 **요약 생략 폴백**(다이제스트는 그대로 발송, §4.10 #10 사상), 하루 1회 호출.
+  배선: `src/llm.py`(NVIDIA 호출+폴백, http 세션 재사용) + `config.NVIDIA_API_KEY` + http 마스킹 등록.
+  구현 전 NVIDIA 카탈로그서 모델 id 검증(§4.10 #3).
 - **백테스트 프레임워크** — Phase 5 신호 / Phase 6 예측의 과거 성과 검증 (예측 R² 우려 정량 해소)
 - **Streamlit 웹 UI** — Phase 12 대시보드로 대체되면 skip
 - **미구현(새 의존성 대기)**: Google Trends(pytrends, 불안정), SEC EDGAR 13F(파싱 부담·45일 지연)
