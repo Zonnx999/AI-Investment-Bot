@@ -101,19 +101,20 @@ WorkingDirectory=/home/ubuntu/AI-Investment-Bot
 ExecStart=/home/ubuntu/AI-Investment-Bot/scripts/server_autopull.sh
 ```
 
-3) 타이머 `/etc/systemd/system/quant-autopull.timer` (5분 주기):
+3) 타이머 `/etc/systemd/system/quant-autopull.timer` (15분 주기 — 개인 봇엔 충분, 폴링·로그 노이즈↓):
 ```
 [Unit]
-Description=Run quant-bot auto-pull every 5 min
+Description=Run quant-bot auto-pull every 15 min
 
 [Timer]
-OnBootSec=2min
-OnUnitActiveSec=5min
+OnBootSec=3min
+OnUnitActiveSec=15min
 Persistent=true
 
 [Install]
 WantedBy=timers.target
 ```
+(코드 업데이트는 긴급하지 않으므로 5분은 과함 — 하루 288회→96회. 개발 중 즉시 반영은 아래 강제 실행으로.)
 
 4) 활성화:
 ```
@@ -122,9 +123,9 @@ sudo systemctl enable --now quant-autopull.timer
 ```
 - 다음 실행 시각: `systemctl list-timers quant-autopull.timer`
 - 마지막 실행 로그: `journalctl -u quant-autopull.service -n 20`
-- 즉시 1회 테스트: `sudo systemctl start quant-autopull.service`
+- 즉시 1회 실행 (테스트 / 개발 중 강제 동기화): `sudo systemctl start quant-autopull.service`
 - 끄기: `sudo systemctl disable --now quant-autopull.timer`
-- ⚠️ 이제 `main` 에 push 하면 ~5분 내 박스가 **자동 반영** → 수동 배포 불필요. 단 자동 재시작이
+- ⚠️ 이제 `main` 에 push 하면 ~15분 내 박스가 **자동 반영** → 수동 배포 불필요. 단 자동 재시작이
   바로 적용되므로 **DB 스키마/마이그레이션 변경은 안전 확인 후** push (CLAUDE §4.10 #9).
 
 **레플리카 손상 복구** (`malformed WAL` 등 — Turso 임베디드 레플리카 파일 깨짐):
