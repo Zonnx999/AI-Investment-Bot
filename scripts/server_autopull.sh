@@ -39,5 +39,14 @@ if echo "$changed" | grep -q "pyproject.toml"; then
     "$REPO/.venv/bin/pip" install -e ".[hosting]" --quiet
 fi
 
-sudo systemctl restart "$SERVICE"
-echo "[autopull] restarted $SERVICE"
+# 봇 프로세스가 실제로 쓰는 파일이 바뀐 경우에만 재시작.
+# dashboard/*.json(매일 자동 커밋)·docs·tests·CI 만 바뀌면 reset 만 하고 재시작 스킵
+# → 봇이 안 쓰는 데이터 커밋으로 매일 불필요하게 재시작되는 것 방지.
+# (grep -q 의 종료코드는 grep 구현마다 달라질 수 있어, '제외 후 남는 줄이 있나'를 출력으로 판정)
+code_changed="$(printf '%s\n' "$changed" | grep -vE '^(dashboard/|docs/|tests/|README\.md|\.github/)' || true)"
+if [ -n "$code_changed" ]; then
+    sudo systemctl restart "$SERVICE"
+    echo "[autopull] restarted $SERVICE"
+else
+    echo "[autopull] data/docs only — skip restart"
+fi
