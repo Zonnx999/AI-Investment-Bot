@@ -1,4 +1,4 @@
-# Current State — 2026-06-23 기준
+# Current State — 2026-06-30 기준
 
 > 새 에이전트는 **이 파일 + `CLAUDE.md`(작업 규칙) + `ROADMAP.md`(다음 작업)** 만 읽으면 됩니다.
 > 봇 서버 운영은 **`docs/DEPLOYMENT.md`** (Oracle 호스팅 런북).
@@ -9,8 +9,8 @@
 ## 1. 한눈에 (지금 동작하는 것)
 
 - **리팩토링 1–8단계 + Phase 0–10 완료.** 결정론적 신호·스크리닝 봇 (LLM 챗봇 아님 — `CLAUDE.md §1`).
-- 매일 아침 **텔레그램 다이제스트** (국면 + 변화 알림 + 팩터 표 + 선행지표 예측). GitHub Actions
-  cron 으로 한국(08:30 KST)·미국(09:00 ET) 장 30분 전 2회.
+- 매일 아침 **텔레그램 다이제스트** (국면 + 변화 알림 + 팩터 표 + 선행지표 예측). 박스 systemd timer
+  로 한국(08:30 KST)·미국(09:00 ET) 장 30분 전 2회 (GitHub Actions 예약발송은 비활성).
 - **전 종목 유니버스 DB** (US 2190 / KR 517 / CRYPTO 68) → **오프라인 전수 스캔(API 0콜)** 으로 저평가 발굴.
 - **점수**: 4팩터(모멘텀·밸류·퀄리티·로우볼) + health/value 스코어카드(구성요소 분해, `detail` JSON).
 - **Turso(libSQL) 클라우드 호스팅** — 노트북 이동성 + 클라우드 풀유니버스.
@@ -20,8 +20,9 @@
 - **Phase 12 대시보드 — 라이브** 🟢 https://zonnx999.github.io/AI-Investment-Bot/
   `dashboard/index.html`(5탭) + `scripts/export_dashboard.py` + `.github/workflows/dashboard-export.yml`
   (매일 09:30 KST JSON 갱신 + **Actions 로 Pages 배포**). Pages Source = "GitHub Actions" (설정 완료).
-- **서버 자동 배포**: `scripts/server_autopull.sh` + systemd timer → `main` push 시 ~5분 내 박스 자동 반영
-  (설정은 `docs/DEPLOYMENT.md §6.1`).
+- **서버 자동 배포 (라이브, 06-30 확인)**: `scripts/server_autopull.sh` + systemd timer(15분) → `main` push 시
+  ~15분 내 박스 자동 반영(pull→reset→재시작). `dashboard/*.json`·docs 만 바뀐 커밋은 재시작 스킵.
+  설정·운영은 `docs/DEPLOYMENT.md §6.1`. 즉시 반영: `sudo systemctl start quant-autopull.service`.
 - **(2026-06-29)** 코드리뷰 버그 5건 수정 + 다이제스트 UX(회사명·범례·위계·예측) + `/announce` 소유자 공지 + 문서 정리(CODE_REVIEW·UPGRADE_PLAN 제거).
 - **MINIMAX_API_KEY** `.env` 에 추가됨 — LLM 한 줄 요약용(MiniMax-M3/NVIDIA). 구현은 대기(`ROADMAP §2.1`).
 - **다음 작업**: 11b 잔여(인라인 승인버튼·`/news`) 또는 LLM 한 줄 요약. 코드 개선 backlog는 `ROADMAP §2.2`.
@@ -56,6 +57,16 @@
   - GitHub Secrets — 이제 GitHub 예약 발송은 끔(박스가 담당). workflow_dispatch 수동 발송용으로만 의미.
   - 박스 `.env` 에 `FRED_API_KEY`·`FMP_API_KEY` (US 다이제스트 팩터·국면용). KR 은 키 없이도 동작.
 - ⏳ **다음 기능 후보** (`ROADMAP.md §1`): 인라인 `[승인][거절]` 버튼(승인 부담↓), `/news`, `/regime`·`/predict` 즉답.
+
+### 인계 (2026-06-30)
+- ✅ **이번 세션 전부 배포·검증**: 코드리뷰 버그 5건 + 다이제스트 UX(회사명·범례·위계·예측) +
+  `/announce` 소유자 공지 + Phase 12 대시보드 **라이브**(Actions Pages 배포) + **서버 자동 배포** + 문서 5개로 정리.
+- ✅ **서버 자동 배포 end-to-end 확인**: `[autopull] update … -> … restarted quant-bot` 로그로 검증,
+  sudoers 무비번 재시작 OK. push → ~15분 내(또는 `sudo systemctl start quant-autopull.service` 즉시) 박스 반영.
+- 📌 **다음 1순위 후보**: 인라인 `[승인][거절]` 버튼(11b), 또는 **LLM 한 줄 요약**(MiniMax-M3,
+  `MINIMAX_API_KEY` 준비됨, 설계 `ROADMAP §2.1`). 코드 개선 backlog는 `ROADMAP §2.2`.
+- 📌 **필독 문서는 5개**: `CLAUDE.md` / `README.md` / `docs/{CURRENT_STATE,ROADMAP,DEPLOYMENT}.md`
+  (CODE_REVIEW·UPGRADE_PLAN 은 정리하며 삭제 — 미해결 항목은 ROADMAP §2 로 이전).
 
 ---
 
