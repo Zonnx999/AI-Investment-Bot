@@ -321,3 +321,133 @@ def test_callback_without_message_still_processes(fresh_db, owner_set, tg_captur
     assert subs.subscriber_status("100") == "active"
     assert tg_capture["answers"] == [("cbq1", "승인 완료")]
     assert tg_capture["edits"] == []
+
+
+# ---------------- /news (Phase 11b — 뉴스 헤드라인) ----------------
+
+
+def _seed_active_subscriber(chat_id="200", name="bob"):
+    from src import subscribers
+
+    conn = subscribers._conn()
+    subscribers.set_status(conn, chat_id, "active", name=name)
+    conn.commit()
+
+
+_NEWS_ITEMS = [
+    {"title": "Apple hits record high", "publishedDate": "2026-07-04 12:30:00",
+     "site": "Reuters", "url": "https://example.com/a"},
+    {"title": "Chip supply update", "publishedDate": "garbage-date",
+     "site": None, "url": "https://example.com/b"},
+]
+
+
+@pytest.fixture
+def fake_news(monkeypatch):
+    """data_fetcher.fetch_stock_news 를 기록기로 대체 (네트워크 없음).
+
+    handle_news 는 호출 시점에 lazy import 하므로 모듈 속성 패치로 충분.
+    """
+    import src.data_fetcher as df
+
+    calls = []
+
+    def fake(symbol, limit=5):
+        calls.append((symbol, limit))
+        return _NEWS_ITEMS
+
+    monkeypatch.setattr(df, "fetch_stock_news", fake)
+    return calls
+
+
+def test_parse_news_command():
+    assert bc.parse_command("/news AAPL") == bc.Command("news", "AAPL")
+    assert bc.parse_command("/news@MyBot tsla") == bc.Command("news", "tsla")
+    assert bc.parse_command("/news") == bc.Command("news", None)
+
+
+def test_help_text_lists_news():
+    assert "/news" in bc.HELP_TEXT
+
+
+def test_format_news_plain_layout():
+    out = bc.format_news("AAPL", _NEWS_ITEMS)
+    lines = out.split("\n")
+    assert lines[0] == "📰 AAPL 최근 뉴스"
+    assert lines[1] == "• [Reuters] Apple hits record high (07-04)"
+    assert lines[2] == "  https://example.com/a"
+    assert lines[3] == "• [?] Chip supply update"       # site None → ?, 깨진 날짜 → 꼬리 생략
+    assert "*" not in out and "`" not in out            # Markdown 엔티티 없음 (평문 안전)
+
+
+def test_format_news_caps_at_limit():
+    many = [{"title": f"t{i}", "url": f"https://e.com/{i}"} for i in range(10)]
+    out = bc.format_news("AAPL", many)
+    assert out.count("• ") == bc.NEWS_LIMIT
+
+
+def test_news_date_helper_defensive():
+    assert bc._news_date("2026-07-04 12:30:00") == "07-04"
+    assert bc._news_date("2026-07-04T12:30:00Z") == "07-04"
+    assert bc._news_date("July 4") == ""
+    assert bc._news_date(None) == ""
+    assert bc._news_date(20260704) == ""
+
+
+def test_news_gate_rejects_non_subscriber(fresh_db, owner_set, fake_news):
+    out = bc.respond("/news AAPL", "999")               # 미가입 chat
+    assert "구독자 전용" in out
+    assert fake_news == []                              # fetch 자체가 없어야 함
+
+
+def test_news_owner_and_active_subscriber_allowed(fresh_db, owner_set, fake_news):
+    assert "Apple hits record high" in bc.respond("/news AAPL", owner_set)   # 소유자
+    _seed_active_subscriber("200")
+    assert "Apple hits record high" in bc.respond("/news AAPL", "200")       # active 구독자
+    assert fake_news == [("AAPL", bc.NEWS_LIMIT)] * 2
+
+
+def test_news_usage_hint_without_arg(fresh_db, owner_set, fake_news):
+    assert "사용법" in bc.respond("/news", owner_set)
+    assert fake_news == []
+
+
+def test_news_ticker_validation_rejects_garbage(fresh_db, owner_set, fake_news):
+    for bad in ("AAPL;DROP", "a b", "&apikey=x", "WAYTOOLONG123", "../etc"):
+        assert "형식" in bc.handle_news(bad, owner_set)
+    assert fake_news == []                              # 검증 실패 시 fetch 호출 없음
+    assert "Apple" in bc.handle_news(" aapl ", owner_set)   # 소문자/공백 정규화
+    assert "Apple" in bc.handle_news("BRK.B", owner_set)    # 점 티커 허용
+    assert fake_news[0] == ("AAPL", bc.NEWS_LIMIT)
+
+
+def test_news_fetch_error_is_polite_message(fresh_db, owner_set, monkeypatch):
+    import src.data_fetcher as df
+    from src.exceptions import DataFetchError, MissingApiKeyError
+
+    def boom(symbol, limit=5):
+        raise DataFetchError("down", source="FMP")
+
+    monkeypatch.setattr(df, "fetch_stock_news", boom)
+    out = bc.respond("/news AAPL", owner_set)           # 크래시 없이 안내
+    assert "실패" in out and "AAPL" in out
+
+    def no_key(symbol, limit=5):
+        raise MissingApiKeyError("FMP_API_KEY")
+
+    monkeypatch.setattr(df, "fetch_stock_news", no_key)
+    assert "설정되지 않았습니다" in bc.handle_news("AAPL", owner_set)
+
+
+def test_news_empty_result_message(fresh_db, owner_set, monkeypatch):
+    import src.data_fetcher as df
+
+    monkeypatch.setattr(df, "fetch_stock_news", lambda symbol, limit=5: [])
+    assert "최근 뉴스가 없습니다" in bc.respond("/news ZZZZ", owner_set)
+
+
+def test_news_rate_limit_applies(fresh_db, owner_set, fake_news):
+    rl = bc.RateLimiter(max_calls=1, window_sec=60, clock=lambda: 0.0)
+    assert bc.respond("/news AAPL", owner_set, rl) is not None
+    assert bc.respond("/news AAPL", owner_set, rl) is None   # 한도 초과 → 드롭
+    assert len(fake_news) == 1

@@ -68,6 +68,7 @@ TTL_PROFILE = timedelta(days=30)       # 회사 프로필 — 거의 불변
 TTL_SNAPSHOT = timedelta(hours=6)      # yfinance .info 스냅샷
 TTL_WIKI = timedelta(days=1)           # 위키피디아 페이지뷰 — 일 단위 갱신
 TTL_SCREENER = timedelta(hours=12)     # company-screener 유니버스 발굴 (구성 거의 불변)
+TTL_NEWS = timedelta(minutes=30)       # 종목 뉴스 헤드라인 — 자주 갱신되나 /news 남용 방지
 
 
 @cached("prices", TTL_PRICES, "dataframe")
@@ -557,6 +558,64 @@ def fetch_profile(ticker: str) -> dict:
             f"FMP profile 빈 응답: ticker={ticker}", source="FMP"
         )
     return data[0] if isinstance(data, list) else data
+
+
+@cached("fmp_news", TTL_NEWS, "json")
+def fetch_stock_news(symbol: str, limit: int = 5) -> list[dict]:
+    """FMP /stable/news/stock — 종목 최신 뉴스 헤드라인 (Phase 11b `/news`).
+
+    ⚠️ 라이브 스모크 필요 (CLAUDE.md §4.10 #3): 오프라인 환경에서 작성됨.
+    아래 가정은 실키 1콜(``news/stock?symbols=AAPL&limit=5``)로 확인 후 확정할 것.
+      - 엔드포인트 경로: ``news/stock`` + 쿼리 ``symbols=<SYM>&limit=<n>``
+      - 응답 형태: list[dict], 항목 필드 ``title`` / ``publishedDate`` /
+        ``site`` / ``url`` (FMP 문서 기준 — 실제 이름이 다를 수 있음)
+    필드명이 다르면 이 파서만 고치면 됨 — 호출부(bot_commands.format_news)는
+    title/publishedDate/site/url 4개 키의 dict 리스트만 봄.
+
+    Parameters
+    ----------
+    symbol : str
+        종목 티커 (예: "AAPL"). 형식 검증은 호출부(bot_commands) 책임.
+    limit : int
+        최대 헤드라인 수 (기본 5).
+
+    Returns
+    -------
+    list[dict]
+        ``[{"title", "publishedDate", "site", "url"}, ...]`` — 최대 limit 개.
+        뉴스 없음 / 200 + 에러 dict / 전 항목 malformed 는 **빈 리스트**
+        (호출부가 "뉴스 없음" 안내). title·url 없는 항목은 표시 불가라 스킵.
+
+    Raises
+    ------
+    MissingApiKeyError / ApiAuthError / ApiAuthorizationError / RateLimitError /
+    ApiHttpError / ApiTimeoutError / ApiConnectionError — ``_fmp_get`` 과 동일.
+    """
+    data = _fmp_get("news/stock", {"symbols": symbol, "limit": limit})
+    # FMP 가 200 + 에러 dict 를 줄 때가 있음 → list 아니면 빈 결과 (screener 와 동일 가드)
+    if not isinstance(data, list):
+        logger.warning(
+            "FMP news/stock 비정상 응답 형태 (symbol=%s): %s", symbol, type(data).__name__
+        )
+        return []
+
+    items: list[dict] = []
+    for raw in data:
+        if not isinstance(raw, dict):
+            continue
+        title = raw.get("title")
+        url = raw.get("url")
+        if not title or not url:  # 제목/링크 없으면 표시 불가 → 스킵 (방어 파싱)
+            continue
+        items.append({
+            "title": str(title).strip(),
+            "publishedDate": raw.get("publishedDate"),
+            "site": raw.get("site"),
+            "url": str(url).strip(),
+        })
+        if len(items) >= limit:
+            break
+    return items
 
 
 @cached("crypto_top", TTL_CRYPTO, "json")
