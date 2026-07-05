@@ -247,6 +247,26 @@ _MSG_DENIED = "가입이 거절되었습니다."
 _MSG_UNSUBSCRIBED = "👋 구독이 해지되었습니다. 다시 받으려면 /start"
 
 
+def decide_request(target: str, approve: bool, send_notifications: bool = True) -> str:
+    """가입 요청 승인/거절 공통 코어 — 텍스트 명령(/approve·/deny)과 인라인 버튼이 공유.
+
+    상태 변경(active/inactive) + 신청자 알림(평문, best-effort). 소유자 권한 검사는
+    호출부 책임 (apply_events 는 is_owner, 콜백은 handle_callback 이 sender 검증).
+
+    Returns: "approved" | "denied" | "missing"(가입 요청 기록 없음 — 변경 없음)
+    """
+    from src.notifier import send_safe
+
+    conn = _conn()
+    if get_status(conn, target) is None:
+        return "missing"
+    set_status(conn, target, "active" if approve else "inactive")
+    conn.commit()
+    if send_notifications:
+        send_safe(_MSG_APPROVED if approve else _MSG_DENIED, target, parse_mode=None)
+    return "approved" if approve else "denied"
+
+
 def _broadcast(text: str) -> dict[str, int]:
     """active 구독자 전원에게 평문 전송 (#10 — 공지/관리 메시지는 평문). best-effort.
 
@@ -293,9 +313,17 @@ def apply_events(events: list[SubEvent], send_notifications: bool = True) -> dic
                 upsert_request(conn, ev.chat_id, ev.name)
                 st["requests"] += 1
                 notify(_MSG_REQUESTED, ev.chat_id)
-                # 소유자에게 승인 요청 알림 — 신규 요청일 때만 (중복 알림 방지)
-                notify(f"🔔 가입 요청: {ev.name or '(이름없음)'} (chat_id={ev.chat_id})\n"
-                       f"승인: /approve {ev.chat_id}    거절: /deny {ev.chat_id}", owner)
+                # 소유자에게 승인 요청 알림 — 신규 요청일 때만 (중복 알림 방지).
+                # 인라인 [✅ 승인][❌ 거절] 버튼 부착 — 탭 한 번으로 처리 (텍스트 명령도 유지).
+                if send_notifications and owner:
+                    from src.bot_commands import approval_keyboard
+
+                    send_safe(
+                        f"🔔 가입 요청: {ev.name or '(이름없음)'} (chat_id={ev.chat_id})\n"
+                        f"승인: /approve {ev.chat_id}    거절: /deny {ev.chat_id}",
+                        owner, parse_mode=None,
+                        reply_markup=approval_keyboard(ev.chat_id),
+                    )
 
         elif ev.kind == "unsubscribe":
             set_status(conn, ev.chat_id, "inactive")
@@ -333,18 +361,17 @@ def apply_events(events: list[SubEvent], send_notifications: bool = True) -> dic
                 notify(body, owner)
             elif ev.target is None:
                 notify(f"사용법: /{ev.kind} <chat_id>", owner)
-            elif get_status(conn, ev.target) is None:
-                notify(f"⚠️ {ev.target}: 가입 요청 기록이 없습니다.", owner)
-            elif ev.kind == "approve":
-                set_status(conn, ev.target, "active")
-                st["approved"] += 1
-                notify(f"승인 완료: {ev.target}", owner)
-                notify(_MSG_APPROVED, ev.target)
-            else:                                    # deny
-                set_status(conn, ev.target, "inactive")
-                st["denied"] += 1
-                notify(f"거절 완료: {ev.target}", owner)
-                notify(_MSG_DENIED, ev.target)
+            else:                                    # approve / deny — 버튼과 코어 공유
+                outcome = decide_request(ev.target, approve=(ev.kind == "approve"),
+                                         send_notifications=send_notifications)
+                if outcome == "missing":
+                    notify(f"⚠️ {ev.target}: 가입 요청 기록이 없습니다.", owner)
+                elif outcome == "approved":
+                    st["approved"] += 1
+                    notify(f"승인 완료: {ev.target}", owner)
+                else:                                # denied
+                    st["denied"] += 1
+                    notify(f"거절 완료: {ev.target}", owner)
 
     conn.commit()
     logger.info("구독 처리: %s", st)

@@ -163,3 +163,161 @@ def test_main_keyboard_owner_gets_admin_row():
     assert "📋 구독자" not in flat_user                 # 일반 사용자엔 관리자 버튼 없음
     flat_owner = [b for row in bc.main_keyboard(is_owner=True)["keyboard"] for b in row]
     assert "📋 구독자" in flat_owner and "⏳ 승인 대기" in flat_owner
+
+
+# ---------------- 인라인 승인/거절 버튼 (callback_query) ----------------
+
+
+@pytest.fixture
+def owner_set():
+    """소유자 chat_id = '1' (test_subscribers 와 동일 패턴)."""
+    from src.config import settings
+
+    backup = settings.telegram_chat_id
+    object.__setattr__(settings, "telegram_chat_id", "1")
+    yield "1"
+    object.__setattr__(settings, "telegram_chat_id", backup)
+
+
+@pytest.fixture
+def tg_capture(monkeypatch):
+    """notifier 의 콜백/편집/전송 safe 함수들을 기록기로 대체 (네트워크 없음)."""
+    calls = {"answers": [], "edits": [], "sent": []}
+    monkeypatch.setattr(
+        "src.notifier.answer_callback_safe",
+        lambda cq_id, text=None, show_alert=False: calls["answers"].append((cq_id, text)) or True,
+    )
+    monkeypatch.setattr(
+        "src.notifier.edit_message_safe",
+        lambda chat_id, message_id, text, parse_mode=None, reply_markup=None:
+            calls["edits"].append((chat_id, message_id, text)) or True,
+    )
+    monkeypatch.setattr(
+        "src.notifier.send_safe",
+        lambda text, chat_id=None, parse_mode="Markdown", reply_markup=None:
+            calls["sent"].append((chat_id, text)) or True,
+    )
+    return calls
+
+
+def _cq(data, from_id=1, cq_id="cbq1", message_id=42, chat_id=1,
+        msg_text="🔔 가입 요청: alice (chat_id=100)"):
+    """텔레그램 callback_query update 조각 (필요 필드만)."""
+    return {"id": cq_id, "from": {"id": from_id}, "data": data,
+            "message": {"message_id": message_id, "chat": {"id": chat_id}, "text": msg_text}}
+
+
+def _seed_pending(chat_id="100", name="alice"):
+    from src import subscribers
+
+    conn = subscribers._conn()
+    subscribers.upsert_request(conn, chat_id, name)
+    conn.commit()
+    return subscribers
+
+
+def test_approval_keyboard_callback_data_format():
+    kb = bc.approval_keyboard("12345")
+    buttons = kb["inline_keyboard"][0]
+    assert [b["callback_data"] for b in buttons] == ["approve:12345", "deny:12345"]
+    assert buttons[0]["text"] == "✅ 승인" and buttons[1]["text"] == "❌ 거절"
+
+
+def test_parse_callback_valid_and_invalid():
+    assert bc.parse_callback("approve:12345") == ("approve", "12345")
+    assert bc.parse_callback("deny:12345") == ("deny", "12345")
+    assert bc.parse_callback("approve:") is None      # 대상 누락
+    assert bc.parse_callback("approve") is None       # 구분자 없음
+    assert bc.parse_callback("hack:123") is None      # 미지원 action
+    assert bc.parse_callback("") is None
+
+
+def test_callback_approve_tap(fresh_db, owner_set, tg_capture):
+    subs = _seed_pending("100")
+    bc.handle_callback(_cq("approve:100"), owner_set)
+
+    assert subs.subscriber_status("100") == "active"                 # /approve 와 동일 상태 변화
+    assert tg_capture["answers"] == [("cbq1", "승인 완료")]           # 토스트
+    assert len(tg_capture["edits"]) == 1                             # 원본 알림 편집(버튼 제거)
+    chat, mid, text = tg_capture["edits"][0]
+    assert chat == "1" and mid == 42
+    assert text.startswith("🔔 가입 요청") and text.endswith("→ ✅ 승인됨")
+    assert any(cid == "100" and "승인되었습니다" in txt
+               for cid, txt in tg_capture["sent"])                   # 신청자 알림
+
+
+def test_callback_deny_tap(fresh_db, owner_set, tg_capture):
+    subs = _seed_pending("100")
+    bc.handle_callback(_cq("deny:100"), owner_set)
+
+    assert subs.subscriber_status("100") == "inactive"
+    assert tg_capture["answers"] == [("cbq1", "거절 완료")]
+    assert tg_capture["edits"][0][2].endswith("→ ❌ 거절됨")
+    assert any(cid == "100" and "거절" in txt for cid, txt in tg_capture["sent"])
+
+
+def test_callback_owner_gate_rejects_non_owner(fresh_db, owner_set, tg_capture):
+    subs = _seed_pending("100")
+    bc.handle_callback(_cq("approve:100", from_id=999), owner_set)   # 비소유자 탭
+
+    assert subs.subscriber_status("100") == "pending"                # 상태 불변
+    assert len(tg_capture["answers"]) == 1                           # 콜백엔 항상 응답
+    assert "소유자만" in tg_capture["answers"][0][1]
+    assert tg_capture["edits"] == [] and tg_capture["sent"] == []    # 편집/알림 없음
+
+
+def test_callback_second_tap_is_idempotent(fresh_db, owner_set, tg_capture):
+    subs = _seed_pending("100")
+    bc.handle_callback(_cq("approve:100"), owner_set)                # 1차 탭 → 승인
+    bc.handle_callback(_cq("approve:100", cq_id="cbq2"), owner_set)  # 더블탭
+    bc.handle_callback(_cq("deny:100", cq_id="cbq3"), owner_set)     # 승인 후 거절 탭도 무변화
+
+    assert subs.subscriber_status("100") == "active"                 # 1차 결과 유지
+    assert tg_capture["answers"] == [("cbq1", "승인 완료"),
+                                     ("cbq2", "이미 처리됨"), ("cbq3", "이미 처리됨")]
+    assert len(tg_capture["edits"]) == 1                             # 재편집 없음
+
+
+def test_callback_after_typed_approve_is_idempotent(fresh_db, owner_set, tg_capture):
+    subs = _seed_pending("100")
+    assert subs.decide_request("100", approve=True) == "approved"    # 텍스트 /approve 선처리
+    bc.handle_callback(_cq("approve:100"), owner_set)                # 그 뒤 버튼 탭
+
+    assert subs.subscriber_status("100") == "active"
+    assert tg_capture["answers"] == [("cbq1", "이미 처리됨")]
+    assert tg_capture["edits"] == []
+
+
+def test_callback_unknown_target_and_bad_data(fresh_db, owner_set, tg_capture):
+    bc.handle_callback(_cq("approve:777"), owner_set)                # 기록 없는 대상
+    assert "기록이 없습니다" in tg_capture["answers"][-1][1]
+    bc.handle_callback(_cq("hack:1", cq_id="cbq2"), owner_set)       # 형식 불일치 data
+    assert tg_capture["answers"][-1] == ("cbq2", "알 수 없는 버튼입니다.")
+    assert tg_capture["edits"] == []
+
+
+def test_callback_answers_even_when_handler_errors(fresh_db, owner_set, tg_capture, monkeypatch):
+    """decide_request 예외에도 answerCallbackQuery 는 반드시 호출 (finally 경로)."""
+    from src import subscribers
+
+    _seed_pending("100")
+
+    def boom(target, approve, send_notifications=True):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(subscribers, "decide_request", boom)
+    with pytest.raises(RuntimeError):                                # 예외는 폴링 루프 가드가 처리
+        bc.handle_callback(_cq("approve:100"), owner_set)
+    assert len(tg_capture["answers"]) == 1
+    assert "오류" in tg_capture["answers"][0][1]
+    assert tg_capture["edits"] == []                                 # 실패 시 결과 표기 없음
+
+
+def test_callback_without_message_still_processes(fresh_db, owner_set, tg_capture):
+    """message 필드 없는 콜백(오래된 메시지 등)도 상태 변경 + 응답은 수행 (편집만 생략)."""
+    subs = _seed_pending("100")
+    cq = {"id": "cbq1", "from": {"id": 1}, "data": "approve:100"}    # message 없음
+    bc.handle_callback(cq, owner_set)
+    assert subs.subscriber_status("100") == "active"
+    assert tg_capture["answers"] == [("cbq1", "승인 완료")]
+    assert tg_capture["edits"] == []

@@ -7,6 +7,7 @@ Phase 11b — 상시 인터랙티브 봇 (폴링 워커).
 매 메시지를 라우팅:
   · 조회 명령(/stock·/scan·/help) → bot_commands.respond → 응답 전송
   · 구독 명령(/start·/stop·/approve·/deny·/pending) → subscribers.apply_events
+  · callback_query(인라인 [승인][거절] 버튼) → bot_commands.handle_callback
 무거운 분석은 cron 이 Turso 에 사전계산 → 이 봇은 **DB 읽기 위주(경량)**.
 
 ⚠️ 이 봇이 getUpdates 를 소유하므로, 같이 도는 다이제스트 cron 은 구독 동기화를 끄고
@@ -86,7 +87,18 @@ def run() -> NoReturn:
             if msg and msg.get("text") in bot_commands.BUTTON_TO_COMMAND:
                 msg["text"] = bot_commands.BUTTON_TO_COMMAND[msg["text"]]
 
-        # 1) 조회 명령 즉답 — /stock·/scan 은 active 구독자(또는 소유자)만, /help·/menu 는 공개
+        # 1) 콜백 쿼리 (인라인 [승인][거절] 버튼) — 소유자 검증·응답·편집은 handle_callback 이
+        #    전담. per-update try/except 로 poison callback 이 루프를 죽이지 않게 함.
+        for u in updates:
+            cq = u.get("callback_query")
+            if not cq:
+                continue
+            try:
+                bot_commands.handle_callback(cq, owner)
+            except Exception:  # noqa: BLE001 — poison 콜백이 봇을 크래시 루프시키지 않도록
+                logger.exception("콜백 처리 실패 (update_id=%s) — 건너뜀", u.get("update_id"))
+
+        # 2) 조회 명령 즉답 — /stock·/scan 은 active 구독자(또는 소유자)만, /help·/menu 는 공개
         for u in updates:
             chat_id, text = _extract(u)
             if not chat_id or not text:
@@ -106,14 +118,15 @@ def run() -> NoReturn:
             except Exception:  # noqa: BLE001 — poison 메시지가 봇을 크래시 루프시키지 않도록
                 logger.exception("명령 처리 실패 (chat=%s) — 건너뜀", chat_id)
 
-        # 2) 구독 명령 처리 (조회 명령은 parse_updates 가 "ignore" 로 흘림)
+        # 3) 구독 명령 처리 (조회 명령은 parse_updates 가 "ignore" 로 흘림 —
+        #    callback_query update 는 메시지가 없어 이벤트 없이 offset 만 전진)
         events, next_offset = subscribers.parse_updates(updates)
         try:
             subscribers.apply_events(events)
         except Exception:  # noqa: BLE001 — 한 배치 처리 실패가 루프를 죽이지 않도록
             logger.exception("구독 이벤트 처리 실패 — 계속 진행")
 
-        # 3) offset 전진 + 클라우드 동기화 (처리한 메시지 재수신 방지)
+        # 4) offset 전진 + 클라우드 동기화 (처리한 메시지 재수신 방지)
         if next_offset is not None:
             offset = next_offset
             subscribers.set_updates_offset(offset)

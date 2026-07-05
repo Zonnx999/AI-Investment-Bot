@@ -39,12 +39,14 @@ def no_telegram():
 class _TgHandler(BaseHTTPRequestHandler):
     mode = "ok"               # "ok" | "error" | "parse_fail" | "forbidden"
     last_payload: dict = {}
+    last_path = ""            # 호출된 메서드 확인용 (…/answerCallbackQuery 등)
     calls = 0
 
     def do_POST(self):  # noqa: N802
         length = int(self.headers.get("Content-Length", 0))
         payload = json.loads(self.rfile.read(length) or b"{}")
         type(self).last_payload = payload
+        type(self).last_path = self.path
         type(self).calls += 1
         mode = type(self).mode
         if mode == "parse_fail" and "parse_mode" in payload:
@@ -171,3 +173,66 @@ def test_reply_markup_included_in_payload(telegram_creds, telegram_server):
     kb = {"keyboard": [["🇺🇸 미국 추천"]], "resize_keyboard": True}
     send_telegram("메뉴", reply_markup=kb)
     assert telegram_server.last_payload["reply_markup"] == kb
+
+
+def test_inline_keyboard_reply_markup_in_payload(telegram_creds, telegram_server):
+    """가입 승인 알림용 인라인 키보드가 sendMessage payload 에 그대로 실리는지."""
+    kb = {"inline_keyboard": [[{"text": "✅ 승인", "callback_data": "approve:100"},
+                               {"text": "❌ 거절", "callback_data": "deny:100"}]]}
+    send_telegram("🔔 가입 요청", reply_markup=kb, parse_mode=None)
+    assert telegram_server.last_payload["reply_markup"] == kb
+    assert telegram_server.last_path.endswith("/sendMessage")
+
+
+# ---------------- answerCallbackQuery / editMessageText (인라인 버튼 플로우) ----------------
+
+
+def test_answer_callback_query_payload(telegram_creds, telegram_server):
+    assert notifier_mod.answer_callback_query("cbq_1", text="승인 완료") is True
+    assert telegram_server.last_path.endswith("/answerCallbackQuery")
+    assert telegram_server.last_payload["callback_query_id"] == "cbq_1"
+    assert telegram_server.last_payload["text"] == "승인 완료"
+    assert "show_alert" not in telegram_server.last_payload      # 기본은 토스트
+
+
+def test_answer_callback_query_truncates_toast_to_200(telegram_creds, telegram_server):
+    notifier_mod.answer_callback_query("cbq_1", text="x" * 300)
+    assert len(telegram_server.last_payload["text"]) == 200      # 텔레그램 토스트 제한
+
+
+def test_answer_callback_query_error_raises(telegram_creds, telegram_server):
+    telegram_server.mode = "error"
+    with pytest.raises(ApiHttpError):
+        notifier_mod.answer_callback_query("cbq_1", text="hi")
+
+
+def test_answer_callback_safe_swallows_error(telegram_creds, telegram_server):
+    telegram_server.mode = "error"
+    assert notifier_mod.answer_callback_safe("cbq_1", "hi") is False   # 예외 없이 False
+
+
+def test_answer_callback_safe_without_token(no_telegram):
+    assert notifier_mod.answer_callback_safe("cbq_1") is False
+
+
+def test_edit_message_text_payload(telegram_creds, telegram_server):
+    notifier_mod.edit_message_text("999", 42, "🔔 가입 요청\n\n→ ✅ 승인됨")
+    assert telegram_server.last_path.endswith("/editMessageText")
+    p = telegram_server.last_payload
+    assert p["chat_id"] == "999" and p["message_id"] == 42
+    assert p["text"].endswith("→ ✅ 승인됨")
+    assert "parse_mode" not in p                    # 기본 평문
+    assert "reply_markup" not in p                  # 생략 = 인라인 키보드 제거 (텔레그램 동작)
+
+
+def test_edit_message_markdown_400_falls_back_to_plain(telegram_creds, telegram_server):
+    telegram_server.mode = "parse_fail"
+    result = notifier_mod.edit_message_text("999", 42, "john_doe 처리", parse_mode="Markdown")
+    assert result == {"message_id": 1}              # 평문 재시도 성공
+    assert telegram_server.calls == 2
+    assert "parse_mode" not in telegram_server.last_payload
+
+
+def test_edit_message_safe_swallows_error(telegram_creds, telegram_server):
+    telegram_server.mode = "error"
+    assert notifier_mod.edit_message_safe("999", 42, "x") is False

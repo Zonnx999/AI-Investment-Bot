@@ -155,7 +155,8 @@ def _wire(monkeypatch, updates):
     monkeypatch.setattr("src.notifier.get_updates", lambda offset=None: updates)
     monkeypatch.setattr(
         "src.notifier.send_safe",
-        lambda text, chat_id=None, parse_mode="Markdown": sent.append((chat_id, text)) or True,
+        lambda text, chat_id=None, parse_mode="Markdown", reply_markup=None:
+            sent.append((chat_id, text)) or True,
     )
     return sent
 
@@ -257,7 +258,7 @@ def test_sync_survives_getupdates_failure(fresh_db, owner_set, monkeypatch):
 def test_apply_events_handles_authorization_and_state(fresh_db, owner_set, monkeypatch):
     # apply_events 는 fetch/offset 무관 — 폴링 루프(scripts/bot.py)가 재사용하는 경로
     monkeypatch.setattr("src.notifier.send_safe",
-                        lambda text, chat_id=None, parse_mode="Markdown": True)
+                        lambda text, chat_id=None, parse_mode="Markdown", reply_markup=None: True)
     events = [
         subscribers.SubEvent(1, "100", "alice", "request"),
         subscribers.SubEvent(2, "1", "owner", "approve", "100"),    # 소유자 승인
@@ -307,7 +308,8 @@ def _capture_send(monkeypatch) -> list[tuple[str, str]]:
     sent: list[tuple[str, str]] = []
     monkeypatch.setattr(
         "src.notifier.send_safe",
-        lambda text, chat_id=None, parse_mode="Markdown": sent.append((chat_id, text)) or True,
+        lambda text, chat_id=None, parse_mode="Markdown", reply_markup=None:
+            sent.append((chat_id, text)) or True,
     )
     return sent
 
@@ -352,3 +354,56 @@ def test_announce_empty_body_shows_usage(fresh_db, owner_set, monkeypatch):
     assert st["announced"] == 0
     assert any(cid == "1" and "사용법" in txt for cid, txt in sent)   # 소유자에 사용법
     assert all(cid != "100" for cid, _ in sent)                       # 구독자 전송 없음
+
+
+# ---------------- 인라인 승인/거절 버튼 (Phase 11b) ----------------
+
+
+def test_request_owner_notification_carries_inline_buttons(fresh_db, owner_set, monkeypatch):
+    """가입 요청 시 소유자 알림에 [✅ 승인][❌ 거절] 인라인 키보드가 붙는지 (payload 검증)."""
+    sent: list[tuple[str, str, dict | None]] = []
+    monkeypatch.setattr(
+        "src.notifier.send_safe",
+        lambda text, chat_id=None, parse_mode="Markdown", reply_markup=None:
+            sent.append((chat_id, text, reply_markup)) or True,
+    )
+    subscribers.apply_events([subscribers.SubEvent(1, "100", "alice", "request")])
+
+    owner_msgs = [(txt, kb) for cid, txt, kb in sent if cid == "1"]
+    assert len(owner_msgs) == 1
+    text, kb = owner_msgs[0]
+    assert "가입 요청" in text and "/approve 100" in text           # 텍스트 명령도 계속 안내
+    buttons = kb["inline_keyboard"][0]
+    assert [b["callback_data"] for b in buttons] == ["approve:100", "deny:100"]
+    assert buttons[0]["text"] == "✅ 승인" and buttons[1]["text"] == "❌ 거절"
+    # 신청자에게 가는 접수 안내에는 버튼 없음
+    applicant = [(txt, kb) for cid, txt, kb in sent if cid == "100"]
+    assert applicant and applicant[0][1] is None
+
+
+def test_decide_request_shared_core(fresh_db, monkeypatch):
+    """decide_request — 텍스트 명령과 버튼이 공유하는 상태 변경 + 신청자 알림 코어."""
+    sent = _capture_send(monkeypatch)
+    assert subscribers.decide_request("100", approve=True) == "missing"   # 기록 없음 → 변경 없음
+    assert subscribers.subscriber_status("100") is None
+
+    conn = subscribers._conn()
+    subscribers.upsert_request(conn, "100", "alice")
+    conn.commit()
+
+    assert subscribers.decide_request("100", approve=True) == "approved"
+    assert subscribers.subscriber_status("100") == "active"
+    assert any(cid == "100" and "승인되었습니다" in txt for cid, txt in sent)
+
+    assert subscribers.decide_request("100", approve=False) == "denied"
+    assert subscribers.subscriber_status("100") == "inactive"
+    assert any(cid == "100" and "거절" in txt for cid, txt in sent)
+
+
+def test_decide_request_silent_mode(fresh_db, monkeypatch):
+    sent = _capture_send(monkeypatch)
+    conn = subscribers._conn()
+    subscribers.upsert_request(conn, "100", "alice")
+    conn.commit()
+    assert subscribers.decide_request("100", approve=True, send_notifications=False) == "approved"
+    assert sent == []                                             # 알림 억제 모드
