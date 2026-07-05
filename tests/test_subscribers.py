@@ -96,6 +96,46 @@ def test_ensure_owner_active_without_approval(fresh_db):
         object.__setattr__(settings, "telegram_chat_id", backup)
 
 
+def test_subscriber_status_public_api(fresh_db):
+    """scripts/bot.py 가 private _conn 없이 쓰는 파사드 — 상태별 반환 확인."""
+    assert subscribers.subscriber_status("100") is None      # 기록 없음
+    conn = subscribers._conn()
+    subscribers.upsert_request(conn, "100", "alice")
+    conn.commit()
+    assert subscribers.subscriber_status("100") == "pending"
+    subscribers.set_status(conn, "100", "active")
+    conn.commit()
+    assert subscribers.subscriber_status("100") == "active"
+
+
+def test_updates_offset_public_api_roundtrip(fresh_db):
+    assert subscribers.get_updates_offset() is None          # 초기값 없음
+    subscribers.set_updates_offset(42)
+    assert subscribers.get_updates_offset() == 42
+    subscribers.set_updates_offset(43)                       # 전진
+    assert subscribers.get_updates_offset() == 43
+
+
+def test_conn_schema_init_once_per_storage(fresh_db, monkeypatch):
+    """_conn 은 같은 storage 인스턴스에 스키마 초기화를 1회만 (Turso 왕복 절감).
+
+    storage 싱글톤이 교체되면(테스트 tmp DB 등) 자동 재초기화되어야 함.
+    """
+    import src.storage as storage_mod
+
+    c1 = subscribers._conn()
+    c2 = subscribers._conn()
+    assert c1 is c2                                          # 동일 connection 재사용
+    store_before = storage_mod.get_storage()
+    assert subscribers._schema_ready_store is store_before   # memo 가 현재 store 를 가리킴
+
+    # 싱글톤 리셋 → 새 storage 에 다시 초기화 (stale memo 로 스키마 누락되면 안 됨)
+    monkeypatch.setattr(storage_mod, "_storage", None)
+    c3 = subscribers._conn()
+    assert subscribers._schema_ready_store is storage_mod.get_storage()
+    assert subscribers.get_status(c3, "nobody") is None      # subscribers 테이블 존재
+
+
 def test_stats_counts_by_status(fresh_db):
     conn = subscribers._conn()
     subscribers.upsert_request(conn, "1", "a")               # pending

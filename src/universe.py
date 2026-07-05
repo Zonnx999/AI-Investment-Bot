@@ -34,6 +34,7 @@ from src.screener import (
     calculate_value_score,
 )
 from src.storage import add_column_if_missing, get_storage
+from src.utils import clip
 
 logger = get_logger(__name__)
 
@@ -337,21 +338,24 @@ def discover(
 # ----------------------------------------------------------------------
 
 
-def symbols_needing_enrichment(max_age: timedelta = ENRICH_MAX_AGE) -> list[tuple[str, str]]:
-    """FMP key-metrics 보강이 필요한 (symbol, market) — 미보강/오래된 **US** 주식.
+def symbols_needing_enrichment(
+    max_age: timedelta = ENRICH_MAX_AGE, market: str = "US"
+) -> list[tuple[str, str]]:
+    """보강이 필요한 (symbol, market) — 미보강/오래된 주식 (시장 지정 가능).
 
-    KR 은 FMP 가 6자리 코드를 모름 → DART 로 별도 보강 (Phase 9b). 여기선 US 만.
+    기본 US(FMP key-metrics). KR 은 FMP 가 6자리 코드를 모름 → DART 로 별도 보강
+    (Phase 9b, enrich_kr 이 market="KR" 로 호출).
     """
     conn = _conn()
     cutoff = (datetime.now(timezone.utc) - max_age).isoformat()
     rows = conn.execute(
         """
         SELECT symbol, market FROM screened
-        WHERE market = 'US'
+        WHERE market = ?
           AND (enriched = 0 OR updated_at < ?)
         ORDER BY market_cap DESC
         """,
-        (cutoff,),
+        (market, cutoff),
     ).fetchall()
     return [(r[0], r[1]) for r in rows]
 
@@ -364,10 +368,17 @@ def _compute_enrich(conn, symbol: str, market: str) -> dict | None:
     """
     import json
 
-    from src.screener import health_scorecard, latest_fundamentals, value_scorecard
+    from src.screener import (
+        has_fundamentals,
+        health_scorecard,
+        latest_fundamentals,
+        value_scorecard,
+    )
 
     m = latest_fundamentals(symbol)   # key-metrics + ratios 병합
-    if not m:
+    # 빈 dict 뿐 아니라 '전부 None/NaN' 도 no_data 처리 — 0점 대신 미보강(NULL) 유지
+    # → scan(enriched=1 필터)에서 자연 제외 ('데이터 없음' ≠ '나쁜 점수').
+    if not has_fundamentals(m):
         return None
 
     # 발굴 단계에서 저장한 가격/섹터/배당을 quote 대용으로 사용 (value 점수에 필요).
@@ -456,6 +467,27 @@ def enrich(
 # ----------------------------------------------------------------------
 
 
+def _kr_pbr_points(pbr: float | None) -> float:
+    """KR PBR → 저평가 점수 (0~35, 단조 감소).
+
+    구곡선 `35 − pbr×17.5` 는 PBR 2.0 에서 이미 0점 — 한국 중대형주(PBR 1~3 흔함)에
+    과도하게 가혹했음 → 완화 (2026-06 코드리뷰 backlog).
+
+    브레이크포인트:
+      · PBR ≤ 0.5  → 35점 (만점 — 청산가치 이하 딥밸류)
+      · 0.5 ~ 4.5  → 선형 감소: 35 × (4.5 − pbr) / 4.0
+                     (PBR 1.0 ≈ 30.6, 2.0 ≈ 21.9, 3.0 ≈ 13.1)
+      · PBR ≥ 4.5  → 0점
+      · None/0/음수 → 0점 (자본잠식 — '낮을수록 좋음' 공식이 음수에서 뒤집히는
+                     역설 방지, CLAUDE.md §4.10 #5)
+    """
+    if not pbr or pbr <= 0:
+        return 0.0
+    if pbr <= 0.5:
+        return 35.0
+    return clip(35.0 * (4.5 - pbr) / 4.0, 0.0, 35.0)
+
+
 def calculate_kr_scores(fin: dict, market_cap: float) -> dict:
     """DART 재무제표 + KRX 시총 → 한국 종목 점수 (순수 함수).
 
@@ -474,25 +506,22 @@ def calculate_kr_scores(fin: dict, market_cap: float) -> dict:
 
     from src.screener import Component, ScoreCard
 
-    def _clip(v, lo, hi):
-        return max(lo, min(hi, v))
-
     h = [
-        Component("ROE", _clip((roe or 0) * 2.5, 0, 35), 35,
+        Component("ROE", clip((roe or 0) * 2.5, 0, 35), 35,
                   f"{roe:.1f}%" if roe is not None else "—"),
-        Component("부채비율", _clip(30.0 - (debt_ratio or 999) / 10, 0, 30), 30,
+        Component("부채비율", clip(30.0 - (debt_ratio or 999) / 10, 0, 30), 30,
                   f"{debt_ratio:.0f}%" if debt_ratio is not None else "—"),
-        Component("영업이익률", _clip((op_margin or 0) * 2, 0, 20), 20,
+        Component("영업이익률", clip((op_margin or 0) * 2, 0, 20), 20,
                   f"{op_margin:.1f}%" if op_margin is not None else "—"),
         Component("흑자", 15.0 if (ni is not None and ni > 0) else 0.0, 15,
                   "흑자" if (ni is not None and ni > 0) else "적자"),
     ]
     v = [
-        Component("PER", _clip(40.0 - per * 1.5, 0, 40) if (per and per > 0) else 0, 40,
+        Component("PER", clip(40.0 - per * 1.5, 0, 40) if (per and per > 0) else 0, 40,
                   f"{per:.1f}" if per else "—"),
-        Component("이익수익률", _clip((1.0 / per) * 100 * 2.5, 0, 25) if (per and per > 0) else 0, 25,
+        Component("이익수익률", clip((1.0 / per) * 100 * 2.5, 0, 25) if (per and per > 0) else 0, 25,
                   f"{100/per:.1f}%" if (per and per > 0) else "—"),
-        Component("PBR", _clip(35.0 - pbr * 17.5, 0, 35) if (pbr and pbr > 0) else 0, 35,
+        Component("PBR", _kr_pbr_points(pbr), 35,
                   f"{pbr:.2f}" if pbr else "—"),
     ]
     health_card = ScoreCard(round(min(100.0, sum(c.points for c in h))), h)
@@ -506,14 +535,8 @@ def calculate_kr_scores(fin: dict, market_cap: float) -> dict:
 
 
 def _kr_symbols_needing_enrichment(max_age: timedelta) -> list[str]:
-    conn = _conn()
-    cutoff = (datetime.now(timezone.utc) - max_age).isoformat()
-    rows = conn.execute(
-        "SELECT symbol FROM screened WHERE market='KR' AND (enriched=0 OR updated_at < ?) "
-        "ORDER BY market_cap DESC",
-        (cutoff,),
-    ).fetchall()
-    return [r[0] for r in rows]
+    """KR 보강 대상 심볼 — symbols_needing_enrichment(market="KR") 재사용."""
+    return [s for s, _m in symbols_needing_enrichment(max_age, market="KR")]
 
 
 def enrich_kr(

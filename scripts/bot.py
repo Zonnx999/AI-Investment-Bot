@@ -19,6 +19,7 @@ Phase 11b — 상시 인터랙티브 봇 (폴링 워커).
 from __future__ import annotations
 
 import time
+from typing import NoReturn
 
 from src import bot_commands, subscribers
 from src.config import settings
@@ -48,18 +49,23 @@ def _extract(update: dict) -> tuple[str | None, str]:
 
 
 def _is_subscriber(chat_id: str, owner: str | None) -> bool:
-    """active 구독자 또는 소유자면 True (조회 명령 접근 제어). 소유자는 승인 없이 허용."""
+    """active 구독자 또는 소유자면 True (조회 명령 접근 제어). 소유자는 승인 없이 허용.
+
+    subscribers.subscriber_status 는 프로세스 단일 connection 재사용 (스키마 초기화 1회) —
+    메시지마다 Turso 왕복을 만들지 않음.
+    """
     if owner and chat_id == owner:
         return True
-    return subscribers.get_status(subscribers._conn(), chat_id) == "active"
+    return subscribers.subscriber_status(chat_id) == "active"
 
 
-def run() -> int:
+def run() -> NoReturn:
+    """폴링 루프 — 정상 흐름에선 반환하지 않음 (종료는 예외로만: Ctrl+C 등)."""
     store = get_storage()
     subscribers.ensure_owner()                       # 소유자 항상 active
     owner = str(settings.telegram_chat_id) if settings.telegram_chat_id else None
     limiter = bot_commands.RateLimiter(max_calls=RATE_MAX_CALLS, window_sec=RATE_WINDOW_SEC)
-    offset = store.get_state(subscribers._OFFSET_NS, subscribers._OFFSET_KEY)
+    offset = subscribers.get_updates_offset()
     logger.info("봇 시작 (offset=%s, long-poll=%ds)", offset, LONG_POLL_SEC)
 
     while True:
@@ -110,13 +116,13 @@ def run() -> int:
         # 3) offset 전진 + 클라우드 동기화 (처리한 메시지 재수신 방지)
         if next_offset is not None:
             offset = next_offset
-            store.put_state(subscribers._OFFSET_NS, subscribers._OFFSET_KEY, offset)
+            subscribers.set_updates_offset(offset)
         store.sync()
 
 
 def main() -> int:
     try:
-        return run()
+        run()                                        # NoReturn — 예외로만 빠져나옴
     except KeyboardInterrupt:
         logger.info("봇 종료 (KeyboardInterrupt)")
         return 0

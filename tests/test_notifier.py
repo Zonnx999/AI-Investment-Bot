@@ -37,7 +37,7 @@ def no_telegram():
 
 
 class _TgHandler(BaseHTTPRequestHandler):
-    mode = "ok"               # "ok" | "error" | "parse_fail"
+    mode = "ok"               # "ok" | "error" | "parse_fail" | "forbidden"
     last_payload: dict = {}
     calls = 0
 
@@ -55,6 +55,9 @@ class _TgHandler(BaseHTTPRequestHandler):
         elif mode == "error":
             body = {"ok": False, "description": "Bad Request: chat not found"}
             code = 400
+        elif mode == "forbidden":
+            body = {"ok": False, "description": "Forbidden: bot was blocked by the user"}
+            code = 403
         else:
             body = {"ok": True, "result": {"message_id": 1}}
             code = 200
@@ -135,11 +138,27 @@ def test_markdown_parse_failure_falls_back_to_plain(telegram_creds, telegram_ser
     assert "parse_mode" not in telegram_server.last_payload  # 재시도는 평문
 
 
-def test_non_parse_error_does_not_retry(telegram_creds, telegram_server):
-    telegram_server.mode = "error"                           # parse 무관 에러
+def test_any_400_retries_plain_once_then_raises(telegram_creds, telegram_server):
+    # 판정이 status_code==400 기반 — 파싱 무관 400(chat not found)도 평문 1회 재시도 후
+    # 같은 400 이라 결국 실패 전파 (동작 결과는 이전과 동일: 예외).
+    telegram_server.mode = "error"
+    with pytest.raises(ApiHttpError):
+        send_telegram("hi", parse_mode="Markdown")
+    assert telegram_server.calls == 2                        # md 시도 → 평문 재시도 → 실패
+
+
+def test_non_400_error_does_not_retry(telegram_creds, telegram_server):
+    telegram_server.mode = "forbidden"                       # 403 — 파싱 실패 아님
     with pytest.raises(ApiHttpError):
         send_telegram("hi", parse_mode="Markdown")
     assert telegram_server.calls == 1                        # 폴백 재시도 없음
+
+
+def test_plain_message_400_does_not_retry(telegram_creds, telegram_server):
+    telegram_server.mode = "error"                           # 400 이지만 평문 전송
+    with pytest.raises(ApiHttpError):
+        send_telegram("hi", parse_mode=None)
+    assert telegram_server.calls == 1                        # parse_mode 없음 → 재시도 없음
 
 
 def test_plain_mode_omits_parse_mode(telegram_creds, telegram_server):

@@ -8,6 +8,7 @@ from src.screener import (
     _safe,
     calculate_health_score,
     calculate_value_score,
+    has_fundamentals,
     health_scorecard,
     value_scorecard,
 )
@@ -128,3 +129,51 @@ def test_nan_metric_scores_zero_not_full():
     card = health_scorecard({"grossProfitMargin": float("nan")})
     gp = next(c for c in card.components if c.label == "총이익률(GP)")
     assert gp.points == 0.0   # NaN → default(0) → 0점 (이전엔 만점 25)
+
+
+# ---------------- has_fundamentals (빈 fundamentals → skip 판정) ----------------
+
+
+def test_has_fundamentals_rejects_empty_and_all_missing():
+    """빈 dict / 전부 None·NaN·빈 문자열 → False (점수 생략 대상)."""
+    assert has_fundamentals({}) is False
+    assert has_fundamentals({"returnOnEquity": None, "evToSales": None}) is False
+    assert has_fundamentals({"returnOnEquity": float("nan"), "x": float("inf")}) is False
+    assert has_fundamentals({"symbol": "", "returnOnEquity": None}) is False
+
+
+def test_has_fundamentals_accepts_real_data_including_zero():
+    """정당한 0 값은 결측이 아님 — True (0 과 '데이터 없음' 구분)."""
+    assert has_fundamentals({"netDebtToEBITDA": 0.0}) is True
+    assert has_fundamentals({"returnOnEquity": 0.15, "evToSales": None}) is True
+
+
+def test_screen_one_skips_when_fundamentals_empty(monkeypatch):
+    """fundamentals 가 빈 종목은 0점 랭킹 바닥 대신 skip(None) (#backlog 점수정확성)."""
+    from src import screener
+
+    monkeypatch.setattr(
+        "src.screener.fetch_quote",
+        lambda t: {"price": 100.0, "name": "Empty Co", "marketCap": 5e9},
+    )
+    monkeypatch.setattr("src.screener.latest_fundamentals", lambda t: {})
+    assert screener.screen_one("EMPTY") is None
+
+    monkeypatch.setattr(
+        "src.screener.latest_fundamentals", lambda t: {"returnOnEquity": None}
+    )
+    assert screener.screen_one("ALLNONE") is None
+
+
+def test_screen_one_scores_when_fundamentals_present(monkeypatch):
+    from src import screener
+
+    monkeypatch.setattr(
+        "src.screener.fetch_quote",
+        lambda t: {"price": 100.0, "name": "Good Co", "marketCap": 5e9,
+                   "lastDividend": 2.0, "sector": "Industrials", "industry": "Machinery"},
+    )
+    monkeypatch.setattr("src.screener.latest_fundamentals", lambda t: dict(GOOD))
+    row = screener.screen_one("GOOD")
+    assert row is not None
+    assert row["total_score"] > 0

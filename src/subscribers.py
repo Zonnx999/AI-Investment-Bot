@@ -67,11 +67,22 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# 스키마 초기화를 이미 마친 Storage 인스턴스 (프로세스당 1회 초기화).
+# 매 호출 executescript 는 libsql 임베디드 레플리카에서 쓰기 배치 = 원격(Turso) 왕복이라,
+# 상시 봇(scripts/bot.py)이 메시지마다 _conn() 을 타면 왕복이 누적됨 → memoize.
+# Storage 인스턴스로 키잉해 테스트의 싱글톤 리셋(tmp DB 교체) 시 자동 재초기화.
+_schema_ready_store = None
+
+
 def _conn():
-    conn = get_storage().conn
-    conn.executescript(_SCHEMA)
-    # 마이그레이션: 구버전 테이블(status 없음)에 컬럼 추가 — Turso stale 레플리카 안전(중복 삼킴)
-    add_column_if_missing(conn, "subscribers", "status", "TEXT NOT NULL DEFAULT 'pending'")
+    global _schema_ready_store
+    store = get_storage()
+    conn = store.conn
+    if _schema_ready_store is not store:
+        conn.executescript(_SCHEMA)
+        # 마이그레이션: 구버전 테이블(status 없음)에 컬럼 추가 — Turso stale 레플리카 안전(중복 삼킴)
+        add_column_if_missing(conn, "subscribers", "status", "TEXT NOT NULL DEFAULT 'pending'")
+        _schema_ready_store = store
     return conn
 
 
@@ -165,6 +176,25 @@ def get_status(conn, chat_id: str) -> str | None:
         "SELECT status FROM subscribers WHERE chat_id=?", (chat_id,)
     ).fetchone()
     return row[0] if row else None
+
+
+def subscriber_status(chat_id: str) -> str | None:
+    """chat_id 의 구독 상태 (public API — conn 관리는 내부에서).
+
+    외부 모듈(scripts/bot.py 등)이 private `_conn()` 을 직접 만지지 않도록 하는 파사드.
+    반환: 'pending' | 'active' | 'inactive' | None(기록 없음).
+    """
+    return get_status(_conn(), chat_id)
+
+
+def get_updates_offset() -> int | None:
+    """텔레그램 getUpdates offset (영속 state). 없으면 None (public API)."""
+    return get_storage().get_state(_OFFSET_NS, _OFFSET_KEY)
+
+
+def set_updates_offset(offset: int) -> None:
+    """텔레그램 getUpdates offset 저장 (public API — 폴링 루프/cron 공용)."""
+    get_storage().put_state(_OFFSET_NS, _OFFSET_KEY, offset)
 
 
 def active_subscribers() -> list[tuple[str, str]]:
@@ -330,8 +360,7 @@ def sync_subscribers(send_notifications: bool = True) -> dict[str, int]:
     """
     from src.notifier import get_updates
 
-    store = get_storage()
-    offset = store.get_state(_OFFSET_NS, _OFFSET_KEY)
+    offset = get_updates_offset()
     try:
         updates = get_updates(offset=offset)
     except DataFetchError as e:
@@ -342,6 +371,6 @@ def sync_subscribers(send_notifications: bool = True) -> dict[str, int]:
     events, next_offset = parse_updates(updates)
     st = apply_events(events, send_notifications=send_notifications)
     if next_offset is not None:
-        store.put_state(_OFFSET_NS, _OFFSET_KEY, next_offset)
-    store.sync()
+        set_updates_offset(next_offset)
+    get_storage().sync()
     return st

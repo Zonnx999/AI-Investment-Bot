@@ -70,6 +70,30 @@ def test_low_vol_score_inverse():
     assert low_vol_score(low)[0] > low_vol_score(high)[0]
 
 
+def test_low_vol_score_returns_vol_pct_single_source():
+    """low_vol_score 가 (점수, 근거, vol_pct) 를 반환 — vol 계산 단일 지점."""
+    from src.signals import annualized_vol_pct, low_vol_score
+
+    rng = np.random.default_rng(1)
+    idx = pd.bdate_range("2023-06-01", periods=300)
+    prices = pd.Series(100 * np.cumprod(1 + rng.normal(0.0005, 0.02, 300)), index=idx)
+
+    score, notes, vol = low_vol_score(prices)
+    assert vol == pytest.approx(annualized_vol_pct(prices))
+    assert vol is not None and vol > 0
+
+    # 데이터 부족 → 중립 점수 + vol None
+    short_score, _, short_vol = low_vol_score(prices.iloc[:10])
+    assert short_score == 50 and short_vol is None
+
+
+def test_annualized_vol_pct_empty_returns_none():
+    from src.signals import annualized_vol_pct
+
+    assert annualized_vol_pct(pd.Series([], dtype=float)) is None
+    assert annualized_vol_pct(pd.Series([100.0])) is None   # 수익률 0개
+
+
 # ---------------- apply_screen_rules ----------------
 
 
@@ -182,3 +206,110 @@ def test_select_screened_tickers_takes_top_n(monkeypatch):
     )
     assert sig.select_screened_tickers(n=2) == ["AAA", "BBB"]
     assert sig.select_screened_tickers(n=10) == ["AAA", "BBB", "CCC"]
+
+
+# ---------------- screen_candidates (음수 earningsYield → PER None) ----------------
+
+
+def test_screen_candidates_negative_earnings_yield_gives_pe_none(monkeypatch):
+    """적자(음수 earningsYield)의 역수는 '음수 PER' 저평가 착시 → 명시적 None."""
+    from src.signals import screen_candidates
+
+    metrics = {
+        "LOSS": {"earningsYield": -0.05, "returnOnEquity": 0.20, "freeCashFlowYield": 0.05},
+        "PROF": {"earningsYield": 0.10, "returnOnEquity": 0.20, "freeCashFlowYield": 0.05},
+    }
+    monkeypatch.setattr(
+        "src.data_fetcher.fetch_key_metrics",
+        lambda t, limit=1: pd.DataFrame([metrics[t]]),
+    )
+    out = {r["ticker"]: r for r in screen_candidates(["LOSS", "PROF"])}
+    assert out["LOSS"]["pe"] is None                      # 음수 → None (P/E 룰 면제 경로)
+    assert out["PROF"]["pe"] == pytest.approx(10.0)       # 양수 → 1/yield
+    # 음수 PER 가 '초저PER' 로 최상단 정렬되지 않음 (None 은 후순위)
+    tickers_sorted = [r["ticker"] for r in screen_candidates(["LOSS", "PROF"])]
+    assert tickers_sorted == ["PROF", "LOSS"]
+
+
+def test_screen_candidates_zero_earnings_yield_gives_pe_none(monkeypatch):
+    from src.signals import screen_candidates
+
+    monkeypatch.setattr(
+        "src.data_fetcher.fetch_key_metrics",
+        lambda t, limit=1: pd.DataFrame(
+            [{"earningsYield": 0.0, "returnOnEquity": 0.15, "freeCashFlowYield": 0.02}]
+        ),
+    )
+    out = screen_candidates(["ZERO"])
+    assert out[0]["pe"] is None
+
+
+# ---------------- generate_signal_report (drawdown_alerts 단일 호출) ----------------
+
+
+@pytest.fixture
+def fresh_state_db(tmp_path, monkeypatch):
+    """signals 가 쓰는 storage 싱글톤을 tmp DB 로 격리 (state 테이블)."""
+    import src.storage as storage_mod
+
+    monkeypatch.setenv("QUANT_BOT_DB_PATH", str(tmp_path / "sig.db"))
+    monkeypatch.setattr(storage_mod, "_storage", None)
+    yield
+    monkeypatch.setattr(storage_mod, "_storage", None)
+
+
+def _wire_macro(monkeypatch, dd_map, regime_label="🟢 위험선호"):
+    """generate_signal_report 의 매크로 fetch 를 합성 데이터로 대체."""
+    regime = type("R", (), {"regime": regime_label})()
+    monkeypatch.setattr("src.macro_analyzer.classify_regime", lambda: regime)
+    monkeypatch.setattr("src.macro_analyzer.fetch_cross_asset_panel",
+                        lambda period="6mo": pd.DataFrame())
+    monkeypatch.setattr("src.macro_analyzer.current_drawdown", lambda panel: dict(dd_map))
+
+
+def test_generate_signal_report_calls_drawdown_alerts_once(fresh_state_db, monkeypatch):
+    """drawdown_alerts 는 실행당 1회 호출 (구현 전 2회) — 알림 의미는 동일."""
+    import src.signals as sig
+
+    _wire_macro(monkeypatch, {"비트코인": -15.0})
+    calls: list = []
+    original = sig.drawdown_alerts
+
+    def counting(dd, prev):
+        calls.append(dd)
+        return original(dd, prev)
+
+    monkeypatch.setattr(sig, "drawdown_alerts", counting)
+
+    # 1) 첫 실행 — 알림 없음(시딩), 호출 1회
+    r1 = sig.generate_signal_report(tickers=())
+    assert r1.first_run is True and r1.alerts == []
+    assert len(calls) == 1
+
+    # 2) 두 번째 실행 (여전히 breach) — 이미 돌파 상태라 중복 알림 없음, 호출 1회
+    calls.clear()
+    r2 = sig.generate_signal_report(tickers=())
+    assert r2.first_run is False and r2.alerts == []
+    assert len(calls) == 1
+
+    # 3) 회복 — info 알림 1건 (의미 보존)
+    _wire_macro(monkeypatch, {"비트코인": -3.0})
+    r3 = sig.generate_signal_report(tickers=())
+    assert len(r3.alerts) == 1 and r3.alerts[0].severity == "info"
+
+
+def test_generate_signal_report_reuses_factor_vol_pct(fresh_state_db, monkeypatch):
+    """변동성 급등 알림 baseline 이 FactorScores.vol_pct 를 재사용 (재계산·재fetch 없음)."""
+    import src.signals as sig
+    from src.signals import FactorScores
+
+    _wire_macro(monkeypatch, {})
+    monkeypatch.setattr(
+        sig, "factor_scores",
+        lambda t: FactorScores(t, 50, 50, 50, 50, [], low_vol=50, vol_pct=42.5),
+    )
+    sig.generate_signal_report(tickers=("NVDA",))
+
+    from src.storage import get_storage
+    saved = get_storage().get_state("signals", "last_run")
+    assert saved["vols"] == {"NVDA": 42.5}

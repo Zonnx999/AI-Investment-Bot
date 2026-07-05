@@ -17,6 +17,15 @@ from src.exceptions import DataValidationError
 TRADING_DAYS_PER_YEAR = 252
 
 
+def clip(v: float, lo: float, hi: float) -> float:
+    """v 를 [lo, hi] 구간으로 자름 (기존 screener/universe 의 `_clip` 통합).
+
+    주의: NaN 입력은 ``min(hi, nan) == hi`` 특성 때문에 hi(만점)로 새어나감 —
+    호출부가 NaN 을 미리 걸러야 함 (screener._safe 참고).
+    """
+    return max(lo, min(hi, v))
+
+
 def close_series(df: pd.DataFrame) -> pd.Series:
     """OHLCV DataFrame 에서 종가 시리즈 추출.
 

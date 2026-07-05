@@ -108,8 +108,13 @@ def send_telegram(
         # Markdown 파싱 실패(불균형 엔티티 등) → 평문으로 재전송해 메시지 유실 방지.
         # legacy Markdown 은 백슬래시 이스케이프를 제대로 지원하지 않으므로, 동적 콘텐츠가
         # 서식을 깨뜨릴 때 가장 견고한 대응은 서식을 포기하고 평문으로 보내는 것.
-        if parse_mode and "parse" in str(e).lower():
-            logger.warning("Markdown 파싱 실패 — 평문으로 재전송 (chat=%s): %s", cid, e)
+        # 판정은 HTTP 400 기준 — 에러 문구("can't parse entities") 매칭은 텔레그램이
+        # 문구를 바꾸면 조용히 깨지는 취약한 방식이라 제거. parse_mode 가 있는 메시지의
+        # 400 은 대부분 파싱 실패이고, 아니어도(chat not found 등) 평문 1회 재시도 후
+        # 같은 예외로 실패하므로 동작 변화 없음. 400 외(403/429/5xx)는 재시도 없이 전파.
+        if parse_mode and e.status_code == 400:
+            logger.warning("sendMessage 400 (Markdown 파싱 실패 추정) — 평문으로 재전송 "
+                           "(chat=%s): %s", cid, e)
             result = _post(None)
         else:
             raise
