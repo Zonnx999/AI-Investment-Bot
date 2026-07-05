@@ -12,6 +12,7 @@ scripts/send_digest.py
     python scripts/send_digest.py --dry-run    # 전송 없이 터미널에만 출력 (미리보기)
     python scripts/send_digest.py --top 8      # 발굴 종목 상위 N개 (기본 6)
     python scripts/send_digest.py --no-sync    # 구독 동기화(getUpdates) 건너뛰고 발송만
+    python scripts/send_digest.py --no-llm     # LLM 한 줄 요약 없이 (환경변수 QUANT_BOT_LLM=0 도 동일)
 
 가입(Phase 11a, 소유자 승인제): 친구가 봇에게 /start → 소유자에게 승인 요청 알림 →
 소유자가 /approve <chat_id> 로 승인하면 다음 실행부터 수신. /stop 으로 해지.
@@ -35,10 +36,18 @@ def main() -> int:
     parser.add_argument("--top", type=int, default=6, help="발굴 종목 상위 N개 (기본 6)")
     parser.add_argument("--no-sync", action="store_true",
                         help="구독 동기화(getUpdates) 건너뛰고 발송만")
+    parser.add_argument("--no-llm", action="store_true",
+                        help="LLM 한 줄 요약 생략 (킬스위치 — QUANT_BOT_LLM=0 과 동일)")
     args = parser.parse_args()
+    use_llm = not args.no_llm
 
     if args.dry_run:
         digest = build_daily_digest(market=args.market, top_n=args.top)
+        if use_llm:
+            # 요약은 best-effort — 실패/미설정/킬스위치 시 None → 원문 그대로 미리보기
+            from src.digest import with_summary
+            from src.llm import summarize_safe
+            digest = with_summary(digest, summarize_safe(digest))
         print(digest)  # 미리보기 — stdout deliverable
         return 0
 
@@ -51,7 +60,7 @@ def main() -> int:
                   f"/ 거절 {sub['denied']} / 해지 {sub['unsubscribed']}")
 
     # 2) 전 구독자에게 브로드캐스트 (시장별)
-    result = send_daily_digest(market=args.market, top_n=args.top)
+    result = send_daily_digest(market=args.market, top_n=args.top, use_llm=use_llm)
     if result["recipients"] == 0:
         print("⚠️ 구독자 없음 — TELEGRAM_CHAT_ID(소유자) 또는 /start 가입 확인")
         return 1

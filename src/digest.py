@@ -46,6 +46,16 @@ def _alert_line(alert) -> str:
     return f"  {_ALERT_ICON.get(alert.severity, 'ℹ️')} {alert.message}"
 
 
+def with_summary(text: str, summary: str | None) -> str:
+    """LLM 요약을 다이제스트 맨 위에 붙임 (순수 함수).
+
+    요약은 선택적 표현 레이어(ROADMAP §2.1) — 없으면(None/빈 문자열) 원문 그대로.
+    """
+    if not summary:
+        return text
+    return f"🧠 {summary}\n\n{text}"
+
+
 def format_digest(
     report: SignalReport,
     predictions: list[LeadLagResult],
@@ -53,6 +63,7 @@ def format_digest(
     market: str = "US",
     kr_picks: "list | None" = None,
     names: "dict[str, str] | None" = None,
+    summary: str | None = None,
 ) -> str:
     """리포트 객체들 → 텔레그램 Markdown 메시지 (순수 함수).
 
@@ -64,6 +75,9 @@ def format_digest(
 
     names: 티커 → 회사명 맵(선택). US 발굴/스크리닝 종목에 회사명을 곁들임
     (순수 함수 유지를 위해 조회는 build_daily_digest 가 담당, 여기엔 주입만).
+
+    summary: LLM 한 줄 요약(선택). 주어지면 맨 위에 렌더 — 생성은 src/llm.py,
+    호출은 오케스트레이터(send_daily_digest / scripts) 책임 (순수 함수 유지).
     """
     now = now or datetime.now(KST)
     market = (market or "US").upper()
@@ -151,7 +165,7 @@ def format_digest(
 
     lines.append("")
     lines.append("_상관 기반 통계 모델 — 투자 결정은 본인 판단_")
-    return "\n".join(lines)
+    return with_summary("\n".join(lines), summary)
 
 
 def _us_names(symbols: list[str]) -> dict[str, str]:
@@ -240,11 +254,14 @@ def send_daily_digest(
     market: str = "us",
     top_n: int = 6,
     tickers: tuple[str, ...] | None = None,
+    use_llm: bool = True,
 ) -> dict[str, int]:
     """시장별 다이제스트 1회 조립 후 **active 구독자 전원**에게 브로드캐스트 (Phase 11a).
 
     무거운 조립(fetch+분석)은 한 번만, 전송은 경량 N회. 소유자는 ensure_owner 로 항상 포함.
     개별 전송 실패는 best-effort (한 명 실패가 나머지·파이프라인을 막지 않음).
+    use_llm=True 면 LLM 한 줄 요약을 맨 위에 시도 (best-effort — 실패 시 요약만 생략,
+    ROADMAP §2.1). ``QUANT_BOT_LLM=0`` / ``--no-llm`` 킬스위치로 끌 수 있음.
     Returns {"sent", "failed", "recipients"}.
     """
     from src import subscribers
@@ -253,6 +270,9 @@ def send_daily_digest(
 
     subscribers.ensure_owner()
     text = build_daily_digest(market=market, top_n=top_n, tickers=tickers)   # 무거운 조립 1회
+    if use_llm:
+        from src import llm
+        text = with_summary(text, llm.summarize_safe(text))   # 실패 시 None → 원문 그대로
     recipients = subscribers.active_subscribers()
 
     sent = failed = 0
