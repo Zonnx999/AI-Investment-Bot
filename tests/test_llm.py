@@ -273,3 +273,34 @@ def test_summarize_error_messages_never_contain_key(minimax_key, llm_server):
     with pytest.raises(ApiAuthError) as exc:
         summarize(DIGEST)
     assert FAKE_KEY not in str(exc.value)
+
+
+# ---------------- 리뷰 회귀: reasoning 태그 / Markdown 문자 제거 ----------------
+
+
+def test_summarize_strips_think_blocks(minimax_key, llm_server):
+    """reasoning 모델의 <think> 블록은 사용자에게 노출되면 안 됨."""
+    llm_server.content = "<think>사고 과정 blah blah</think>오늘 시장은 조용했습니다."
+    assert llm_mod.summarize(DIGEST) == "오늘 시장은 조용했습니다."
+
+
+def test_summarize_strips_unclosed_think_block(minimax_key, llm_server):
+    """max_tokens 절단 등으로 닫는 태그가 없는 <think> — 이후 전부 버림."""
+    llm_server.content = "요약 문장입니다. <think>잘린 사고 과정"
+    assert llm_mod.summarize(DIGEST) == "요약 문장입니다."
+
+
+def test_summarize_strips_markdown_entities(minimax_key, llm_server):
+    """*·_·`·[ 가 남으면 Markdown 다이제스트 전체가 파싱 실패(평문 폴백·전송 2배)."""
+    llm_server.content = "오늘 *시장* 은 _조용_ 했고 `BTC` 는 [강세]였다."
+    out = llm_mod.summarize(DIGEST)
+    assert not any(ch in out for ch in "*_`[")
+    assert "시장" in out and "강세]" in out            # 내용 자체는 보존 (여는 [ 만 제거)
+
+
+def test_summarize_reasoning_only_response_is_failure(minimax_key, llm_server):
+    """<think> 블록뿐인 응답 → 정규화 후 빈 문자열 = DataValidationError → safe 는 None."""
+    llm_server.content = "<think>결론을 못 냈다</think>"
+    with pytest.raises(DataValidationError):
+        llm_mod.summarize(DIGEST)
+    assert llm_mod.summarize_safe(DIGEST) is None

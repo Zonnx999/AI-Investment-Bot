@@ -280,11 +280,15 @@ def _broadcast(text: str) -> dict[str, int]:
     return {"sent": sent, "failed": len(recipients) - sent, "recipients": len(recipients)}
 
 
-def apply_events(events: list[SubEvent], send_notifications: bool = True) -> dict[str, int]:
+def apply_events(events: list[SubEvent], send_notifications: bool = True,
+                 interactive_buttons: bool = False) -> dict[str, int]:
     """파싱된 구독 이벤트들을 DB 에 반영 + 알림. (fetch/offset 무관 — 재사용 가능)
 
     cron(sync_subscribers)과 상시 폴링 루프(scripts/bot.py)가 공유. approve/deny/pending 은
     **소유자(telegram_chat_id)** 가 보낸 것만 처리. 조회 명령 등 "ignore" 는 무시.
+    interactive_buttons: 가입요청 알림에 인라인 [승인][거절] 버튼 부착 여부.
+    **callback_query 를 처리할 수 있는 상시 봇(scripts/bot.py)만 True** — cron 경로가
+    버튼을 붙이면 소유자의 탭이 처리자 없이 offset 만 전진해 조용히 유실됨.
     Returns {"requests","approved","denied","unsubscribed","ignored_admin"}.
     """
     from src.notifier import send_safe
@@ -316,13 +320,14 @@ def apply_events(events: list[SubEvent], send_notifications: bool = True) -> dic
                 # 소유자에게 승인 요청 알림 — 신규 요청일 때만 (중복 알림 방지).
                 # 인라인 [✅ 승인][❌ 거절] 버튼 부착 — 탭 한 번으로 처리 (텍스트 명령도 유지).
                 if send_notifications and owner:
-                    from src.bot_commands import approval_keyboard
-
+                    kb = None
+                    if interactive_buttons:
+                        from src.bot_commands import approval_keyboard
+                        kb = approval_keyboard(ev.chat_id)
                     send_safe(
                         f"🔔 가입 요청: {ev.name or '(이름없음)'} (chat_id={ev.chat_id})\n"
                         f"승인: /approve {ev.chat_id}    거절: /deny {ev.chat_id}",
-                        owner, parse_mode=None,
-                        reply_markup=approval_keyboard(ev.chat_id),
+                        owner, parse_mode=None, reply_markup=kb,
                     )
 
         elif ev.kind == "unsubscribe":

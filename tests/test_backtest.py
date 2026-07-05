@@ -277,3 +277,59 @@ def test_check_backtest_script_imports_offline():
     import scripts.check_backtest as mod
 
     assert callable(mod.main)
+
+
+# ---------------- 리뷰 회귀: MDD 초기자본 앵커 / 발표지연 보정 ----------------
+
+
+def test_max_drawdown_anchored_at_initial_capital():
+    """표본 첫 기간부터 시작되는 하락도 MDD 에 잡혀야 함 (초기자본 1.0 앵커).
+
+    회귀: equity 가 (1+r0) 부터 시작하면 100→90 후 횡보가 MDD 0% 로 나왔음.
+    """
+    vals = [100.0, 90.0] + [90.0] * 28          # 첫날 -10% 후 횡보
+    prices = _prices(vals)
+    res = run_backtest(prices, buy_and_hold_positions(prices), cost_bps=0.0)
+    assert res.max_drawdown_pct == pytest.approx(-10.0)
+    assert res.total_return_pct == pytest.approx(-10.0)
+
+
+def test_max_drawdown_monotone_decline_full_depth():
+    """단조 하락 100→70 은 MDD -30% (앵커 없으면 -30/(1+r0) 로 과소보고)."""
+    vals = list(np.linspace(100.0, 70.0, 30))
+    prices = _prices(vals)
+    res = run_backtest(prices, buy_and_hold_positions(prices), cost_bps=0.0)
+    assert res.max_drawdown_pct == pytest.approx(-30.0)
+
+
+def test_lead_lag_publication_lag_delays_tradable_signal():
+    """lag=1 신호는 발표지연(기본 1개월) 때문에 한 달 늦게 체결되어야 함.
+
+    회귀: 미발표 데이터로 매매하는 선견편향 — lag ≤ publication_lag 이면
+    전략 수익이 비현실적으로 완벽하게 나왔음. 적중률(통계 측정)은 보정 무관.
+    """
+    leading = _monthly_noise(seed=2)
+    target = leading.shift(1).dropna()             # 정확히 1개월 선행
+    rets = pd.Series(np.where(target > 0, 0.02, -0.02), index=target.index)
+
+    biased = evaluate_lead_lag_oos(
+        leading, target, lag=1, target_returns=rets, min_train=24,
+        cost_bps=0.0, publication_lag_months=0,    # 보정 끔 = 종전 동작
+    )
+    realistic = evaluate_lead_lag_oos(
+        leading, target, lag=1, target_returns=rets, min_train=24, cost_bps=0.0,
+    )                                              # 기본값 publication_lag_months=1
+    # 보정 전: 완벽 예측이 그대로 체결 → 하락월 전부 회피
+    assert biased.strategy_return_pct > biased.buyhold_return_pct
+    # 보정 후: 신호가 한 달 밀려 더 이상 '완벽' 하지 않음 — 수익이 달라져야 함
+    assert realistic.strategy_return_pct != pytest.approx(biased.strategy_return_pct)
+    assert realistic.strategy_return_pct < biased.strategy_return_pct
+    # 적중률은 통계 측정이라 보정과 무관하게 동일
+    assert realistic.accuracy_pct == pytest.approx(biased.accuracy_pct)
+
+
+def test_lead_lag_rejects_negative_publication_lag():
+    leading = _monthly_noise()
+    target = leading.shift(3).dropna()
+    with pytest.raises(ValueError):
+        evaluate_lead_lag_oos(leading, target, lag=3, publication_lag_months=-1)

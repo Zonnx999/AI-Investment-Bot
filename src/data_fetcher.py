@@ -572,6 +572,10 @@ def fetch_stock_news(symbol: str, limit: int = 5) -> list[dict]:
     필드명이 다르면 이 파서만 고치면 됨 — 호출부(bot_commands.format_news)는
     title/publishedDate/site/url 4개 키의 dict 리스트만 봄.
 
+    캐시 주의: 프로젝트 컨벤션상 @cached 는 **빈 결과를 캐시하지 않으므로**
+    뉴스가 없는 티커는 /news 호출마다 FMP 실콜이 나감 — 남용 방어는
+    bot_commands 의 유저별 rate limiter 가 담당 (의도된 트레이드오프).
+
     Parameters
     ----------
     symbol : str

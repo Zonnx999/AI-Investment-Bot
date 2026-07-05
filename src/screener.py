@@ -100,12 +100,15 @@ def has_fundamentals(metrics: dict) -> bool:
     → 호출부(screen_one / universe._compute_enrich)가 **점수 생략(skip)** 하도록.
 
     주의: 값이 '정당한 0' (예: netDebtToEBITDA=0.0) 이면 True — 결측과 0 을 구분.
+    문자열은 전부 비데이터 취급 — 실제 FMP 행은 수치 메트릭이 전부 null 이어도
+    식별자 문자열(symbol/fiscalYear/period/reportedCurrency)을 항상 포함하므로,
+    문자열을 데이터로 세면 이 가드가 실데이터에서 절대 발화하지 않음.
     """
     for v in metrics.values():
         if v is None:
             continue
-        if isinstance(v, str) and not v.strip():
-            continue
+        if isinstance(v, str):
+            continue   # 식별자·"N/A" 류 — 점수 입력은 전부 수치
         if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
             continue
         return True

@@ -114,7 +114,10 @@ def run() -> NoReturn:
                     # help/menu 응답에 버튼 메뉴 부착 (소유자는 관리자 버튼 포함)
                     kb = (bot_commands.main_keyboard(owner is not None and chat_id == owner)
                           if cmd.kind == "help" else None)
-                    send_safe(reply, chat_id, reply_markup=kb)
+                    # /news 는 의도적 평문([site]·URL 포함) — Markdown 으로 보내면
+                    # 매번 400 → 평문 폴백으로 전송이 2배가 되므로 처음부터 평문.
+                    pm = None if cmd.kind == "news" else "Markdown"
+                    send_safe(reply, chat_id, parse_mode=pm, reply_markup=kb)
             except Exception:  # noqa: BLE001 — poison 메시지가 봇을 크래시 루프시키지 않도록
                 logger.exception("명령 처리 실패 (chat=%s) — 건너뜀", chat_id)
 
@@ -122,7 +125,8 @@ def run() -> NoReturn:
         #    callback_query update 는 메시지가 없어 이벤트 없이 offset 만 전진)
         events, next_offset = subscribers.parse_updates(updates)
         try:
-            subscribers.apply_events(events)
+            # 상시 봇만 인라인 버튼 부착 — callback_query 를 이 루프가 처리하므로.
+            subscribers.apply_events(events, interactive_buttons=True)
         except Exception:  # noqa: BLE001 — 한 배치 처리 실패가 루프를 죽이지 않도록
             logger.exception("구독 이벤트 처리 실패 — 계속 진행")
 

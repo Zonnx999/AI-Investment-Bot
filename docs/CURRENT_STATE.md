@@ -68,7 +68,12 @@
   walk_forward_topn(모멘텀 top-N vs 동일가중 벤치) / evaluate_lead_lag_oos(확장윈도우 OOS 방향 적중률).
 - ✅ **Phase 11b 잔여 완료**: 인라인 `[승인][거절]` 버튼(callback_query, 멱등, 소유자 게이트) + `/news <티커>`(FMP, 30분 캐시).
 - ✅ **LLM 한 줄 요약** (`src/llm.py`): 합의 설계(표현 레이어만·실패 시 생략 폴백·`--no-llm`/`QUANT_BOT_LLM` 킬스위치).
-- 테스트 216 → **340개** (오프라인 ~13초, 전부 그린).
+- ✅ **적대적 리뷰 라운드** (4관점 병렬 리뷰 → 발견별 반박 검증): 확정 버그 수정 —
+  백테스트 MDD 초기자본 앵커 누락(첫 기간 하락 과소보고) · lead-lag 발표지연 선견편향
+  (`publication_lag_months`, 기본 1) · `has_fundamentals` 가 FMP 식별자 문자열에 오발화 ·
+  cron 경로 인라인 버튼 부착 시 탭 유실(`interactive_buttons` 게이트) · LLM `<think>`/Markdown
+  문자 유출 · `/news` 응답 평문 전송(400 폴백 2배 방지).
+- 테스트 216 → **350개** (오프라인 ~13초, 전부 그린).
 - ⚠️ **머지 전 라이브 스모크 체크리스트** (§4.10 #1·#3 — 오프라인 세션이라 미검증):
   1. FMP `/news/stock` 엔드포인트 경로·필드명(title/publishedDate/site/url) 1콜 확인 → 다르면 `fetch_stock_news` 파서만 수정
   2. MiniMax 모델 id(기본 `minimaxai/minimax-m2`)·응답 스키마 1콜 확인 (`MINIMAX_MODEL` 로 교체 가능; 틀려도 다이제스트는 정상 발송)

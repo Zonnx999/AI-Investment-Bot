@@ -177,3 +177,17 @@ def test_screen_one_scores_when_fundamentals_present(monkeypatch):
     row = screener.screen_one("GOOD")
     assert row is not None
     assert row["total_score"] > 0
+
+
+def test_has_fundamentals_ignores_identifier_strings():
+    """실제 FMP 행 형태 — 수치 메트릭이 전부 null 이어도 식별자 문자열
+    (symbol/fiscalYear/period/reportedCurrency)은 항상 존재. 문자열을 데이터로
+    세면 skip 가드가 실데이터에서 절대 발화하지 않으므로 전부 무시해야 함."""
+    shell_row = {
+        "symbol": "XYZ", "fiscalYear": "2024", "period": "FY",
+        "reportedCurrency": "USD",
+        "returnOnEquity": None, "earningsYield": None, "evToSales": float("nan"),
+    }
+    assert has_fundamentals(shell_row) is False
+    # 식별자 + 실제 수치 하나라도 있으면 True
+    assert has_fundamentals({**shell_row, "returnOnEquity": 0.12}) is True

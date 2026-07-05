@@ -231,7 +231,15 @@ def _result_from_returns(
             periods_per_year
         )
 
-    mdd_pct = float(max_drawdown(equity).max_dd_pct)   # risk_engine 재사용
+    # MDD 는 초기자본(1.0)을 피크 후보에 포함해야 함 — equity 가 (1+r0) 부터 시작하면
+    # 표본 첫 기간부터 시작되는 하락이 러닝맥스에 안 잡혀 과소보고됨
+    # (예: 100→90 후 횡보가 MDD 0% 로 나옴). 한 기간 앞에 1.0 앵커를 붙여 계산.
+    if len(net) >= 2:
+        anchor_ts = net.index[0] - (net.index[1] - net.index[0])
+    else:
+        anchor_ts = net.index[0] - pd.Timedelta(days=1)
+    equity_anchored = pd.concat([pd.Series([1.0], index=[anchor_ts]), equity])
+    mdd_pct = float(max_drawdown(equity_anchored).max_dd_pct)   # risk_engine 재사용
 
     hit_basis = gross_returns if gross_returns is not None else net
     if active_mask is not None:
@@ -524,6 +532,7 @@ def evaluate_lead_lag_oos(
     min_train: int = MIN_TRAIN_MONTHS,
     min_oos: int = MIN_OOS_MONTHS,
     cost_bps: float = DEFAULT_COST_BPS,
+    publication_lag_months: int = 1,
 ) -> LeadLagBacktest:
     """확장 윈도우 아웃오브샘플로 lead-lag 예측의 방향 적중률을 검증.
 
@@ -543,6 +552,13 @@ def evaluate_lead_lag_oos(
         전략의 총수익과 매수후보유 총수익을 함께 계산. 없으면 적중률만.
     cost_bps : float
         long/flat 전략의 편도 거래비용 (bps).
+    publication_lag_months : int
+        선행지표의 발표 지연(월). FRED 월간 거시지표는 해당 월 데이터가 다음 달
+        중순에야 공개되므로 기본 1. lag ≤ publication_lag 이면 t-lag 시점 값이
+        t 월초에 아직 미발표 → **전략 수익 계산에서만** 신호를 그만큼 늦춰 체결해
+        실거래 불가능한 선견편향을 제거. 적중률(accuracy)은 통계적 관계 측정이라
+        보정하지 않음 — lag ≤ publication_lag 인 관계는 '실시간 매매용' 이 아니라
+        '관계 존재 검증용' 으로 해석할 것.
 
     Raises
     ------
@@ -553,6 +569,8 @@ def evaluate_lead_lag_oos(
 
     if lag < 1:
         raise ValueError(f"lag 는 1 이상이어야 합니다 (0 은 '선행'이 아님): {lag}")
+    if publication_lag_months < 0:
+        raise ValueError(f"publication_lag_months 는 0 이상: {publication_lag_months}")
 
     joined = pd.concat([leading.shift(lag), target], axis=1, join="inner").dropna()
     n = len(joined)
@@ -591,9 +609,13 @@ def evaluate_lead_lag_oos(
     buyhold_ret_pct: float | None = None
     equity: pd.Series | None = None
     if target_returns is not None:
-        rets = target_returns.reindex(pred_up.index).dropna()
+        # 발표 지연 보정 — lag 개월 전 지표가 체결 시점에 이미 공개됐어야 거래 가능.
+        # 부족분(extra)만큼 신호를 늦춰 '미발표 데이터로 매매' 하는 선견편향 제거.
+        extra = max(0, publication_lag_months + 1 - lag)
+        signal = pred_up.shift(extra).dropna().astype(bool) if extra else pred_up
+        rets = target_returns.reindex(signal.index).dropna()
         if not rets.empty:
-            pos = pred_up.reindex(rets.index).astype(float)
+            pos = signal.reindex(rets.index).astype(float)
             turnover = pos.diff().abs()
             turnover.iloc[0] = abs(float(pos.iloc[0]))
             net = pos * rets - turnover * (cost_bps / 1e4)

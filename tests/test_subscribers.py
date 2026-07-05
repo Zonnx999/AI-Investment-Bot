@@ -123,15 +123,27 @@ def test_conn_schema_init_once_per_storage(fresh_db, monkeypatch):
     """
     import src.storage as storage_mod
 
+    # 초기화 횟수를 실제로 계수 — memo 포인터만 봐서는 '매번 초기화하면서 memo 도
+    # 매번 갱신' 하는 회귀를 못 잡음. add_column_if_missing 은 init 블록에서만 불림.
+    init_calls: list[int] = []
+    real_add = subscribers.add_column_if_missing
+    monkeypatch.setattr(
+        subscribers, "add_column_if_missing",
+        lambda *a, **k: init_calls.append(1) or real_add(*a, **k),
+    )
+    monkeypatch.setattr(subscribers, "_schema_ready_store", None)   # memo 초기화
+
     c1 = subscribers._conn()
     c2 = subscribers._conn()
     assert c1 is c2                                          # 동일 connection 재사용
+    assert len(init_calls) == 1                              # 스키마 초기화는 딱 1회
     store_before = storage_mod.get_storage()
     assert subscribers._schema_ready_store is store_before   # memo 가 현재 store 를 가리킴
 
     # 싱글톤 리셋 → 새 storage 에 다시 초기화 (stale memo 로 스키마 누락되면 안 됨)
     monkeypatch.setattr(storage_mod, "_storage", None)
     c3 = subscribers._conn()
+    assert len(init_calls) == 2                              # 새 store 에 재초기화 1회
     assert subscribers._schema_ready_store is storage_mod.get_storage()
     assert subscribers.get_status(c3, "nobody") is None      # subscribers 테이블 존재
 
@@ -367,7 +379,8 @@ def test_request_owner_notification_carries_inline_buttons(fresh_db, owner_set, 
         lambda text, chat_id=None, parse_mode="Markdown", reply_markup=None:
             sent.append((chat_id, text, reply_markup)) or True,
     )
-    subscribers.apply_events([subscribers.SubEvent(1, "100", "alice", "request")])
+    subscribers.apply_events([subscribers.SubEvent(1, "100", "alice", "request")],
+                             interactive_buttons=True)
 
     owner_msgs = [(txt, kb) for cid, txt, kb in sent if cid == "1"]
     assert len(owner_msgs) == 1
@@ -379,6 +392,23 @@ def test_request_owner_notification_carries_inline_buttons(fresh_db, owner_set, 
     # 신청자에게 가는 접수 안내에는 버튼 없음
     applicant = [(txt, kb) for cid, txt, kb in sent if cid == "100"]
     assert applicant and applicant[0][1] is None
+
+
+def test_cron_path_does_not_attach_inline_buttons(fresh_db, owner_set, monkeypatch):
+    """기본값(interactive_buttons=False) = cron 경로 — callback_query 처리자가 없어
+    버튼을 붙이면 소유자의 탭이 조용히 유실되므로 버튼 미부착이어야 함."""
+    sent: list[tuple[str, str, dict | None]] = []
+    monkeypatch.setattr(
+        "src.notifier.send_safe",
+        lambda text, chat_id=None, parse_mode="Markdown", reply_markup=None:
+            sent.append((chat_id, text, reply_markup)) or True,
+    )
+    subscribers.apply_events([subscribers.SubEvent(1, "200", "bob", "request")])
+
+    owner_msgs = [(txt, kb) for cid, txt, kb in sent if cid == "1"]
+    assert len(owner_msgs) == 1
+    assert owner_msgs[0][1] is None                       # 버튼 없음
+    assert "/approve 200" in owner_msgs[0][0]             # 텍스트 명령 안내는 유지
 
 
 def test_decide_request_shared_core(fresh_db, monkeypatch):
