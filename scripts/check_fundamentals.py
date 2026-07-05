@@ -156,11 +156,12 @@ def main(ticker: str = "CPNG") -> None:
                 bs_by_year.setdefault(d.year, r)
 
         for date, row in metrics.iterrows():
+            # 음수 yield(적자)는 역산하면 음수 P/E 가 되어 '저PER 저평가'처럼 보임 → None 처리
             ey = pick(row, ["earningsYield"])
-            pe = (1.0 / ey) if (ey not in (None, 0)) else None
+            pe = (1.0 / ey) if (ey is not None and ey > 0) else None
 
             fcfy = pick(row, ["freeCashFlowYield"])
-            pfcf = (1.0 / fcfy) if (fcfy not in (None, 0)) else None
+            pfcf = (1.0 / fcfy) if (fcfy is not None and fcfy > 0) else None
 
             roe = pick(row, ["returnOnEquity", "roe"])
 
