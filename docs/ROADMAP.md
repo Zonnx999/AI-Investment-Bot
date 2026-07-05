@@ -21,8 +21,8 @@
 - [x] 조회는 **active 구독자(+소유자)만** (게이팅), reply 키보드 버튼(타이핑↓), Markdown 평문 폴백
 - [x] **`/announce` 소유자 공지** — active 구독자 전원에 평문 브로드캐스트(업데이트·정정 알림). 소유자 게이트 (06-29)
 - [x] **다이제스트 UX** — 회사명·점수 범례·시각적 위계·예측 가독성 (06-29)
-- [ ] **인라인 `[승인][거절]` 버튼** — 가입요청 알림에서 탭 승인 (callback_query 처리 필요) ← 다음 1순위
-- [ ] `/news <티커>` — `NEWS_API_KEY`/FMP 뉴스 (응답 캐시 + rate limit), (선택) Haiku 센티먼트
+- [x] **인라인 `[승인][거절]` 버튼** — callback_query 처리, 소유자 게이트, 이중탭 멱등, 처리 후 버튼 제거 (07-05, 브랜치. ⚠️ 실 텔레그램 스모크 후 배포)
+- [x] `/news <티커>` — FMP `/news/stock` 30분 캐시 + rate limit, 평문 포맷 (07-05, 브랜치. ⚠️ 엔드포인트·필드 라이브 스모크 필요. Haiku 센티먼트는 미포함)
 - [ ] (선택) `/regime`·`/predict`·`/me`(내 상태) 즉답 — 단 국면/예측은 라이브 fetch라 봇에 약간 무거움
 
 ### Phase 12 — 대시보드 통합 ✅ (2026-06-23, Pages 라이브 06-29)
@@ -41,24 +41,25 @@
 ## 2. 부록 — 선택 기능 / 백로그
 
 ### 2.1 다음 후보 기능
-- **LLM 요약 한 줄** — 다이제스트 맨 위 한 문단. 후보: **MiniMax-M3(NVIDIA API, `MINIMAX_API_KEY` 이미 .env 에 있음)** 또는 Haiku.
-  방향만 합의(2026-06-29, 구현 대기): 결정론적 다이제스트 **위 표현 레이어만** — 숫자·티커 생성/수정 금지,
-  API 실패/레이트리밋 시 **요약 생략 폴백**(다이제스트는 그대로 발송, §4.10 #10 사상), 하루 1회 호출.
-  배선: `src/llm.py`(호출+폴백, http 세션 재사용) + `config` 에 키 로딩 + http 마스킹 등록. 구현 전 모델 id 검증(§4.10 #3).
-- **백테스트 프레임워크** — Phase 5 신호 / Phase 6 예측의 과거 성과 검증 (예측 R² 우려 정량 해소)
+- ✅ **LLM 요약 한 줄** — 구현 완료 (07-05, 브랜치): `src/llm.py`(summarize/summarize_safe/킬스위치 `QUANT_BOT_LLM`),
+  합의 설계 그대로 — 표현 레이어만, 실패 시 요약 생략 폴백, `--no-llm` 플래그.
+  ⚠️ 활성화 전 모델 id(기본 `minimaxai/minimax-m2`)·응답 스키마 라이브 스모크 필수(§4.10 #3, `.env.example` 참조).
+- ✅ **백테스트 프레임워크** — 구현 완료 (07-05, 브랜치): `src/backtest.py`(순수 엔진: run_backtest/walk_forward_topn/
+  evaluate_lead_lag_oos) + `scripts/check_backtest.py`(실데이터 대시보드). 예측 R² 우려는 OOS 방향 적중률로 정량화.
 - **지표 확장** (구 UPGRADE_PLAN P2) — VIX/DXY → `classify_regime` 보강, earnings revision, short interest 알림
 - **포트폴리오 최적화 엔진** (구 P3) — 자산군 비중 산출 (All Weather 비중 검증과 연결)
 - **알파 신호** (구 P4) — insider trading 알림, earnings-call NLP(LLM), 한국 BOK ECOS API(`ECOS_API_KEY`)
 - **미구현(의존성 대기)**: Google Trends(pytrends, 불안정), SEC EDGAR 13F(파싱·45일 지연)
 - **Streamlit** — Phase 12 대시보드로 대체됨, skip
 
-### 2.2 코드 개선 backlog (출처: 코드리뷰 2026-06-23 — [BUG] 5건은 06-29 수정 완료)
-- **점수 정확성**: KR PBR 공식 완화(중대형주에 가혹, PBR 2.0→0점), KR 배당 DART 연동(현재 0 고정),
-  빈 fundamentals 는 0점 대신 skip(현재 누락=조용한 저점), 음수 earningsYield→PER `None` 명시
-- **DRY/구조**: `_clip`·`_MARKET_LABEL` → `utils`, vol 계산 중복 → `FactorScores.vol_pct`,
-  `subscribers` private 심볼 public API + 봇 conn 재사용(매 메시지 Turso 왕복↓), `run()→NoReturn`,
-  `symbols_needing_enrichment(market)` 파라미터화
-- **견고성**: Markdown 폴백을 `status_code==400` 기반으로(현 "parse" 문자열 매칭은 취약), `drawdown_alerts` 단일 호출 리팩토링
+### 2.2 코드 개선 backlog — ✅ 대부분 완료 (07-05, 브랜치)
+- [x] **점수 정확성**: KR PBR 공식 완화(`_kr_pbr_points`: ≤0.5 만점, 4.5에서 0점 선형), 빈 fundamentals skip
+  (`has_fundamentals`, scan 랭킹 제외 — **DB 재점수 필요**), 음수 earningsYield→PER `None`(signals + check_fundamentals)
+- [x] **DRY/구조**: `_clip`→`utils.clip`, vol 단일화(`annualized_vol_pct`+`FactorScores.vol_pct`),
+  `subscribers` 공개 API(subscriber_status/get·set_updates_offset)+스키마 init 메모이즈(메시지당 Turso 왕복 제거),
+  `run()→NoReturn`, `symbols_needing_enrichment(market)`. `_MARKET_LABEL` 은 digest 단독 사용이라 이동 안 함
+- [x] **견고성**: Markdown 폴백 `status_code==400` 기반, `drawdown_alerts` 단일 호출
+- [ ] **잔여**: KR 배당 DART 연동(현재 0 고정 — DART API 필드 라이브 검증 필요해 보류)
 
 ---
 

@@ -58,6 +58,24 @@
   - 박스 `.env` 에 `FRED_API_KEY`·`FMP_API_KEY` (US 다이제스트 팩터·국면용). KR 은 키 없이도 동작.
 - ⏳ **다음 기능 후보** (`ROADMAP.md §1`): 인라인 `[승인][거절]` 버튼(승인 부담↓), `/news`, `/regime`·`/predict` 즉답.
 
+### 인계 (2026-07-05) — 브랜치 `claude/project-improvement-exploration-cf70v4`
+- 🔀 **이 섹션은 개선 탐사 브랜치 전용** (사용자 요청으로 phase-gate 예외 세션, 멀티에이전트 병렬 작업).
+  main 머지 전 아래 라이브 스모크 체크리스트 필수.
+- ✅ **ROADMAP §2.2 백로그 일괄 반영**: KR PBR 완화(`_kr_pbr_points`) · 빈 fundamentals skip(`has_fundamentals`) ·
+  음수 earningsYield→PER None · `utils.clip` 통합 · vol 단일화(`FactorScores.vol_pct`) · subscribers 공개 API +
+  스키마 init 메모이즈 · `symbols_needing_enrichment(market)` · Markdown 폴백 400 기반 · drawdown_alerts 단일 호출.
+- ✅ **백테스트 프레임워크** (`src/backtest.py` + `scripts/check_backtest.py`): run_backtest(거래비용, t→t+1 무선견편향) /
+  walk_forward_topn(모멘텀 top-N vs 동일가중 벤치) / evaluate_lead_lag_oos(확장윈도우 OOS 방향 적중률).
+- ✅ **Phase 11b 잔여 완료**: 인라인 `[승인][거절]` 버튼(callback_query, 멱등, 소유자 게이트) + `/news <티커>`(FMP, 30분 캐시).
+- ✅ **LLM 한 줄 요약** (`src/llm.py`): 합의 설계(표현 레이어만·실패 시 생략 폴백·`--no-llm`/`QUANT_BOT_LLM` 킬스위치).
+- 테스트 216 → **340개** (오프라인 ~13초, 전부 그린).
+- ⚠️ **머지 전 라이브 스모크 체크리스트** (§4.10 #1·#3 — 오프라인 세션이라 미검증):
+  1. FMP `/news/stock` 엔드포인트 경로·필드명(title/publishedDate/site/url) 1콜 확인 → 다르면 `fetch_stock_news` 파서만 수정
+  2. MiniMax 모델 id(기본 `minimaxai/minimax-m2`)·응답 스키마 1콜 확인 (`MINIMAX_MODEL` 로 교체 가능; 틀려도 다이제스트는 정상 발송)
+  3. 인라인 버튼 실 텔레그램: 탭 승인/거절, 이중탭 "이미 처리됨", 48h 경과 메시지 edit 거부 시 로그만 남는지
+  4. subscribers/universe 변경분 실 Turso 레플리카 1회 스모크 (tuple 파라미터·stale 레플리카 규칙)
+  5. 점수 공식 변경(KR PBR·빈 fundamentals skip) → **DB 재점수**: `python scripts/build_universe.py --enrich --force`
+
 ### 인계 (2026-06-30)
 - ✅ **이번 세션 전부 배포·검증**: 코드리뷰 버그 5건 + 다이제스트 UX(회사명·범례·위계·예측) +
   `/announce` 소유자 공지 + Phase 12 대시보드 **라이브**(Actions Pages 배포) + **서버 자동 배포** + 문서 5개로 정리.
