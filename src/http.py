@@ -63,6 +63,7 @@ _SECRET_SETTINGS_ATTRS = (
     "fmp_api_key",
     "fred_api_key",
     "anthropic_api_key",
+    "minimax_api_key",     # NVIDIA NIM(MiniMax) LLM 키
     "news_api_key",
     "telegram_bot_token",  # URL 경로에 들어가므로 마스킹 필수
     "krx_api_key",         # AUTH_KEY 헤더로 전송 — 로그 노출 방지

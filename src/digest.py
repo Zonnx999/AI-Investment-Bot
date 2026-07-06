@@ -252,8 +252,13 @@ def send_daily_digest(
     from src.storage import get_storage
 
     subscribers.ensure_owner()
-    text = build_daily_digest(market=market, top_n=top_n, tickers=tickers)   # 무거운 조립 1회
     recipients = subscribers.active_subscribers()
+    if not recipients:
+        # 수신자 0명이면 무거운 조립(fetch+분석+Turso 쓰기) 전에 즉시 반환.
+        logger.warning("active 구독자 없음 — 다이제스트 조립 생략")
+        return {"sent": 0, "failed": 0, "recipients": 0}
+
+    text = build_daily_digest(market=market, top_n=top_n, tickers=tickers)   # 무거운 조립 1회
 
     sent = failed = 0
     for chat_id, _name in recipients:

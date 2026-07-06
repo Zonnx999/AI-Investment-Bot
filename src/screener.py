@@ -180,11 +180,25 @@ def health_scorecard(metrics: dict) -> ScoreCard:
     iq = _safe(metrics, "incomeQuality")
     cr = _safe(metrics, "currentRatio", 1.0)
 
+    # 순부채/EBITDA: '낮을수록 좋음' 공식은 EBITDA>0 일 때만 성립. 음수 비율은 두 갈래 —
+    # 순현금(EBITDA>0, 우량) vs 적자 EBITDA(부실). 후자에 만점을 주는 역설(§4.10(5))을
+    # 막기 위해 evToEBITDA 부호로 EBITDA 부호를 판별(EV>0 가정).
+    nde_detail = f"{nde:.1f}x"
+    if nde < 0:
+        if _safe(metrics, "evToEBITDA", 0.0) > 0:        # EBITDA>0 → 진짜 순현금
+            nde_pts = _clip(20.0 - nde * 2.5, 0, 20)
+            nde_detail = f"{nde:.1f}x (순현금)"
+        else:                                            # EBITDA 적자/불명 → 만점 금지
+            nde_pts = 0.0
+            nde_detail = f"{nde:.1f}x (EBITDA 적자/불명)"
+    else:
+        nde_pts = _clip(20.0 - nde * 2.5, 0, 20)
+
     comps = [
         Component("총이익률(GP)", _clip(gp * 0.625, 0, 25), 25, f"{gp:.0f}%"),
         Component("ROIC", _clip(roic * 1.0, 0, 20), 20, f"{roic:.1f}%"),
         Component("ROE", _clip(roe * 1.67, 0, 20), 20, f"{roe:.1f}%"),
-        Component("순부채/EBITDA", _clip(20.0 - nde * 2.5, 0, 20), 20, f"{nde:.1f}x"),
+        Component("순부채/EBITDA", nde_pts, 20, nde_detail),
         Component("이익의 질", _clip(iq * 2.0, 0, 10), 10, f"{iq:.2f}"),
         Component("유동비율", _clip(min(cr, 3.0) * 1.67, 0, 5), 5, f"{cr:.2f}"),
     ]

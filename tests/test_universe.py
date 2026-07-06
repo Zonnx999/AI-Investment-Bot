@@ -305,3 +305,62 @@ def test_build_update_and_flush_roundtrip_with_tricky_values(fresh_db):
 def test_flush_updates_empty_is_noop(fresh_db):
     conn = universe._conn()
     universe._flush_updates(conn, [])      # 예외 없이 통과해야 함
+
+
+# ---------------- calculate_kr_scores 경계값 (순수 함수, DB 불필요) ----------------
+
+
+def _kr_component(result, side, label):
+    for c in result["detail"][side]["components"]:
+        if c[0] == label:
+            return c          # [label, points, max, detail]
+    raise AssertionError(f"{label} 컴포넌트 없음")
+
+
+def test_kr_scores_healthy_company():
+    """정상 우량주: ROE·부채비율·흑자 모두 점수 획득."""
+    fin = {"net_income": 1e10, "equity": 1e11, "debt": 3e10,
+           "revenue": 2e11, "op_income": 3e10}
+    r = universe.calculate_kr_scores(fin, market_cap=1.2e12)
+    assert r["health_score"] > 0 and r["value_score"] > 0
+    assert r["roe"] is not None and r["pbr"] is not None
+
+
+def test_kr_negative_equity_not_rewarded():
+    """자본잠식(equity<0): ROE/부채비율/PBR 이 음수 부호로 만점받던 역설 차단."""
+    fin = {"net_income": -5e9, "equity": -2e10, "debt": 5e10,
+           "revenue": 1e11, "op_income": -3e9}
+    r = universe.calculate_kr_scores(fin, market_cap=1e11)
+    # ROE/PBR 은 무의미 → None, 부채비율은 만점 아닌 0점이어야
+    assert r["roe"] is None and r["pbr"] is None
+    assert _kr_component(r, "health", "부채비율")[1] == 0.0
+    assert _kr_component(r, "health", "ROE")[1] == 0.0
+    assert _kr_component(r, "health", "흑자")[1] == 0.0   # 적자
+    assert _kr_component(r, "value", "PBR")[1] == 0.0
+
+
+def test_kr_zero_equity_safe():
+    """equity=0: 나눗셈 0 방지 + 만점 금지."""
+    fin = {"net_income": 1e9, "equity": 0, "debt": 1e10,
+           "revenue": 5e10, "op_income": 2e9}
+    r = universe.calculate_kr_scores(fin, market_cap=1e11)
+    assert r["roe"] is None and r["pbr"] is None
+    assert _kr_component(r, "health", "부채비율")[1] == 0.0
+
+
+def test_kr_zero_revenue_safe():
+    """매출 0: 영업이익률 None → 0점, 크래시 없음."""
+    fin = {"net_income": -1e9, "equity": 1e10, "debt": 5e9,
+           "revenue": 0, "op_income": -1e9}
+    r = universe.calculate_kr_scores(fin, market_cap=5e10)
+    assert _kr_component(r, "health", "영업이익률")[1] == 0.0
+
+
+def test_kr_negative_net_income_no_per():
+    """적자(net_income<0): PER 산출 안 함(None), 흑자 보너스 0."""
+    fin = {"net_income": -2e9, "equity": 1e10, "debt": 5e9,
+           "revenue": 5e10, "op_income": 1e9}
+    r = universe.calculate_kr_scores(fin, market_cap=5e10)
+    assert r["per"] is None
+    assert _kr_component(r, "health", "흑자")[1] == 0.0
+    assert _kr_component(r, "value", "PER")[1] == 0.0

@@ -1,7 +1,8 @@
 # Deployment — 상시 인터랙티브 봇 호스팅 (Phase 11b)
 
-상시 텔레그램 봇(`scripts/bot.py`)을 돌리는 **서버 운영 런북**. 일일 다이제스트는 여전히
-GitHub Actions cron 이 담당 (역할 분담은 §7).
+상시 텔레그램 봇(`scripts/bot.py`)을 돌리는 **서버 운영 런북**. 이 Oracle 서버의 systemd 가
+상시 봇과 일일 다이제스트 발송(systemd timer, §5.1)을 **모두** 담당한다. GitHub Actions 예약
+schedule 은 비활성 — 비상시 `workflow_dispatch` 수동 발송 전용 (역할 분담은 §7).
 
 > 민감정보(토큰/키/실IP)는 이 문서에 넣지 않음 — OCI 콘솔·`.env`·GitHub Secrets 에만.
 

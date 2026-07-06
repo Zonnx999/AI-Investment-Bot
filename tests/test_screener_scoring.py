@@ -110,6 +110,36 @@ def test_positive_ev_ebitda_still_scores():
     assert ev.points > 0
 
 
+# -------- 순부채/EBITDA 음수 분기 (순현금 vs 적자 EBITDA) --------
+
+
+def _nde(card):
+    return next(c for c in card.components if c.label == "순부채/EBITDA")
+
+
+def test_net_cash_with_positive_ebitda_full_credit():
+    """순현금(netDebtToEBITDA<0) + EBITDA>0 → 우량 → 만점 유지."""
+    card = health_scorecard(dict(GOOD, netDebtToEBITDA=-1.0, evToEBITDA=8.0))
+    c = _nde(card)
+    assert c.points == 20.0
+    assert "순현금" in c.detail
+
+
+def test_negative_ebitda_net_debt_not_rewarded():
+    """적자 EBITDA(evToEBITDA<0)로 비율이 음수가 된 부실기업 → 만점 아님, 0점."""
+    card = health_scorecard(dict(GOOD, netDebtToEBITDA=-2.0, evToEBITDA=-5.0))
+    c = _nde(card)
+    assert c.points == 0.0
+    assert "EBITDA 적자" in c.detail
+
+
+def test_negative_nde_without_ev_ebitda_is_conservative():
+    """순현금 여부를 확인할 evToEBITDA 가 없으면 만점 주지 않음(0점)."""
+    metrics = {k: v for k, v in GOOD.items() if k != "evToEBITDA"}
+    card = health_scorecard(dict(metrics, netDebtToEBITDA=-2.0))
+    assert _nde(card).points == 0.0
+
+
 # ---------------- _safe (결측/비숫자 방어) ----------------
 
 

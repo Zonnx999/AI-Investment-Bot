@@ -441,6 +441,7 @@
     }
 
     function showError(tab, msg) {
+        msg = esc(msg);
         if (tab === 'regime') {
             document.getElementById('regime-content').innerHTML =
                 `<div class="warn-box">시장 국면 데이터를 불러올 수 없습니다: ${msg}<br>
@@ -533,6 +534,18 @@
     // ----------------------------------------------------------------
     // 테이블 렌더링
     // ----------------------------------------------------------------
+    // 외부/생성 데이터(종목명·섹터·신호·라벨 등)를 innerHTML 에 넣기 전 HTML 이스케이프.
+    // 공개 페이지이므로 상류 데이터가 악성/기형이어도 스크립트 주입이 안 되도록 방어.
+    function esc(v) {
+        if (v == null) return '';
+        return String(v)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
     function scoreBadge(score) {
         const s = score || 0;
         if (s >= 60) return 'badge-excellent';
@@ -577,8 +590,8 @@
 
             if (market === 'korea') {
                 html += `<tr>
-                    <td><span class="sym">${it.symbol || ''}</span></td>
-                    <td><div class="co-name">${it.name || ''}</div><div class="sector-tag">${it.sector || ''}</div></td>
+                    <td><span class="sym">${esc(it.symbol)}</span></td>
+                    <td><div class="co-name">${esc(it.name)}</div><div class="sector-tag">${esc(it.sector)}</div></td>
                     <td>${fmtPrice(it.price, 'KRW')}</td>
                     <td><span class="badge ${hcls}">${it.health_score ?? '—'}</span></td>
                     <td><span class="badge ${vcls}">${it.value_score ?? '—'}</span></td>
@@ -589,8 +602,8 @@
                 </tr>`;
             } else if (market === 'us') {
                 html += `<tr>
-                    <td><span class="sym">${it.symbol || ''}</span></td>
-                    <td><div class="co-name">${it.name || ''}</div><div class="sector-tag">${it.sector || ''}</div></td>
+                    <td><span class="sym">${esc(it.symbol)}</span></td>
+                    <td><div class="co-name">${esc(it.name)}</div><div class="sector-tag">${esc(it.sector)}</div></td>
                     <td>${fmtPrice(it.price, 'USD')}</td>
                     <td><span class="badge ${hcls}">${it.health_score ?? '—'}</span></td>
                     <td><span class="badge ${vcls}">${it.value_score ?? '—'}</span></td>
@@ -601,8 +614,8 @@
                 </tr>`;
             } else {
                 html += `<tr>
-                    <td><span class="sym">${it.symbol || ''}</span></td>
-                    <td class="co-name">${it.name || ''}</td>
+                    <td><span class="sym">${esc(it.symbol)}</span></td>
+                    <td class="co-name">${esc(it.name)}</td>
                     <td>${fmtPrice(it.price, 'USD')}</td>
                     <td>${fmtMcap(it.market_cap)}</td>
                     <td><span class="badge ${scoreBadge(it.rank_score)}">${it.rank_score ?? '—'}</span></td>
@@ -642,7 +655,7 @@
     function renderRegime(data) {
         if (data.error || !data.label) {
             document.getElementById('regime-content').innerHTML =
-                `<div class="warn-box">시장 국면 데이터 없음: ${data.error || '알 수 없음'}</div>`;
+                `<div class="warn-box">시장 국면 데이터 없음: ${esc(data.error) || '알 수 없음'}</div>`;
             return;
         }
 
@@ -654,7 +667,7 @@
 
         const panelCards = (data.panel || []).map(p => `
             <div class="panel-card">
-                <div class="panel-name">${p.name}</div>
+                <div class="panel-name">${esc(p.name)}</div>
                 <div class="panel-metrics">
                     <span class="panel-metric-label">6개월 수익률</span>
                     <span class="panel-metric-value" style="color:${(p.return_6m||0)>=0?'var(--success)':'var(--danger)'}">
@@ -673,11 +686,11 @@
         `).join('');
 
         const signals = (data.signals || []).map(s =>
-            `<li>${s}</li>`
+            `<li>${esc(s)}</li>`
         ).join('');
 
         const failures = data.failures && data.failures.length
-            ? `<div class="warn-box" style="margin-top:12px">평가 실패 지표: ${data.failures.join(', ')}</div>`
+            ? `<div class="warn-box" style="margin-top:12px">평가 실패 지표: ${data.failures.map(esc).join(', ')}</div>`
             : '';
 
         const genAt = data.generated_at
@@ -686,7 +699,7 @@
             : '';
 
         document.getElementById('regime-content').innerHTML = `
-            <div class="regime-badge ${regimeCls}">${data.label}</div>
+            <div class="regime-badge ${regimeCls}">${esc(data.label)}</div>
             <p style="color:var(--text-muted);font-size:13px;margin-bottom:12px">
                 점수: ${data.score > 0 ? '+' : ''}${data.score} &nbsp;·&nbsp;
                 3개 거시 지표 합산 (장단기 금리차 / 하이일드 스프레드 / 실업수당 청구)
@@ -718,12 +731,12 @@
                 ? '<span class="badge badge-excellent" style="font-size:11px">신뢰</span>'
                 : '<span class="badge badge-fair" style="font-size:11px">참고용</span>';
             return `<tr>
-                <td style="font-weight:600;font-size:13px">${p.name || ''}</td>
-                <td style="font-size:12px;color:var(--text-muted)">${p.leading}</td>
-                <td style="font-size:12px;color:var(--text-muted)">${p.target}</td>
+                <td style="font-weight:600;font-size:13px">${esc(p.name)}</td>
+                <td style="font-size:12px;color:var(--text-muted)">${esc(p.leading)}</td>
+                <td style="font-size:12px;color:var(--text-muted)">${esc(p.target)}</td>
                 <td>${p.best_lag_months}개월</td>
                 <td class="${r2cls}">${p.r_squared != null ? p.r_squared.toFixed(2) : '—'}</td>
-                <td class="${dircls}">${p.direction}</td>
+                <td class="${dircls}">${esc(p.direction)}</td>
                 <td style="font-size:12px">${p.predicted_change_pct != null ? (p.predicted_change_pct >= 0 ? '+' : '') + p.predicted_change_pct.toFixed(1) + '%' : '—'}</td>
                 <td>${reliableBadge}</td>
             </tr>`;

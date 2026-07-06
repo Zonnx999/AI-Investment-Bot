@@ -28,6 +28,20 @@ def test_mask_secrets_leaves_clean_text_alone(fake_fmp_key):
     assert mask_secrets("no secrets here") == "no secrets here"
 
 
+def test_mask_secrets_redacts_minimax_key():
+    """MiniMax(LLM) 키도 로그/traceback 에서 마스킹되어야 함 (#3)."""
+    from src.config import settings
+
+    fake = "test_fake_minimax_key_0123456789abcdef"
+    backup = settings.minimax_api_key
+    object.__setattr__(settings, "minimax_api_key", fake)
+    try:
+        masked = mask_secrets(f"calling NIM with key={fake}")
+        assert fake not in masked and REDACTED in masked
+    finally:
+        object.__setattr__(settings, "minimax_api_key", backup)
+
+
 def test_masking_filter_redacts_message_and_traceback(fake_fmp_key):
     f = SecretMaskingFilter()
 

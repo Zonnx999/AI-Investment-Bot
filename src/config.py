@@ -28,6 +28,7 @@ class Settings:
 
     # API keys
     anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
+    minimax_api_key: str = os.getenv("MINIMAX_API_KEY", "")  # NVIDIA NIM(MiniMax) LLM 요약 (ROADMAP §2.1, 구현 대기)
     fred_api_key: str = os.getenv("FRED_API_KEY", "")
     fmp_api_key: str = os.getenv("FMP_API_KEY", "")
     news_api_key: str = os.getenv("NEWS_API_KEY", "")

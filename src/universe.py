@@ -466,10 +466,15 @@ def calculate_kr_scores(fin: dict, market_cap: float) -> dict:
     ni, eq, debt = fin.get("net_income"), fin.get("equity"), fin.get("debt")
     rev, op = fin.get("revenue"), fin.get("op_income")
 
-    roe = (ni / eq * 100) if (ni is not None and eq) else None
+    # 자본잠식(equity<=0)은 ROE·부채비율·PBR 을 모두 무의미하게 만든다 — 음수 자기자본이
+    # 비율 부호를 뒤집어 부실기업에 만점을 주는 역설을 막기 위해 strictly positive 만 인정
+    # (§4.10(5)). eq<=0 이면 셋 다 None → 각 컴포넌트의 결측 처리(부채비율=0점)로 흘러간다.
+    eq_ok = eq is not None and eq > 0
+
+    roe = (ni / eq * 100) if (ni is not None and eq_ok) else None
     per = (market_cap / ni) if (ni and ni > 0) else None
-    pbr = (market_cap / eq) if eq else None
-    debt_ratio = (debt / eq * 100) if (debt is not None and eq) else None
+    pbr = (market_cap / eq) if eq_ok else None
+    debt_ratio = (debt / eq * 100) if (debt is not None and eq_ok) else None
     op_margin = (op / rev * 100) if (op is not None and rev) else None
 
     from src.screener import Component, ScoreCard

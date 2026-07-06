@@ -3,44 +3,67 @@
 > 현재 상태·완료 상세는 `CURRENT_STATE.md` + `git log`. 이 파일은 **앞으로 할 일**에 집중합니다.
 > 작업 규칙(phase-gate·리뷰 톤·결정 시 옵션 제시)은 `CLAUDE.md §4`.
 
-**권장 순서**: Phase 4–12 ✅ (Oracle 서버 가동 중, 대시보드 라이브) → **11b 잔여(인라인 승인버튼·`/news`)** → 선택 백로그(§2).
-운영 런북은 `docs/DEPLOYMENT.md`. 대시보드: https://zonnx999.github.io/AI-Investment-Bot/
+**권장 순서**: Phase 4–12 ✅ (봇·대시보드 라이브) → **상용화 전환 Phase A→E (아래 §1)**.
+운영 런북 `docs/DEPLOYMENT.md` · 대시보드 https://zonnx999.github.io/AI-Investment-Bot/ · 수익화 전략 전문 `MARKETING.md`(현재 별도 브랜치, main 편입 예정).
 
 ---
 
-## 1. 다음 작업 (액티브)
+## 1. 다음 작업 (액티브) — 상용화 전환: 개인 툴 → 투자 리서치 플랫폼
 
-### Phase 11a — 멀티유저 브로드캐스트 — ✅ 완료 (소유자 승인제, 배포·가동 중)
-`src/subscribers.py`. `subscribers` 테이블(status pending/active/inactive), getUpdates+offset, `/start`·`/stop`·
-소유자 `/approve`·`/deny`·`/pending`·`/subscribers`. 친구 승인·수신 실동작 확인.
+> **방향 전환 (2026-06-30 합의).** 개인용을 넘어 **개인 투자자용 AI 투자 리서치 플랫폼(SaaS)** 으로 확장.
+> 포지셔닝은 "종목 찍어주는 봇"이 아니라 **리서치 플랫폼** — 전 구독자 동일·결정론적·설명가능·비개인화가 신뢰이자
+> 법적 안전선(수익화 §6). 시장·가격·법무 근거는 `MARKETING.md`(별도 브랜치) 참조.
 
-### Phase 11b — 실시간 인터랙티브 봇 — ✅ 대부분 완료 (배포·가동 중), 일부 잔여
-`src/bot_commands.py` + `scripts/bot.py`(폴링 워커, systemd `quant-bot`). `docs/DEPLOYMENT.md`.
-- [x] 폴링 워커(getUpdates long-poll) — Oracle Always Free(E2.1.Micro). 무거운 분석은 사전계산, 봇은 DB 읽기 위주
-- [x] `/stock <티커>`(점수+근거, `lookup_detail`) · `/scan [us|kr]` · `/help`·`/menu` · 유저별 rate limit
-- [x] 조회는 **active 구독자(+소유자)만** (게이팅), reply 키보드 버튼(타이핑↓), Markdown 평문 폴백
-- [x] **`/announce` 소유자 공지** — active 구독자 전원에 평문 브로드캐스트(업데이트·정정 알림). 소유자 게이트 (06-29)
-- [x] **다이제스트 UX** — 회사명·점수 범례·시각적 위계·예측 가독성 (06-29)
-- [ ] **인라인 `[승인][거절]` 버튼** — 가입요청 알림에서 탭 승인 (callback_query 처리 필요) ← 다음 1순위
-- [ ] `/news <티커>` — `NEWS_API_KEY`/FMP 뉴스 (응답 캐시 + rate limit), (선택) Haiku 센티먼트
-- [ ] (선택) `/regime`·`/predict`·`/me`(내 상태) 즉답 — 단 국면/예측은 라이브 fetch라 봇에 약간 무거움
+**North Star = 30일 리텐션 > 40%.** "매출"이 아니라 "30일 뒤에도 봇을 여는가"가 PMF 신호.
+**결제·티어는 리텐션 >40% 검증 *후에만*** 붙인다 (리텐션 전 결제 도입 = 대표적 실수, 획득비만 태움).
+시퀀스: **획득(A·B·D) → 리텐션 측정(C) → 인터뷰 → 결제(E)**.
 
-### Phase 12 — 대시보드 통합 ✅ (2026-06-23, Pages 라이브 06-29)
-`dashboard/index.html` 재작성 + `scripts/export_dashboard.py` 신규.
-- [x] 탭: 🇰🇷 한국 / 🇺🇸 미국 / ₿ 크립토 / 📊 시장 국면 / 📈 선행지표 (아시아 탭 제거)
-- [x] Turso DB → 시장별 별도 JSON (kr/us/crypto_data.json) lazy load
-- [x] sort/filter 구현, ₩ 가격 표기, 범례
-- [x] 시장 국면 탭 (regime_data.json), 선행지표 탭 (predictions_data.json)
-- [x] CI: `.github/workflows/dashboard-export.yml` (매일 09:30 KST 커밋·푸시)
-- [x] **Actions 기반 Pages 배포** — `dashboard-export.yml` 에 configure/upload/deploy-pages 추가 (06-29)
-- [ ] **사용자 작업 대기 (1회)**: GitHub Settings → Pages → Source = "GitHub Actions"
-      (⚠️ branch 배포는 `/`·`/docs` 만 → `/dashboard` 서빙 불가, 그래서 Actions 방식)
+> ❌ **DROP — 인라인 `[승인][거절]` 버튼** (구 11b 잔여 1순위였음). 사람(소유자) 승인은 확장의 *병목*이고,
+> 버튼은 그 병목을 *빠르게* 만들 뿐 *없애지* 못함. 대신 셀프서비스 가입으로 병목 자체를 제거(Phase A).
+> 단, 그 버튼이 쓰려던 **`callback_query` 처리 인프라는 약관 동의 "[동의합니다]" 버튼에 재사용**한다.
+
+### Phase A — 가입 모델 전환 + 약관/고지 (획득의 전제) ← 다음 1순위
+오너 수동 승인 → **셀프서비스 가입**. 가입과 약관 동의는 **법적으로 분리 불가 → 한 묶음**(수익화 §6).
+- [ ] **가입 모델 = 옵션 B(토글)**: `BOT_OPEN_SIGNUP` 플래그(`src/config.py`).
+      `false`(기본=현 베타)=소유자 승인 유지 / `true`=`/start`→약관 동의→자동 `active`.
+      코드 재배포 없이 플래그로 비공개↔공개 전환. 상태모델(pending/active/inactive) 그대로, 오픈 모드는 pending 건너뜀.
+- [ ] **약관/고지 동의 단계**: `/start` 에 disclaimer + 동의 게이트(`callback_query` "[동의합니다]" 버튼, 폴백 `/agree`).
+      동의 전엔 active 안 됨. → `src/subscribers.py` · `scripts/bot.py` · `src/notifier.py`(callback answer/edit API).
+- [ ] **고지 문구 상시 노출**: 다이제스트·`/stock` 응답 하단 한 줄("투자 자문 아님, 모든 결정은 본인 책임"). `src/digest.py` · `bot_commands`.
+- [ ] **스키마 선반영**(`storage.add_column_if_missing`): `tier`(기본 'free') · `terms_accepted_at` · (후일)`expiry_date`.
+      지금 넣어도 비용 0, 나중 결제 도입 시 Turso 마이그레이션 충돌 회피(§4.10 #9).
+
+### Phase B — 설명가능성 자연어 레이어 (킬러 피처 · 신뢰)
+점수의 "왜"를 자연어로. **신규 API 0콜 · LLM 0** — 기존 `detail` JSON 재사용 + 결정론적 규칙.
+- [ ] `format_stock()`(`src/bot_commands.py`) 재작성: 숫자 분해 → "✅수익성 탁월(ROIC156%) · ✅밸류 매력적 · ⚠️배당 거의 없음" 식 사유.
+      규칙 예: GP>40%→"수익성 탁월", NetDebt/EBITDA<1→"레버리지 양호", earningsYield<0→"적자/밸류 경고".
+- [ ] 동일 규칙을 §5 마케팅 콘텐츠(종목 분석 글)로 재활용 — 신뢰 쇼케이스.
+- 결정성·설명가능·비개인화를 동시 충족 → 법적 안전선 유지.
+
+### Phase C — 활동 로깅 (리텐션 측정 시작 — 지금부터 쌓아야 함)
+North Star 측정 인프라. **데이터는 소급 백필 불가** → A·B 와 함께 일찍 넣는다.
+- [ ] `last_active` 컬럼 + 일별 오픈/명령 이벤트(`src/subscribers.py`, `add_column_if_missing`).
+- [ ] 30일 코호트 집계 스크립트(`scripts/`) — 리텐션 % 산출.
+
+### Phase D — 획득 (랜딩 + 무료 콘텐츠)
+- [ ] 정적 랜딩(`dashboard/landing.html`) — 공유·홍보용 URL + "무료 시작"(텔레그램 딥링크).
+- [ ] 교육 콘텐츠 파이프라인(주간 국면 리포트 등) — 신뢰 = 획득 엔진(수익화 §5).
+- [ ] (선택) 워치리스트(`src/watchlists.py`) — "추적·정보 도구"(비개인화, 무료) = 매일 돌아올 이유.
+
+### Phase E — 결제·티어 (리텐션 >40% 검증 후에만)
+- [ ] `tier` 분기 + `/upgrade` + 티어별 기능 게이팅(무료/Basic/Pro).
+- [ ] Toss Payments + Cloudflare Worker(웹훅 분리 — Oracle OOM 회피) + `expiry_date` 만료 관리.
+- [ ] 통신판매업 신고·사업자등록·부가세(수익화 §6). 개인화 기능 도입 전 **한국 변호사 자문 필수**.
+
+> 완료된 Phase 11a(승인제 멀티유저)·11b(인터랙티브 봇)·12(대시보드)는 `CURRENT_STATE.md §5` 참조.
 
 ---
 
 ## 2. 부록 — 선택 기능 / 백로그
 
 ### 2.1 다음 후보 기능
+- **봇 명령 확장** — `/news <티커>`(`NEWS_API_KEY`/FMP 뉴스, 응답 캐시 + rate limit, 선택 Haiku 센티먼트) ·
+  `/regime`·`/predict`·`/me`(내 상태) 즉답(국면/예측은 라이브 fetch라 봇에 다소 무거움). (구 Phase 11b 잔여 — Phase A 이후로 미룸)
 - **LLM 요약 한 줄** — 다이제스트 맨 위 한 문단. 후보: **MiniMax-M3(NVIDIA API, `MINIMAX_API_KEY` 이미 .env 에 있음)** 또는 Haiku.
   방향만 합의(2026-06-29, 구현 대기): 결정론적 다이제스트 **위 표현 레이어만** — 숫자·티커 생성/수정 금지,
   API 실패/레이트리밋 시 **요약 생략 폴백**(다이제스트는 그대로 발송, §4.10 #10 사상), 하루 1회 호출.
@@ -74,6 +97,9 @@
 | Phase 8 전 종목 유니버스 DB + 오프라인 스캔 | ✅ |
 | Phase 9 KRX 발굴 + DART 펀더멘털 점수 | ✅ |
 | Phase 10 데이터 호스팅 (Turso/libSQL) | ✅ |
+| Phase 11a 멀티유저 브로드캐스트 (소유자 승인제) | ✅ |
+| Phase 11b 실시간 인터랙티브 봇 (`/stock`·`/scan`·`/announce`) | ✅ |
+| Phase 12 대시보드 통합 (GitHub Pages 라이브) | ✅ |
 
 ---
 

@@ -152,3 +152,23 @@ def test_kr_digest_empty_picks_keeps_common_sections():
     assert "발굴 종목 (한국)" not in out      # 빈 섹션 생략
     assert "위험선호" in out                   # 국면(공통) 유지
     assert "SOXX 수익률" in out                # 예측(공통) 유지
+
+
+# -------- send_daily_digest: 수신자 0명이면 무거운 조립 생략 (#5) --------
+
+
+def test_broadcast_skips_build_when_no_recipients(monkeypatch):
+    """active 구독자 0명이면 build_daily_digest(fetch+분석) 를 호출하지 않고 즉시 반환."""
+    import src.digest as digest
+    from src import subscribers
+
+    monkeypatch.setattr(subscribers, "ensure_owner", lambda: None)
+    monkeypatch.setattr(subscribers, "active_subscribers", lambda: [])
+
+    def _boom(*a, **k):
+        raise AssertionError("수신자 0명인데 build_daily_digest 가 호출됨")
+
+    monkeypatch.setattr(digest, "build_daily_digest", _boom)
+
+    result = digest.send_daily_digest()
+    assert result == {"sent": 0, "failed": 0, "recipients": 0}

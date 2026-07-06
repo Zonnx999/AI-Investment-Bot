@@ -25,7 +25,7 @@
   설정·운영은 `docs/DEPLOYMENT.md §6.1`. 즉시 반영: `sudo systemctl start quant-autopull.service`.
 - **(2026-06-29)** 코드리뷰 버그 5건 수정 + 다이제스트 UX(회사명·범례·위계·예측) + `/announce` 소유자 공지 + 문서 정리(CODE_REVIEW·UPGRADE_PLAN 제거).
 - **MINIMAX_API_KEY** `.env` 에 추가됨 — LLM 한 줄 요약용(MiniMax-M3/NVIDIA). 구현은 대기(`ROADMAP §2.1`).
-- **다음 작업**: 11b 잔여(인라인 승인버튼·`/news`) 또는 LLM 한 줄 요약. 코드 개선 backlog는 `ROADMAP §2.2`.
+- **다음 작업**: **상용화 전환 시작** (방향 전환 합의 06-30) — `ROADMAP §1` Phase A(셀프서비스 가입+약관) → B(설명가능성 레이어) → C(리텐션 로깅). 인라인 승인버튼은 DROP.
 
 ---
 
@@ -63,8 +63,9 @@
   `/announce` 소유자 공지 + Phase 12 대시보드 **라이브**(Actions Pages 배포) + **서버 자동 배포** + 문서 5개로 정리.
 - ✅ **서버 자동 배포 end-to-end 확인**: `[autopull] update … -> … restarted quant-bot` 로그로 검증,
   sudoers 무비번 재시작 OK. push → ~15분 내(또는 `sudo systemctl start quant-autopull.service` 즉시) 박스 반영.
-- 📌 **다음 1순위 후보**: 인라인 `[승인][거절]` 버튼(11b), 또는 **LLM 한 줄 요약**(MiniMax-M3,
-  `MINIMAX_API_KEY` 준비됨, 설계 `ROADMAP §2.1`). 코드 개선 backlog는 `ROADMAP §2.2`.
+- 📌 **방향 전환 합의 (2026-06-30)**: 개인 툴 → **투자 리서치 플랫폼(SaaS)**. 인라인 승인버튼 **DROP**(소유자 승인=확장 병목,
+  버튼은 병목을 빠르게 할 뿐). 다음 1순위 = `ROADMAP §1` 상용화 Phase A(셀프서비스 가입+약관) → B(설명가능성) → C(리텐션 로깅).
+  North Star = 30일 리텐션 > 40%, 결제·티어는 그 검증 후. 수익화 전략 전문은 `MARKETING.md`(별도 브랜치, main 편입 예정).
 - 📌 **필독 문서는 5개**: `CLAUDE.md` / `README.md` / `docs/{CURRENT_STATE,ROADMAP,DEPLOYMENT}.md`
   (CODE_REVIEW·UPGRADE_PLAN 은 정리하며 삭제 — 미해결 항목은 ROADMAP §2 로 이전).
 
