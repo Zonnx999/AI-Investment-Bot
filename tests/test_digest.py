@@ -262,3 +262,67 @@ def test_send_daily_digest_use_llm_false_skips_llm_entirely(monkeypatch):
     digest_mod.send_daily_digest(use_llm=False)
     assert called == []                          # --no-llm: 호출 자체가 없어야 함
     assert sent == ["본문 다이제스트"]
+
+
+# ---------------- 제안 비중 (Phase 13c) ----------------
+
+
+def test_digest_weights_rendered_with_cash_legend():
+    """weights 주어지면 발굴 라인에 '제안 N%' + 현금 잔여 범례. 0% 도 표시(엣지 없음)."""
+    out = format_digest(_report(), [], now=NOW,
+                        weights={"NVDA": 0.25, "CPNG": 0.0})
+    assert "종합 *64* · 제안 25%" in out
+    assert "종합 *29* · 제안 0%" in out
+    assert "제안 비중: 역변동성·Kelly 상한" in out
+    assert "현금 75%" in out                                # 1 - 0.25 잔여
+
+
+def test_digest_weights_partial_and_full_invested():
+    """weights 에 없는 종목은 종전 그대로, 합≈1 이면 현금 문구 생략."""
+    out = format_digest(_report(), [], now=NOW, weights={"NVDA": 1.0})
+    assert "종합 *64* · 제안 100%" in out
+    assert "  `CPNG` — 종합 *29*\n" in out                  # 비중 없는 종목은 종전 포맷
+    assert "현금" not in out
+
+
+def test_digest_weights_none_output_identical():
+    """weights=None(기본) 은 리팩토링 전과 동일 출력 — '제안' 문구 자체가 없음."""
+    assert format_digest(_report(), [], now=NOW) == format_digest(
+        _report(), [], now=NOW, weights=None)
+    assert "제안" not in format_digest(_report(), [], now=NOW)
+
+
+def test_propose_weights_guards(monkeypatch):
+    """_propose_weights — 2종목 미만 None / 파이프라인 실패 None (다이제스트 불변 원칙)."""
+    from src import digest as digest_mod
+    from src.exceptions import InsufficientDataError
+
+    assert digest_mod._propose_weights(["NVDA"]) is None    # <2 종목: 조회 없이 종료
+
+    import pandas as pd
+    idx = pd.bdate_range("2024-01-01", periods=100)
+    fake_px = pd.DataFrame({"Close": range(100, 200)}, index=idx)
+    monkeypatch.setattr("src.data_fetcher.fetch_prices", lambda t, **k: fake_px)
+    monkeypatch.setattr(
+        "src.portfolio.propose",
+        lambda *a, **k: (_ for _ in ()).throw(InsufficientDataError("표본 부족")),
+    )
+    assert digest_mod._propose_weights(["NVDA", "CPNG"]) is None
+
+
+def test_propose_weights_happy_path(monkeypatch):
+    """정상 경로 — propose 결과의 weights 가 그대로 반환 + 노트는 로그로만."""
+    import pandas as pd
+    from src import digest as digest_mod
+    from src.portfolio import PortfolioProposal
+
+    idx = pd.bdate_range("2024-01-01", periods=100)
+    fake_px = pd.DataFrame({"Close": range(100, 200)}, index=idx)
+    monkeypatch.setattr("src.data_fetcher.fetch_prices", lambda t, **k: fake_px)
+    monkeypatch.setattr(
+        "src.portfolio.propose",
+        lambda cands, prices, **k: PortfolioProposal(
+            weights={"NVDA": 0.6, "CPNG": 0.2}, cash_weight=0.2, notes=("테스트",)),
+    )
+    assert digest_mod._propose_weights(["NVDA", "CPNG", "NVDA"]) == {
+        "NVDA": 0.6, "CPNG": 0.2}

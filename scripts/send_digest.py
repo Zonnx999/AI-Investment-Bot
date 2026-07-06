@@ -38,11 +38,15 @@ def main() -> int:
                         help="구독 동기화(getUpdates) 건너뛰고 발송만")
     parser.add_argument("--no-llm", action="store_true",
                         help="LLM 한 줄 요약 생략 (킬스위치 — QUANT_BOT_LLM=0 과 동일)")
+    parser.add_argument("--no-weights", action="store_true",
+                        help="발굴 종목 제안 비중(13c) 생략 — US 만 해당, 실패 시 자동 생략")
     args = parser.parse_args()
     use_llm = not args.no_llm
+    suggest_weights = not args.no_weights
 
     if args.dry_run:
-        digest = build_daily_digest(market=args.market, top_n=args.top)
+        digest = build_daily_digest(market=args.market, top_n=args.top,
+                                    suggest_weights=suggest_weights)
         if use_llm:
             # 요약은 best-effort — 실패/미설정/킬스위치 시 None → 원문 그대로 미리보기
             from src.digest import with_summary
@@ -60,7 +64,8 @@ def main() -> int:
                   f"/ 거절 {sub['denied']} / 해지 {sub['unsubscribed']}")
 
     # 2) 전 구독자에게 브로드캐스트 (시장별)
-    result = send_daily_digest(market=args.market, top_n=args.top, use_llm=use_llm)
+    result = send_daily_digest(market=args.market, top_n=args.top, use_llm=use_llm,
+                               suggest_weights=suggest_weights)
     if result["recipients"] == 0:
         print("⚠️ 구독자 없음 — TELEGRAM_CHAT_ID(소유자) 또는 /start 가입 확인")
         return 1

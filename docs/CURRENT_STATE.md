@@ -73,7 +73,11 @@
   (`publication_lag_months`, 기본 1) · `has_fundamentals` 가 FMP 식별자 문자열에 오발화 ·
   cron 경로 인라인 버튼 부착 시 탭 유실(`interactive_buttons` 게이트) · LLM `<think>`/Markdown
   문자 유출 · `/news` 응답 평문 전송(400 폴백 2배 방지).
-- 테스트 216 → **350개** (오프라인 ~13초, 전부 그린).
+- ✅ **Phase 13 포트폴리오 레이어 전체** (07-06): 13a `Finding` 공통 dataclass(다이제스트·대시보드
+  공유 shape, 렌더 바이트 동일) · 13b `src/portfolio.py` 사이징 파이프라인(역변동성→상관 페널티→
+  Kelly 상한) + `weighted_backtest` 검증기 · 13c 다이제스트 "제안 N%" 열(best-effort, `--no-weights`) ·
+  13d `scripts/check_portfolio.py` All Weather 리플레이. ⚠️ `check_portfolio` 실네트워크 스모크 1회 권장.
+- 테스트 216 → **399개** (오프라인 ~14초, 전부 그린).
 - ⚠️ **머지 전 라이브 스모크 체크리스트** (§4.10 #1·#3 — 오프라인 세션이라 미검증):
   1. FMP `/news/stock` 엔드포인트 경로·필드명(title/publishedDate/site/url) 1콜 확인 → 다르면 `fetch_stock_news` 파서만 수정
   2. MiniMax 모델 id(기본 `minimaxai/minimax-m2`)·응답 스키마 1콜 확인 (`MINIMAX_MODEL` 로 교체 가능; 틀려도 다이제스트는 정상 발송)

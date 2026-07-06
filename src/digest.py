@@ -78,6 +78,7 @@ def format_digest(
     kr_picks: "list | None" = None,
     names: "dict[str, str] | None" = None,
     summary: str | None = None,
+    weights: "dict[str, float] | None" = None,
 ) -> str:
     """리포트 객체들 → 텔레그램 Markdown 메시지 (순수 함수).
 
@@ -92,6 +93,10 @@ def format_digest(
 
     summary: LLM 한 줄 요약(선택). 주어지면 맨 위에 렌더 — 생성은 src/llm.py,
     호출은 오케스트레이터(send_daily_digest / scripts) 책임 (순수 함수 유지).
+
+    weights: 티커 → 제안 비중(0~1) 맵(선택, Phase 13c — src/portfolio.propose 산출).
+    US 발굴 종목 라인에 "제안 N%" 를 곁들임 (정보 제공용 — 주문 집행 없음).
+    None 이면 렌더 출력은 종전과 동일 (계산·조회는 오케스트레이터 책임).
     """
     now = now or datetime.now(KST)
     market = (market or "US").upper()
@@ -139,9 +144,21 @@ def format_digest(
                 (from_factor_scores(f) for f in report.factors),
                 key=lambda x: x.score, reverse=True,
             ):
-                lines.append(_titled_line(fd.title, names, f"종합 *{fd.score:.0f}*"))
+                # 제안 비중 (13c) — weights 에 있는 종목만. 0% 도 의미 있음(엣지 없음).
+                w = weights.get(fd.title) if weights else None
+                tail = f"종합 *{fd.score:.0f}*" + (
+                    f" · 제안 {w * 100:.0f}%" if w is not None else ""
+                )
+                lines.append(_titled_line(fd.title, names, tail))
                 lines.append(f"     {fd.summary}")
             lines.append("  └ _모멘텀·밸류·퀄리티·로우볼 종합 (0~100, 높을수록 매력적)_")
+            if weights:
+                cash = max(0.0, 1.0 - sum(weights.values()))
+                cash_txt = f", 현금 {cash * 100:.0f}%" if cash >= 0.005 else ""
+                lines.append(
+                    "  └ _제안 비중: 역변동성·Kelly 상한 — 정보 제공용"
+                    f"{cash_txt} (`check_portfolio` 상세)_"
+                )
         # ---- 발굴 종목 (스크리닝 통과 — US 라이브 스크리너) ----
         if report.candidates:
             lines.append("")
@@ -191,6 +208,36 @@ def _us_names(symbols: list[str]) -> dict[str, str]:
     return out
 
 
+def _propose_weights(tickers: "list[str]") -> "dict[str, float] | None":
+    """US 발굴 종목 제안 비중 (13c) — best-effort. 실패 시 None (다이제스트 불변).
+
+    가격은 직전의 generate_signal_report 가 같은 종목을 방금 조회해 캐시가
+    따뜻함 → 추가 API 비용 ~0. 종목별 조회 실패는 해당 종목만 제외,
+    파이프라인 실패(표본 부족 등)는 비중 섹션 전체 생략.
+    """
+    uniq = list(dict.fromkeys(tickers))
+    if len(uniq) < 2:                       # propose 는 최소 2종목 필요
+        return None
+    from src import portfolio
+    from src.data_fetcher import fetch_prices
+    from src.utils import close_series
+
+    prices = {}
+    for t in uniq:
+        try:
+            prices[t] = close_series(fetch_prices(t))
+        except QuantBotError as e:
+            logger.debug("제안 비중용 가격 스킵 %s — %s", t, e)
+    try:
+        proposal = portfolio.propose(list(prices), prices)
+    except QuantBotError as e:
+        logger.warning("제안 비중 생략 — %s", e)
+        return None
+    for note in proposal.notes:
+        logger.info("제안 비중 노트: %s", note)
+    return proposal.weights
+
+
 def _collect_predictions() -> list[LeadLagResult]:
     """선행지표 예측 — 글로벌(시장 무관). 개별 실패는 스킵(로그)."""
     from src.predictors import PREDICTORS
@@ -208,6 +255,7 @@ def build_daily_digest(
     market: str = "us",
     top_n: int = 6,
     tickers: tuple[str, ...] | None = None,
+    suggest_weights: bool = True,
 ) -> str:
     """fetch + 분석 → 시장별 다이제스트 문자열.
 
@@ -216,6 +264,8 @@ def build_daily_digest(
       오프라인(API 0콜). 한국 코드는 yfinance 가격 접미사(.KS/.KQ)가 필요해 라이브
       팩터 파이프라인을 안 태움 (Step 1 결정: DB 점수 사용).
     국면·알림·예측은 글로벌이라 두 시장 공통.
+    suggest_weights: US 발굴 종목에 제안 비중(13c, best-effort) 곁들임 — KR 은
+    가격 파이프라인이 없어 미지원. 실패 시 비중만 생략.
     """
     from src import universe
     from src.signals import (
@@ -250,7 +300,11 @@ def build_daily_digest(
     names = _us_names(
         [f.ticker for f in report.factors] + [c["ticker"] for c in report.candidates]
     )
-    return format_digest(report, predictions, market="US", names=names)
+    weights = (
+        _propose_weights([f.ticker for f in report.factors])
+        if suggest_weights and report.factors else None
+    )
+    return format_digest(report, predictions, market="US", names=names, weights=weights)
 
 
 def send_daily_digest(
@@ -258,6 +312,7 @@ def send_daily_digest(
     top_n: int = 6,
     tickers: tuple[str, ...] | None = None,
     use_llm: bool = True,
+    suggest_weights: bool = True,
 ) -> dict[str, int]:
     """시장별 다이제스트 1회 조립 후 **active 구독자 전원**에게 브로드캐스트 (Phase 11a).
 
@@ -272,7 +327,8 @@ def send_daily_digest(
     from src.storage import get_storage
 
     subscribers.ensure_owner()
-    text = build_daily_digest(market=market, top_n=top_n, tickers=tickers)   # 무거운 조립 1회
+    text = build_daily_digest(market=market, top_n=top_n, tickers=tickers,
+                              suggest_weights=suggest_weights)   # 무거운 조립 1회
     if use_llm:
         from src import llm
         text = with_summary(text, llm.summarize_safe(text))   # 실패 시 None → 원문 그대로

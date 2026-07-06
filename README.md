@@ -21,7 +21,8 @@
 
 ## 현재 동작 (2026-07)
 
-- **매일 아침 텔레그램 다이제스트** — 시장 국면 + 변화 알림 + 발굴 종목 + 선행지표 예측 (+선택 LLM 한 줄 요약). 한국(08:30 KST)·미국(09:00 ET) 장 30분 전, 박스 systemd timer.
+- **매일 아침 텔레그램 다이제스트** — 시장 국면 + 변화 알림 + 발굴 종목(US 는 제안 비중 포함) + 선행지표 예측 (+선택 LLM 한 줄 요약). 한국(08:30 KST)·미국(09:00 ET) 장 30분 전, 박스 systemd timer.
+- **포지션 사이징** — "얼마나 살 것인가": 역변동성 가중 → 보유자산 상관 페널티 → half-Kelly 상한. 규칙은 가중 백테스트로 동일가중 대비 검증(`check_portfolio.py`).
 - **상시 인터랙티브 봇** (Oracle 서버, systemd) — 소유자 승인제 멀티유저. 가입 요청은 인라인 `[✅ 승인][❌ 거절]` 버튼으로 탭 처리. `/stock` `/scan` `/news` `/help`, 소유자 `/approve` `/deny` `/announce`.
 - **전 종목 유니버스 스캔** — US/KR/크립토 (US 2190 / KR 517 / CRYPTO 68), Turso(libSQL) 클라우드 DB, 오프라인 전수 스캔(API 0콜). 4팩터 + health/value 스코어카드(구성요소 분해).
 - **백테스트 프레임워크** — 거래비용·무선견편향 백테스터 + 모멘텀 top-N 워크포워드 + lead-lag 예측의 아웃오브샘플 방향 적중률 검증.
@@ -57,6 +58,8 @@ AI-Investment-Bot/
 │   ├── universe.py        # 전 종목 유니버스 DB (discover/enrich/scan)
 │   ├── predictors.py      # 선행지표 lead-lag 예측 (7개 관계 레지스트리)
 │   ├── backtest.py        # 백테스트 엔진 (순수 함수 — 비용/워크포워드/lead-lag OOS)
+│   ├── portfolio.py       # 포지션 사이징 (역변동성→상관 페널티→Kelly 상한) + 가중 백테스트
+│   ├── findings.py        # Finding 공통 리서치 결과 dataclass + 어댑터
 │   ├── digest.py          # 텔레그램 다이제스트 포매터 (순수)
 │   ├── notifier.py        # Telegram API (send/edit/answerCallback, 평문 폴백)
 │   ├── subscribers.py     # 멀티유저 구독 관리 (소유자 승인제)
@@ -70,6 +73,7 @@ AI-Investment-Bot/
 │   ├── check_signals.py       # ★ 일일 신호 리포트 (팩터/발굴/알림) ★
 │   ├── check_predictions.py   # ★ 선행지표 예측 (M2→BTC 등) ★
 │   ├── check_backtest.py      # ★ 백테스트 리포트 (신호·예측 과거 성과 검증) ★
+│   ├── check_portfolio.py     # ★ 제안 비중 + All Weather 사이징 검증 ★
 │   ├── send_digest.py         # ★ 텔레그램 다이제스트 발송 (--dry-run / --no-llm) ★
 │   ├── bot.py                 # ★ 상시 폴링 봇 워커 (systemd quant-bot) ★
 │   ├── build_universe.py      # 주 1회 유니버스 배치 (--discover/--enrich/--force)
@@ -133,6 +137,9 @@ python scripts/check_predictions.py
 # ★ 백테스트 — 신호·예측이 과거에 실제로 통했는지 (거래비용 포함)
 python scripts/check_backtest.py
 
+# ★ 포트폴리오 — 워치리스트 제안 비중 + All Weather 사이징 검증
+python scripts/check_portfolio.py
+
 # ★ 유니버스 발굴 (주 1회 배치 + 오프라인 스캔)
 python scripts/build_universe.py --discover --enrich   # API 로 수집·점수화
 python scripts/scan.py                                 # 오프라인 전수 스캔 (API 0콜)
@@ -185,7 +192,7 @@ from src.data_fetcher import (
 - [x] Phase 11 — 멀티유저(소유자 승인제) + 상시 인터랙티브 봇 (`/stock` `/scan` `/news`, 인라인 승인 버튼)
 - [x] Phase 12 — 대시보드 통합 (GitHub Pages 5탭, Actions 자동 배포)
 - [x] 백테스트 프레임워크 / LLM 한 줄 요약 (폴백 우선) / 코드 개선 백로그
-- [ ] **Phase 13 — 포트폴리오 레이어** (포지션 사이징 + 구조화 리서치 결과 — [ROADMAP §1.1](docs/ROADMAP.md))
+- [x] **Phase 13 — 포트폴리오 레이어** — 포지션 사이징(역변동성·상관 페널티·Kelly 상한) + 구조화 리서치 결과(Finding) + 다이제스트 제안 비중 + All Weather 검증(`check_portfolio.py`)
 - [ ] (선택) KR 배당 DART 연동 / `/regime` 즉답 / Google Trends / SEC EDGAR
 
 세부 내용과 아키텍처 결정 기록(채택/기각 사유)은 [docs/ROADMAP.md](docs/ROADMAP.md) 참고.
