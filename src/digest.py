@@ -16,6 +16,12 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from src.exceptions import QuantBotError
+from src.findings import (
+    CONFIDENCE_RELIABLE,
+    from_factor_scores,
+    from_prediction,
+    from_screen_candidate,
+)
 from src.logger import get_logger
 from src.predictors import LeadLagResult
 from src.signals import SignalReport
@@ -44,6 +50,14 @@ def _alert_line(alert) -> str:
     """알림 → 유저용 한 줄. Alert.__str__ 의 `[category]` 영문 태그(로그용)는
     빼고 심각도 아이콘 + 메시지만 — 다이제스트 가독성 위해 디스플레이에서만 정제."""
     return f"  {_ALERT_ICON.get(alert.severity, 'ℹ️')} {alert.message}"
+
+
+def _titled_line(ticker: str, names: dict[str, str], rest: str) -> str:
+    """발굴/스크리닝 공통 종목 줄: 티커(+회사명 있으면) — 나머지."""
+    nm = names.get(ticker, "")
+    if nm:
+        return f"  `{ticker}` *{nm}* — {rest}"
+    return f"  `{ticker}` — {rest}"
 
 
 def with_summary(text: str, summary: str | None) -> str:
@@ -120,44 +134,33 @@ def format_digest(
         if report.factors:
             lines.append("")
             lines.append("*📈 오늘의 발굴 종목*")
-            for f in sorted(report.factors, key=lambda x: x.composite, reverse=True):
-                nm = names.get(f.ticker, "")
-                head = (
-                    f"  `{f.ticker}` *{nm}* — 종합 *{f.composite}*"
-                    if nm
-                    else f"  `{f.ticker}` — 종합 *{f.composite}*"
-                )
-                lines.append(head)
-                lines.append(
-                    f"     모멘텀 {f.momentum} · 밸류 {f.value} · "
-                    f"퀄리티 {f.quality} · 로우볼 {f.low_vol}"
-                )
+            # Finding 공통 shape 소비 (13a): title=티커, score=종합, summary=팩터 내역
+            for fd in sorted(
+                (from_factor_scores(f) for f in report.factors),
+                key=lambda x: x.score, reverse=True,
+            ):
+                lines.append(_titled_line(fd.title, names, f"종합 *{fd.score:.0f}*"))
+                lines.append(f"     {fd.summary}")
             lines.append("  └ _모멘텀·밸류·퀄리티·로우볼 종합 (0~100, 높을수록 매력적)_")
         # ---- 발굴 종목 (스크리닝 통과 — US 라이브 스크리너) ----
         if report.candidates:
             lines.append("")
             lines.append("*💎 스크리닝 통과*")
-            for c in report.candidates[:5]:
-                pe = f"P/E {c['pe']:.1f}" if c.get("pe") else "적자"
-                nm = names.get(c["ticker"], "")
-                if nm:
-                    lines.append(f"  `{c['ticker']}` *{nm}* — {pe}")
-                else:
-                    lines.append(f"  `{c['ticker']}` — {pe}")
+            for fd in (from_screen_candidate(c) for c in report.candidates[:5]):
+                lines.append(_titled_line(fd.title, names, fd.summary))
 
     # ---- 선행지표 예측 ----
     if predictions:
-        reliable = [p for p in predictions if p.reliable]
-        weak = len(predictions) - len(reliable)
+        # Finding 공통 shape 소비 (13a): score=R², confidence=기존 reliable 라벨
+        pred_findings = [from_prediction(p) for p in predictions]
+        reliable = [f for f in pred_findings if f.confidence == CONFIDENCE_RELIABLE]
+        weak = len(pred_findings) - len(reliable)
         lines.append("")
         lines.append("*🔮 선행지표 예측*")
         if reliable:
-            for p in sorted(reliable, key=lambda x: x.r_squared, reverse=True):
-                icon = _direction_icon(p.direction)
-                lines.append(
-                    f"  {icon} {p.target_name}: {p.direction} "
-                    f"({p.best_lag_months}개월 선행, 신뢰도 R² {p.r_squared:.2f})"
-                )
+            for fd in sorted(reliable, key=lambda x: x.score, reverse=True):
+                # summary 는 "목표: 방향 (…)" — 방향 아이콘은 summary 에서 판별
+                lines.append(f"  {_direction_icon(fd.summary)} {fd.summary}")
         else:
             lines.append("  _신뢰할 만한 예측 없음 (R²<0.3)_")
         if weak:

@@ -28,6 +28,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from src.exceptions import InsufficientDataError, QuantBotError
+from src.findings import Finding, from_prediction, from_regime
 from src.logger import get_logger
 from src.storage import StorageError, get_storage
 
@@ -117,9 +118,23 @@ def row_to_crypto(row: tuple) -> dict:
     }
 
 
+def finding_to_json(finding: Finding) -> dict:
+    """Finding.to_dict() + score NaN/inf 정리 (JSON null 안전)."""
+    d = finding.to_dict()
+    d["score"] = clean_float(d["score"])
+    return d
+
+
 def regime_to_dict(summary: dict) -> dict:
-    """market_summary() 반환값 → JSON 직렬화 가능 dict."""
+    """market_summary() 반환값 → JSON 직렬화 가능 dict.
+
+    국면 부분은 다이제스트와 같은 Finding shape(13a)를 거쳐 조립 —
+    label/score/signals 는 Finding 필드에서, 표 형태인 panel/correlations 와
+    진단 정보 failures 는 summary/RegimeReport 에서 직접. 기존 키는 전부
+    유지(대시보드 JS 호환), `finding` 키만 추가.
+    """
     regime = summary["regime"]
+    finding = from_regime(regime)
     panel = []
     for name in summary["cumulative_returns_pct"].index:
         panel.append({
@@ -140,29 +155,37 @@ def regime_to_dict(summary: dict) -> dict:
         }
 
     return {
-        "label": regime.regime,
-        "score": regime.score,
-        "signals": regime.signals,
+        "label": finding.title,                 # = regime.regime
+        "score": regime.score,                  # int 유지 (finding.score 는 float)
+        "signals": list(finding.evidence),      # = regime.signals
         "failures": regime.failures,
         "panel": panel,
         "correlations": correlations,
+        "finding": finding_to_json(finding),    # 13a 공통 shape (추가 키)
     }
 
 
 def prediction_to_dict(name: str, result) -> dict:
-    """LeadLagResult → JSON dict."""
+    """LeadLagResult → JSON dict.
+
+    다이제스트와 같은 Finding shape(13a)를 거쳐 조립 — name/r²/notes 는
+    Finding 필드에서, 회귀 세부(leading/lag/방향 등)는 결과 객체에서 직접.
+    기존 키는 전부 유지(대시보드 JS 호환), `finding` 키만 추가.
+    """
+    finding = from_prediction(result, name=name)
     return {
-        "name": name,
+        "name": finding.title,                             # = name
         "leading": result.leading_name,
         "target": result.target_name,
         "best_lag_months": result.best_lag_months,
         "correlation": clean_float(result.correlation),
-        "r_squared": clean_float(result.r_squared),
+        "r_squared": clean_float(finding.score),           # = result.r_squared
         "direction": result.direction,
         "predicted_change_pct": clean_float(result.predicted_change_pct),
         "reliable": result.reliable,
         "n_obs": result.n_obs,
-        "notes": result.notes,
+        "notes": list(finding.evidence),                   # = result.notes
+        "finding": finding_to_json(finding),               # 13a 공통 shape (추가 키)
     }
 
 

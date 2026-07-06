@@ -113,6 +113,32 @@ def test_digest_prediction_direction_icon():
     assert "개월 선행" in out   # 'M' → '개월 선행' 풀어쓰기
 
 
+# ---------------- Finding 기반 렌더링 — 기존 포맷 byte-identical (13a) ----------------
+
+
+def test_digest_factor_lines_exact_format():
+    # 팩터 섹션이 Finding 경로로 바뀌어도 줄 포맷은 리팩토링 전과 동일해야 함
+    out = format_digest(_report(), [], now=NOW, names={"NVDA": "NVIDIA Corp"})
+    assert "  `NVDA` *NVIDIA Corp* — 종합 *64*" in out       # 이름 있음 (int 렌더 유지)
+    assert "  `CPNG` — 종합 *29*" in out                     # 이름 없음
+    assert "     모멘텀 100 · 밸류 14 · 퀄리티 77 · 로우볼 0" in out
+
+
+def test_digest_candidate_lines_exact_format():
+    rep = _report(candidates=[{"ticker": "AAPL", "pe": 12.5, "reasons": []},
+                              {"ticker": "RIVN", "pe": None, "reasons": []}])
+    out = format_digest(rep, [], now=NOW, names={"AAPL": "Apple Inc."})
+    assert "  `AAPL` *Apple Inc.* — P/E 12.5" in out
+    assert "  `RIVN` — 적자" in out
+
+
+def test_digest_prediction_lines_exact_format():
+    preds = [_pred("BTC 수익률", True, 0.63), _pred("XHB 수익률", False, 0.11)]
+    out = format_digest(_report(), preds, now=NOW)
+    assert "  📈 BTC 수익률: 상승 ↑ (6개월 선행, 신뢰도 R² 0.63)" in out
+    assert "  _그 외 1개 약함 (참고 제외)_" in out
+
+
 # ---------------- 시장별 (Step 1: KR/US 발굴 분리) ----------------
 
 
