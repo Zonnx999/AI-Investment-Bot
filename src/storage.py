@@ -19,9 +19,13 @@ data_fetcher 의 fetch 함수들이 `@cached(...)` 데코레이터로 이 레이
 
 환경변수
 --------
-QUANT_BOT_DB_PATH   DB 파일 경로 override (기본: data/quant_bot.db)
-QUANT_BOT_CACHE     "on"(기본) / "off"(읽기·쓰기 모두 끔) /
-                    "refresh"(읽기만 끔 — 새로 받아서 캐시 갱신)
+QUANT_BOT_DB_PATH       DB 파일 경로 override (기본: data/quant_bot.db)
+QUANT_BOT_CACHE         "on"(기본) / "off"(읽기·쓰기 모두 끔) /
+                        "refresh"(읽기만 끔 — 새로 받아서 캐시 갱신)
+QUANT_BOT_OFFLINE       "1"/"on" 이면 TURSO_* 를 무시하고 로컬 전용으로 동작
+                        (별도 오프라인 캐시 파일 — 레플리카 파일은 건드리지 않음)
+QUANT_BOT_SYNC_TIMEOUT  Turso sync() 감시 타임아웃 초 (기본 20). 네트워크가
+                        블랙홀이면 sync 가 예외 없이 영원히 멈추므로 필수 가드
 """
 
 from __future__ import annotations
@@ -31,6 +35,7 @@ import inspect
 import json
 import os
 import sqlite3
+import threading
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
@@ -75,6 +80,22 @@ def _cache_mode() -> str:
     return os.getenv("QUANT_BOT_CACHE", "on").strip().lower()
 
 
+def _offline_mode() -> bool:
+    """QUANT_BOT_OFFLINE — Turso 를 완전히 우회하는 킬스위치 (노트북 오프라인 작업용)."""
+    return os.getenv("QUANT_BOT_OFFLINE", "").strip().lower() in ("1", "on", "true", "yes")
+
+
+def _sync_timeout() -> float:
+    """Turso sync() 감시 타임아웃 (초). 실사고: 블랙홀 네트워크에서 sync() 가
+    예외 없이 무한 대기 → 모든 진입점(다이제스트·fetch·봇)이 통째로 멈춤."""
+    raw = os.getenv("QUANT_BOT_SYNC_TIMEOUT", "20")
+    try:
+        return max(1.0, float(raw))
+    except ValueError:
+        logger.warning("QUANT_BOT_SYNC_TIMEOUT=%r 파싱 불가 — 기본 20s", raw)
+        return 20.0
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -107,6 +128,13 @@ class Storage:
         # db_path 를 명시 주입한 경우(테스트)는 항상 로컬 — 원격 동기화 안 함
         if not url or self._db_path_was_injected:
             return sqlite3.connect(self.db_path)
+        if _offline_mode():
+            # 킬스위치: Turso 완전 우회. 레플리카 파일을 sqlite3 로 직접 열면
+            # libsql 복제 메타데이터가 깨질 수 있어(§4.10 #9) 별도 파일 사용.
+            offline = self._offline_path()
+            logger.warning("QUANT_BOT_OFFLINE — Turso 우회, 로컬 전용 캐시: %s", offline)
+            self.db_path = offline
+            return sqlite3.connect(offline)
 
         try:
             import libsql_experimental as libsql
@@ -121,24 +149,79 @@ class Storage:
             )
         except Exception as e:  # noqa: BLE001 — libsql 예외 타입을 도메인 예외로 변환
             raise StorageError(f"Turso 연결 실패: {self.db_path}") from e
+
+        status = self._safe_sync(conn, "초기 pull")
+        if status == "timeout":
+            # 네트워크 블랙홀 — 임베디드 레플리카는 '쓰기'도 원격 왕복이라
+            # 이 conn 을 계속 쓰면 다음 쓰기에서 또 멈춤. 스레드에 유기된 conn 과의
+            # 파일 경합·복제 메타데이터 손상을 피해 **별도 오프라인 파일**로 강등.
+            # 캐시는 cold 지만 파이프라인은 계속 (설계 원칙 #1: 캐시는 best-effort).
+            offline = self._offline_path()
+            logger.warning(
+                "Turso 초기 sync 타임아웃 — 오프라인 캐시로 강등: %s "
+                "(원인 후보: 네트워크 차단/레플리카 손상. QUANT_BOT_OFFLINE=1 로 "
+                "명시 우회 가능, 레플리카 복구는 data/*.db* 삭제 후 재싱크)", offline,
+            )
+            self.db_path = offline
+            return sqlite3.connect(offline)
+
         self.is_turso = True
-        self._safe_sync(conn, "초기 pull")
         logger.info("Turso 임베디드 레플리카 연결: %s", self.db_path)
         return conn
 
-    @staticmethod
-    def _safe_sync(conn, what: str) -> None:
-        """클라우드 동기화 (best-effort) — 실패해도 로컬 레플리카로 진행."""
-        try:
-            conn.sync()
-            logger.debug("Turso sync(%s) OK", what)
-        except Exception:  # noqa: BLE001 — 동기화 실패가 파이프라인을 막지 않음
-            logger.warning("Turso sync(%s) 실패 — 로컬 레플리카로 진행", what, exc_info=True)
+    def _offline_path(self) -> Path:
+        """Turso 우회/강등 시 쓰는 로컬 전용 캐시 파일 (레플리카와 분리)."""
+        return self.db_path.with_name(self.db_path.stem + ".offline.db")
+
+    def _safe_sync(self, conn, what: str) -> str:
+        """클라우드 동기화 (best-effort + 감시 타임아웃). 반환: "ok"/"error"/"timeout".
+
+        libsql 의 sync() 는 자체 타임아웃이 없어 블랙홀 네트워크에서 예외 없이
+        무한 대기함 (실사고 2026-07-06: 다이제스트·fetch 전 진입점 행).
+        데몬 스레드에서 돌리고 QUANT_BOT_SYNC_TIMEOUT(기본 20s) 만 기다림 —
+        타임아웃 시 스레드는 유기(daemon)하고 호출부가 강등을 결정.
+        부수 효과: Ctrl-C 가 Rust 네이티브 호출 안에서 pyo3 panic 을 내던 것도
+        메인 스레드가 join 대기 중이라 깔끔한 KeyboardInterrupt 로 바뀜.
+        """
+        result: dict[str, Any] = {}
+
+        def _run() -> None:
+            try:
+                conn.sync()
+                result["ok"] = True
+            except Exception as e:  # noqa: BLE001 — 동기화 실패가 파이프라인을 막지 않음
+                result["err"] = e
+
+        t = threading.Thread(target=_run, daemon=True, name=f"turso-sync-{what}")
+        t.start()
+        t.join(_sync_timeout())
+        if t.is_alive():
+            logger.warning("Turso sync(%s) %.0fs 타임아웃 — 미완료 (감시 스레드 유기)",
+                           what, _sync_timeout())
+            return "timeout"
+        if "err" in result:
+            logger.warning("Turso sync(%s) 실패 — 로컬 레플리카로 진행: %s",
+                           what, result["err"])
+            return "error"
+        logger.debug("Turso sync(%s) OK", what)
+        return "ok"
 
     def sync(self) -> None:
-        """로컬 변경을 클라우드로 push. 쓰기 배치 후 호출. 로컬 sqlite3 면 no-op."""
-        if self.is_turso:
-            self._safe_sync(self._conn, "push")
+        """로컬 변경을 클라우드로 push. 쓰기 배치 후 호출. 로컬 sqlite3 면 no-op.
+
+        push 가 타임아웃되면(유기 스레드가 conn 을 계속 참조) 같은 conn 으로
+        추가 sync 를 겹쳐 돌리지 않도록 이후 push 는 스킵 — 프로세스 재시작이
+        복구 수단 (systemd 봇/타이머 구조상 자연 복구).
+        """
+        if not self.is_turso:
+            return
+        if getattr(self, "_sync_degraded", False):
+            logger.debug("Turso push 스킵 — 이전 sync 타임아웃으로 강등 상태")
+            return
+        if self._safe_sync(self._conn, "push") == "timeout":
+            self._sync_degraded = True
+            logger.warning("Turso push 타임아웃 — 이 프로세스의 이후 push 는 스킵 "
+                           "(로컬 레플리카에는 반영됨, 재시작 시 재동기화)")
 
     def _resolve_path(self, db_path: Path | None) -> Path:
         self._db_path_was_injected = db_path is not None
