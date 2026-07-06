@@ -448,6 +448,13 @@ def propose(
     if held:
         weights, n2 = _correlation_penalty(weights, sub, held, corr_threshold, corr_penalty)
         notes.extend(n2)
+        # 상관 페널티의 재정규화(합=1)가 비페널티 종목을 상한 위로 밀어올릴 수 있음
+        # → 상한 재적용, 초과분은 현금으로 (§4.10 #5 — 집중 상한은 파이프라인 불변식).
+        for k, v in list(weights.items()):
+            if v > max_weight + _EPS:
+                weights[k] = max_weight
+                _note(notes, f"{k}: 상관 재정규화 후 상한 {max_weight:.0%} 재적용 "
+                             f"({v:.1%} → {max_weight:.0%})")
     weights, n3 = _kelly_cap(weights, sub, kelly_fraction, kelly_lookback, 0.0)
     notes.extend(n3)
 

@@ -48,9 +48,17 @@ def _fetch_close_map(tickers, period: str) -> dict:
     prices = {}
     for t in tickers:
         try:
-            prices[t] = close_series(fetch_prices(t, period=period))
+            s = close_series(fetch_prices(t, period=period))
         except DataFetchError as e:
             logger.warning("가격 수집 실패 — %s 스킵: %s", t, e)
+            continue
+        # yfinance 는 비어있지 않지만 Close 가 전부 NaN 인 frame 을 줄 때가 있음
+        # (부분 응답/rate limit). 그대로 두면 first_valid_index()=None 이
+        # TypeError 로 새어 섹션 강등 대신 리포트 전체가 죽음 (§4.10 #5).
+        if s.dropna().empty:
+            logger.warning("전체 NaN 종가 — %s 스킵", t)
+            continue
+        prices[t] = s
     return prices
 
 

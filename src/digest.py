@@ -144,10 +144,15 @@ def format_digest(
                 (from_factor_scores(f) for f in report.factors),
                 key=lambda x: x.score, reverse=True,
             ):
-                # 제안 비중 (13c) — weights 에 있는 종목만. 0% 도 의미 있음(엣지 없음).
+                # 제안 비중 (13c) — weights 에 있는 종목만. 정확히 0% 는 '엣지 없음'
+                # 신호라 의미 있음 — 반올림으로 0% 가 되는 미세 양수(<0.5%)는 "<1%" 로
+                # 구분 표기 (§4.10 #5: 경계값이 정반대 의미로 읽히지 않게).
                 w = weights.get(fd.title) if weights else None
+                if w is not None:
+                    pct = f"{w * 100:.0f}"
+                    w_txt = "<1%" if (pct == "0" and w > 0) else f"{pct}%"
                 tail = f"종합 *{fd.score:.0f}*" + (
-                    f" · 제안 {w * 100:.0f}%" if w is not None else ""
+                    f" · 제안 {w_txt}" if w is not None else ""
                 )
                 lines.append(_titled_line(fd.title, names, tail))
                 lines.append(f"     {fd.summary}")

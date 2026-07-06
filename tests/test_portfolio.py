@@ -357,3 +357,44 @@ def test_check_portfolio_script_imports_offline():
     import scripts.check_portfolio as mod
 
     assert callable(mod.main)
+
+
+# ---------------- 리뷰 회귀: 상관 재정규화 후 상한 불변식 ----------------
+
+
+def test_propose_max_weight_invariant_survives_correlation_stage():
+    """상관 페널티의 재정규화가 비페널티 종목을 상한 위로 못 밀어올림 (초과분→현금).
+
+    회귀: held 와 고상관 후보가 감액→재정규화되며 나머지 종목이 max_weight 를
+    넘겼음 (노트는 '상한 적용' 이라 쓰면서 실제 비중은 위반).
+    """
+    rng = np.random.default_rng(21)
+    base = rng.normal(0.0, 0.01, 300)
+    prices = {
+        # 저변동 3종목 (상한에 걸릴 후보) + held 와 상관 1.0 인 2종목
+        "A": _prices_from_returns(rng.normal(0.0, 0.004, 300)),
+        "B": _prices_from_returns(rng.normal(0.0, 0.004, 300)),
+        "C": _prices_from_returns(rng.normal(0.0, 0.004, 300)),
+        "D": _prices_from_returns(base),
+        "E": _prices_from_returns(base * 1.2),
+    }
+    held = {"H": _prices_from_returns(base * 1.5)}
+    prop = propose(list(prices), prices, held=held,
+                   max_weight=0.25, kelly_fraction=999.0)   # Kelly 상한 무력화(불변식만 검증)
+    assert max(prop.weights.values()) <= 0.25 + 1e-9
+    assert prop.cash_weight >= 0.0
+    assert prop.cash_weight + sum(prop.weights.values()) == pytest.approx(1.0)
+
+
+def test_fetch_close_map_skips_all_nan_close(monkeypatch):
+    """전체 NaN Close frame(yfinance 부분응답) → 해당 종목 스킵, TypeError 로
+    리포트 전체가 죽지 않음 (회귀: first_valid_index()=None → max() TypeError)."""
+    import scripts.check_portfolio as mod
+
+    idx = pd.bdate_range("2024-01-01", periods=50)
+    good = pd.DataFrame({"Close": np.linspace(100, 110, 50)}, index=idx)
+    bad = pd.DataFrame({"Close": [np.nan] * 50}, index=idx)
+    monkeypatch.setattr("src.data_fetcher.fetch_prices",
+                        lambda t, period="1y", **k: bad if t == "BAD" else good)
+    out = mod._fetch_close_map(["GOOD", "BAD"], period="max")
+    assert list(out) == ["GOOD"]

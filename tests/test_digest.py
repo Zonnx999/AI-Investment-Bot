@@ -326,3 +326,11 @@ def test_propose_weights_happy_path(monkeypatch):
     )
     assert digest_mod._propose_weights(["NVDA", "CPNG", "NVDA"]) == {
         "NVDA": 0.6, "CPNG": 0.2}
+
+
+def test_digest_weights_sub_half_percent_renders_lt1_not_zero():
+    """0 < w < 0.5% 는 '제안 <1%' — 정확한 0(엣지 없음)과 구분 (§4.10 #5 회귀)."""
+    out = format_digest(_report(), [], now=NOW,
+                        weights={"NVDA": 0.004, "CPNG": 0.0})
+    assert "종합 *64* · 제안 <1%" in out
+    assert "종합 *29* · 제안 0%" in out                     # 진짜 0 은 그대로 0%
