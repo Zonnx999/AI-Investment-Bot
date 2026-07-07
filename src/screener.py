@@ -200,11 +200,19 @@ def health_scorecard(metrics: dict) -> ScoreCard:
     iq = _safe(metrics, "incomeQuality")
     cr = _safe(metrics, "currentRatio", 1.0)
 
+    # 음수 NDE 의 두 얼굴: 순현금(netDebt<0, 좋음) vs 적자(EBITDA<0, 최악).
+    # 비율만으론 구분 불가 → evToEBITDA 부호로 판별 (EBITDA<0 이면 음수).
+    # 적자발 음수를 그대로 클립하면 최악의 레버리지가 만점(§4.10 #5 부호 함정).
+    ev_eb = _safe(metrics, "evToEBITDA", 1.0)
+    nde_loss = nde < 0 and ev_eb < 0
+
     comps = [
         Component("총이익률(GP)", _clip(gp * 0.625, 0, 25), 25, f"{gp:.0f}%"),
         Component("ROIC", _clip(roic * 1.0, 0, 20), 20, f"{roic:.1f}%"),
         Component("ROE", _clip(roe * 1.67, 0, 20), 20, f"{roe:.1f}%"),
-        Component("순부채/EBITDA", _clip(20.0 - nde * 2.5, 0, 20), 20, f"{nde:.1f}x"),
+        Component("순부채/EBITDA",
+                  0.0 if nde_loss else _clip(20.0 - nde * 2.5, 0, 20),
+                  20, f"{nde:.1f}x" + (" (적자)" if nde_loss else "")),
         Component("이익의 질", _clip(iq * 2.0, 0, 10), 10, f"{iq:.2f}"),
         Component("유동비율", _clip(min(cr, 3.0) * 1.67, 0, 5), 5, f"{cr:.2f}"),
     ]

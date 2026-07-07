@@ -313,3 +313,38 @@ def test_generate_signal_report_reuses_factor_vol_pct(fresh_state_db, monkeypatc
     from src.storage import get_storage
     saved = get_storage().get_state("signals", "last_run")
     assert saved["vols"] == {"NVDA": 42.5}
+
+
+# ---------------- 전수 리뷰 회귀 (2026-07-06) ----------------
+
+
+def test_momentum_primary_branch_needs_over_273_rows():
+    """273행 초과에서만 12-1 스킵월 주 브랜치 — 250행(구 period=1y)은 폴백."""
+    idx250 = pd.bdate_range("2023-01-02", periods=250)
+    p250 = pd.Series(np.linspace(100, 150, 250), index=idx250)
+    _, notes250 = momentum_score(p250)
+    assert any("단기 대체" in n for n in notes250)          # 1y 면 영원히 폴백
+
+    idx300 = pd.bdate_range("2023-01-02", periods=300)
+    p300 = pd.Series(np.linspace(100, 150, 300), index=idx300)
+    _, notes300 = momentum_score(p300)
+    assert not any("단기 대체" in n for n in notes300)      # 2y 면 주 브랜치
+
+
+def test_factor_scores_fetches_two_years(monkeypatch):
+    """factor_scores 의 가격 조회가 period=2y — 1y 회귀 방지 (주 브랜치 사수)."""
+    captured = {}
+
+    def fake_prices(ticker, period="1y", **k):
+        captured["period"] = period
+        idx = pd.bdate_range("2022-01-03", periods=520)
+        return pd.DataFrame({"Close": np.linspace(100, 200, 520)}, index=idx)
+
+    monkeypatch.setattr("src.data_fetcher.fetch_prices", fake_prices)
+    monkeypatch.setattr("src.data_fetcher.fetch_quote",
+                        lambda t, **k: {"price": 150.0})
+    monkeypatch.setattr("src.signals.latest_fundamentals",
+                        lambda t: {"returnOnEquity": 0.15})
+    from src.signals import factor_scores
+    factor_scores("TEST")
+    assert captured["period"] == "2y"

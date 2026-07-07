@@ -218,6 +218,14 @@ def fetch_macro(series_id: str, start: str | None = None) -> pd.Series:
     if start is None:
         start = (datetime.now(timezone.utc) - timedelta(days=365 * 5)).strftime("%Y-%m-%d")
 
+    # fredapi 는 timeout 없는 bare urlopen 을 씀 — 유일하게 src/http.py 의
+    # 강제 타임아웃을 우회하는 네트워크 경계라, 블랙홀 시 다이제스트가 통째로
+    # 멈춤. 전역 소켓 기본 타임아웃으로 감싸고 finally 로 복원 (이 시점의
+    # 파이프라인은 단일 스레드라 전역 변경이 안전).
+    import socket
+
+    prev_timeout = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(30)
     try:
         series = fred.get_series(series_id, observation_start=start)
     except ValueError as e:
@@ -229,6 +237,8 @@ def fetch_macro(series_id: str, start: str | None = None) -> pd.Series:
         raise DataFetchError(
             f"FRED 호출 실패: series_id={series_id}", source="FRED"
         ) from e
+    finally:
+        socket.setdefaulttimeout(prev_timeout)
 
     if series is None or series.empty:
         raise DataValidationError(
@@ -433,7 +443,16 @@ def _fmp_get(endpoint: str, params: dict | None = None) -> list:
             f"FMP {endpoint}: HTTP {code}", status_code=code, source="FMP"
         )
 
-    return response.json()
+    body = response.json()
+    # FMP 는 일부 오류를 200 + {"Error Message": ...} dict 로 줌 — 이걸 데이터인 척
+    # 흘려보내면 fetch_quote/profile 이 에러 dict 를 반환해 _safe 가 전부 default 로
+    # 채운 '조용한 엉터리 점수' 가 됨 (§4.10 #3). 여기서 중앙 차단.
+    if isinstance(body, dict) and "Error Message" in body:
+        raise DataValidationError(
+            f"FMP {endpoint}: 200 이지만 에러 응답 — {str(body['Error Message'])[:200]}",
+            source="FMP",
+        )
+    return body
 
 
 def _fmp_to_dataframe(data: list) -> pd.DataFrame:

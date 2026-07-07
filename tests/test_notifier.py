@@ -236,3 +236,27 @@ def test_edit_message_markdown_400_falls_back_to_plain(telegram_creds, telegram_
 def test_edit_message_safe_swallows_error(telegram_creds, telegram_server):
     telegram_server.mode = "error"
     assert notifier_mod.edit_message_safe("999", 42, "x") is False
+
+
+def test_generic_request_exception_becomes_domain_error(monkeypatch):
+    """Timeout/ConnectionError 외 requests 예외(ChunkedEncodingError 등)도
+    도메인 예외로 변환 — send_safe 를 뚫고 루프를 죽이던 회귀."""
+    import requests
+
+    import src.notifier as notifier_mod
+    from src.exceptions import ApiConnectionError
+
+    class _FakeSession:
+        def post(self, *a, **k):
+            raise requests.exceptions.ChunkedEncodingError("연결 끊김")
+
+    monkeypatch.setattr(notifier_mod, "get_http_session", lambda: _FakeSession())
+    backup = (settings.telegram_bot_token, settings.telegram_chat_id)
+    _set("123:fake", "1")
+    try:
+        with pytest.raises(ApiConnectionError):
+            notifier_mod._telegram_post("sendMessage", {"chat_id": "1", "text": "x"})
+        # send_safe 는 이제 이 실패를 삼키고 False (크래시 없음)
+        assert notifier_mod.send_safe("x", "1") is False
+    finally:
+        _set(*backup)

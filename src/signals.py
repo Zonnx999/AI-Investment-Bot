@@ -284,7 +284,9 @@ def factor_scores(ticker: str) -> FactorScores:
     """한 종목의 4팩터 점수 (모멘텀/밸류/퀄리티/로우볼). 데이터 미가용 시 0점 + note."""
     from src.data_fetcher import fetch_prices, fetch_quote
 
-    closes = close_series(fetch_prices(ticker, period="1y"))
+    # 2y 필수: 12-1 스킵월 모멘텀은 273 거래일 초과 필요 — 1y(~250행)면
+    # 주 브랜치가 영원히 죽은 코드가 되고 3개월 폴백만 돌게 됨 (리뷰 회귀)
+    closes = close_series(fetch_prices(ticker, period="2y"))
     momentum, notes = momentum_score(closes)
     low_vol, lv_notes, vol_pct = low_vol_score(closes)
     notes.extend(lv_notes)

@@ -69,3 +69,35 @@ def test_classify_regime_isolates_failures_when_no_keys(no_api_keys):
     assert report.score == 0
     # 에러 메시지가 사용자용 signals 에 섞이면 안 됨
     assert all("실패" not in s and "Error" not in s for s in report.signals)
+
+
+# ---------------- 전수 리뷰 회귀 (2026-07-06) ----------------
+
+
+def test_daily_returns_mixed_calendar_keeps_monday_returns():
+    """혼합 캘린더 패널(BTC 주말 거래 + ETF 평일)에서 ETF 의 금→월 수익률이
+    NaN 으로 유실되지 않아야 함 (변동성·상관 편향 회귀)."""
+    all_days = pd.date_range("2024-01-01", periods=28, freq="D")
+    weekdays = all_days[all_days.weekday < 5]
+    rng = np.random.default_rng(3)
+    btc = pd.Series(100 + np.cumsum(rng.normal(0, 1, len(all_days))), index=all_days)
+    spy = pd.Series(100 + np.cumsum(rng.normal(0, 1, len(weekdays))), index=weekdays)
+    panel = pd.DataFrame({"BTC": btc, "SPY": spy})
+
+    rets = daily_returns(panel)
+    mondays = rets.index[rets.index.weekday == 0]
+    assert len(mondays) > 0
+    assert rets.loc[mondays, "SPY"].notna().all()       # 금→월 수익률 보존
+    # 자산별 표본 수: SPY 는 자기 캘린더 기준 (첫 관측 제외 전부)
+    assert rets["SPY"].notna().sum() == len(weekdays) - 1
+
+
+def test_cumulative_and_drawdown_empty_panel_domain_error():
+    """빈 패널 → raw IndexError 가 아니라 InsufficientDataError (호출부 강등 가능)."""
+    from src.exceptions import InsufficientDataError
+
+    empty = pd.DataFrame()
+    with pytest.raises(InsufficientDataError):
+        cumulative_returns(empty)
+    with pytest.raises(InsufficientDataError):
+        current_drawdown(empty)

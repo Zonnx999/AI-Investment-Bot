@@ -207,7 +207,10 @@ def monte_carlo_simulation(
 
     rng = np.random.default_rng(seed)  # seed=None 이면 비결정적
 
-    drift = mu - 0.5 * sigma * sigma
+    # mu 는 **log-수익률 평균**이라 이미 Ito 보정(-σ²/2)이 반영된 log-drift.
+    # 여기서 다시 0.5σ² 를 빼면 이중 차감 — 모든 경로의 drift 가 일당 0.5σ² 만큼
+    # 하향 편향돼 P50 이 체계적으로 비관적이 됨 (3%/일 변동성에서 90일 ~4%).
+    drift = mu
     shocks = sigma * rng.standard_normal((n_paths, days_forward))
     log_increments = drift + shocks
     cumulative = np.cumsum(log_increments, axis=1)
@@ -271,6 +274,9 @@ def scenario_impact(
         earnings_factor = (1 + rev)
     else:
         earnings_factor = (1 + rev) * (new_margin / current_operating_margin_pct)
+    # 마진 쇼크가 현재 마진을 넘어서면(적자 전환) 이익 기반 가치는 0 —
+    # 주가가 음수로 나가는 것을 차단 (§4.10 #5 경계 가드)
+    earnings_factor = max(earnings_factor, 0.0)
     multiple = 1 + multiple_shock_pct / 100
     new_price = current_price * earnings_factor * multiple
 

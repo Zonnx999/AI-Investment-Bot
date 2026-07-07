@@ -385,3 +385,48 @@ def test_calculate_kr_scores_midcap_pbr_not_floored():
     sc = universe.calculate_kr_scores(fin, market_cap=2e12)   # PBR = 2.0
     pbr_comp = next(c for c in sc["detail"]["value"]["components"] if c[0] == "PBR")
     assert pbr_comp[1] > 15.0   # 구곡선(0점) 대비 유의미한 점수
+
+
+# ---------------- 전수 리뷰 회귀 (2026-07-06) ----------------
+
+
+def test_calculate_kr_scores_negative_equity_zeroes_roe_and_debt():
+    """자본잠식(eq<0): 음수NI/음수EQ = 양수 ROE 만점, 부채/음수EQ = 음수
+    부채비율 만점이던 부호 함정 회귀 — 둘 다 0점·'—' 처리."""
+    sc = universe.calculate_kr_scores(
+        {"net_income": -50e9, "equity": -20e9, "debt": 300e9,
+         "revenue": 100e9, "op_income": -10e9},
+        market_cap=500e9,
+    )
+    comps = {c[0]: c for c in sc["detail"]["health"]["components"]}
+    assert comps["ROE"][1] == 0.0 and comps["ROE"][3] == "—"
+    assert comps["부채비율"][1] == 0.0 and comps["부채비율"][3] == "—"
+    assert comps["흑자"][1] == 0.0                          # 적자
+
+
+def _upsert_oldy(conn, price):
+    universe._upsert_universe_row(
+        conn, symbol="OLDY", market="US", name="Old Co", sector="Tech",
+        industry="SW", price=price, market_cap=1e9, dividend_yield=0.0)
+
+
+def test_discover_upsert_preserves_enrichment_freshness(fresh_db):
+    """discover 재발견이 updated_at 을 밀어올려 만기 종목의 재보강을 영원히
+    스킵시키던 회귀 — upsert 후에도 symbols_needing_enrichment 에 남아야 함."""
+    from datetime import timedelta
+
+    conn = universe._conn()
+    _upsert_oldy(conn, 10.0)
+    # 보강 완료로 표시하되 30일 전으로 백데이트
+    conn.execute("UPDATE screened SET enriched=1, "
+                 "updated_at=datetime('now', '-30 days') "
+                 "WHERE symbol='OLDY' AND market='US'")
+    conn.commit()
+    before = universe.symbols_needing_enrichment(timedelta(days=7))
+    assert any("OLDY" in str(row) for row in before)
+
+    # 주간 배치처럼 enrich 직전에 discover 가 같은 종목을 재발견(upsert)
+    _upsert_oldy(conn, 11.0)
+    conn.commit()
+    after = universe.symbols_needing_enrichment(timedelta(days=7))
+    assert any("OLDY" in str(row) for row in after)

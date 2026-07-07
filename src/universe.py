@@ -157,7 +157,14 @@ def _flush_updates(conn, statements: list[str]) -> None:
 
 def _upsert_universe_row(conn, *, symbol, market, name, sector, industry,
                          price, market_cap, dividend_yield) -> None:
-    """발굴 필드만 upsert — 기존 보강 점수(roe/scores/enriched)는 보존."""
+    """발굴 필드만 upsert — 기존 보강 점수(roe/scores/enriched)는 보존.
+
+    updated_at 은 ON CONFLICT 에서 **갱신하지 않음**: 이 컬럼은
+    symbols_needing_enrichment 가 쓰는 '펀더멘털 신선도' 마커라, 주간 배치의
+    discover 가 enrich 직전에 이를 now 로 밀어버리면 만기 지난 종목이 전부
+    '신선함' 으로 위장되어 재보강이 영원히 스킵됨 (신규 INSERT 시에만 세팅,
+    이후 갱신은 enrich/enrich_kr 담당).
+    """
     conn.execute(
         """
         INSERT INTO screened (symbol, market, name, sector, industry, price,
@@ -166,8 +173,7 @@ def _upsert_universe_row(conn, *, symbol, market, name, sector, industry,
         ON CONFLICT(symbol, market) DO UPDATE SET
             name=excluded.name, sector=excluded.sector,
             industry=excluded.industry, price=excluded.price,
-            market_cap=excluded.market_cap, dividend_yield=excluded.dividend_yield,
-            updated_at=excluded.updated_at
+            market_cap=excluded.market_cap, dividend_yield=excluded.dividend_yield
         """,
         (symbol, market, name, sector, industry, price, market_cap,
          dividend_yield, _utcnow(), _utcnow()),
@@ -498,10 +504,14 @@ def calculate_kr_scores(fin: dict, market_cap: float) -> dict:
     ni, eq, debt = fin.get("net_income"), fin.get("equity"), fin.get("debt")
     rev, op = fin.get("revenue"), fin.get("op_income")
 
-    roe = (ni / eq * 100) if (ni is not None and eq) else None
+    # 자본잠식(eq ≤ 0) 가드 — 음수NI/음수EQ 는 '큰 양수 ROE', 부채/음수EQ 는
+    # '음수 부채비율(만점 클립)' 이 되어 최악의 재무제표가 만점을 받는 부호
+    # 함정 (§4.10 #5). eq > 0 일 때만 산출, 아니면 None → 0점·"—" 경로.
+    pos_eq = eq is not None and eq > 0
+    roe = (ni / eq * 100) if (ni is not None and pos_eq) else None
     per = (market_cap / ni) if (ni and ni > 0) else None
-    pbr = (market_cap / eq) if eq else None
-    debt_ratio = (debt / eq * 100) if (debt is not None and eq) else None
+    pbr = (market_cap / eq) if pos_eq else None
+    debt_ratio = (debt / eq * 100) if (debt is not None and pos_eq) else None
     op_margin = (op / rev * 100) if (op is not None and rev) else None
 
     from src.screener import Component, ScoreCard

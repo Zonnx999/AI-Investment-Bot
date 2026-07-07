@@ -142,3 +142,30 @@ def test_fetch_stock_news_requires_key_before_any_network(no_api_keys):
 
     with pytest.raises(MissingApiKeyError):
         fetch_stock_news("AAPL")
+
+
+def test_fmp_get_rejects_error_shaped_200(monkeypatch):
+    """FMP 200 + {"Error Message": ...} 를 데이터로 흘려보내지 않음 —
+    fetch_quote/profile 이 에러 dict 를 반환해 조용한 엉터리 점수가 되던 회귀."""
+    import src.data_fetcher as df
+    from src.exceptions import DataValidationError
+
+    class _FakeResp:
+        status_code = 200
+        ok = True
+
+        def json(self):
+            return {"Error Message": "Invalid API KEY."}
+
+    class _FakeSession:
+        def get(self, *a, **k):
+            return _FakeResp()
+
+    monkeypatch.setattr(df, "get_http_session", lambda: _FakeSession())
+    prev = df.settings.fmp_api_key
+    object.__setattr__(df.settings, "fmp_api_key", "fake-key")
+    try:
+        with pytest.raises(DataValidationError):
+            df._fmp_get("quote", {"symbol": "AAPL"})
+    finally:
+        object.__setattr__(df.settings, "fmp_api_key", prev)

@@ -191,3 +191,17 @@ def test_has_fundamentals_ignores_identifier_strings():
     assert has_fundamentals(shell_row) is False
     # 식별자 + 실제 수치 하나라도 있으면 True
     assert has_fundamentals({**shell_row, "returnOnEquity": 0.12}) is True
+
+
+def test_health_nde_negative_from_loss_scores_zero():
+    """음수 NDE 의 두 얼굴 회귀: 적자발(EBITDA<0, evToEBITDA<0)은 0점 '(적자)',
+    순현금발(netDebt<0, EBITDA>0)은 종전대로 만점."""
+    loss = {"netDebtToEBITDA": -4.0, "evToEBITDA": -6.0}
+    sc = health_scorecard(loss)
+    comp = next(c for c in sc.components if c.label == "순부채/EBITDA")
+    assert comp.points == 0.0 and "(적자)" in comp.detail
+
+    net_cash = {"netDebtToEBITDA": -1.0, "evToEBITDA": 8.0}
+    sc2 = health_scorecard(net_cash)
+    comp2 = next(c for c in sc2.components if c.label == "순부채/EBITDA")
+    assert comp2.points == 20.0 and "(적자)" not in comp2.detail

@@ -59,6 +59,10 @@ def _telegram_post(method: str, payload: dict) -> dict:
                 f"텔레그램 {method} 타임아웃 (재시도 {RETRY_TOTAL}회 포함)", source="Telegram"
             ) from e
         raise ApiConnectionError(f"텔레그램 {method} 연결 실패", source="Telegram") from e
+    except requests.exceptions.RequestException as e:
+        # 그 외 requests 예외(ChunkedEncodingError 등)도 도메인 예외로 — 안 잡으면
+        # send_safe 의 DataFetchError 캐치를 뚫고 브로드캐스트/봇 루프가 크래시함
+        raise ApiConnectionError(f"텔레그램 {method} 요청 실패", source="Telegram") from e
 
     # 텔레그램은 에러도 200 이 아닌 코드 + JSON {ok:false, description} 로 줌
     try:
