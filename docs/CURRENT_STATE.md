@@ -83,7 +83,25 @@
   2. MiniMax 모델 id(기본 `minimaxai/minimax-m2`)·응답 스키마 1콜 확인 (`MINIMAX_MODEL` 로 교체 가능; 틀려도 다이제스트는 정상 발송)
   3. 인라인 버튼 실 텔레그램: 탭 승인/거절, 이중탭 "이미 처리됨", 48h 경과 메시지 edit 거부 시 로그만 남는지
   4. subscribers/universe 변경분 실 Turso 레플리카 1회 스모크 (tuple 파라미터·stale 레플리카 규칙)
-  5. 점수 공식 변경(KR PBR·빈 fundamentals skip) → **DB 재점수**: `python scripts/build_universe.py --enrich --force`
+  5. 점수 공식 변경(KR PBR·빈 fundamentals skip + **자본잠식 ROE/부채 가드·NDE 적자 가드**) →
+     **DB 재점수**: `python scripts/build_universe.py --enrich --force`
+  6. `python scripts/check_portfolio.py` 실네트워크 1회 (Phase 13 사이징 검증)
+  7. **서버 systemd 유닛 2개 수정** (`DEPLOYMENT.md §5`): quant-bot 에 `Type=notify`+`WatchdogSec=300`,
+     quant-digest@ 에 `TimeoutStartSec=900` — libsql 이 GIL 을 쥔 채 행하면 파이썬 가드가
+     무력이라 프로세스 밖 워치독이 최종 안전망 (2026-07-06 행 사고 재발 방지)
+
+### 인계 (2026-07-06) — 전수 버그헌트 (노트북 행 사고 후속)
+- 🐛 **실사고**: 노트북에서 Turso sync() 가 예외 없이 무한 행 → 전 진입점 멈춤.
+  근본원인 체인: libsql 은 **GIL 을 쥔 채** 네이티브 블로킹 (스레드 워치독 무력) +
+  임베디드 레플리카는 **쓰기도 원격 왕복** + 모든 진입점이 Storage 초기화를 강제.
+- ✅ 3중 가드: 초기 pull **자식 프로세스 프로브**(타임아웃 시 오프라인 파일 강등) /
+  push 전 소켓 사전점검 / systemd 워치독(위 체크리스트 7). + `QUANT_BOT_OFFLINE=1` 킬스위치.
+- ✅ 전수 버그헌트 확정 12건 수정 — 굵직한 것: **MC 이중 Ito 보정**(P50 비관 편향),
+  **모멘텀 주 브랜치가 1y 데이터론 영원히 죽은 코드**(→2y), 혼합 캘린더 월요일 수익률 유실,
+  자본잠식 KR 만점 함정, discover 의 enrichment 신선도 오염, libsql ValueError 미포착
+  (베스트에포트 가드 전체가 Turso 에서 무력이었음), FMP 200 에러 dict 중앙 차단.
+- 테스트 **420개** (오프라인 ~14초). ⚠️ 재점수·모멘텀 변화로 **다이제스트 점수가 눈에 띄게
+  달라질 수 있음** — 버그 수정이지 회귀가 아님 (12-1 모멘텀이 처음으로 실제 가동).
 
 ### 인계 (2026-06-30)
 - ✅ **이번 세션 전부 배포·검증**: 코드리뷰 버그 5건 + 다이제스트 UX(회사명·범례·위계·예측) +
