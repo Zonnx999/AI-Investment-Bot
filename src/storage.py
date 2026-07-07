@@ -51,6 +51,17 @@ logger = get_logger(__name__)
 
 CacheKind = Literal["dataframe", "series", "json"]
 
+# best-effort 가드용 DB 예외 튜플 — libsql_experimental 은 모든 DB 오류를
+# sqlite3.Error 가 아니라 **plain ValueError** 로 던짐 (pyo3 to_py_err).
+# sqlite3.Error 만 잡으면 Turso 에서 "캐시 장애가 파이프라인을 막지 않음"(원칙 #1)
+# 약속이 깨져 다이제스트/봇이 통째로 크래시함. 가드 블록은 conn 호출만 감싸므로
+# ValueError 포함이 안전 (다른 ValueError 발생원은 블록 밖).
+try:
+    import libsql_experimental as _libsql_mod  # noqa: F401 — 존재 확인용
+    _DB_ERRORS: tuple[type[BaseException], ...] = (sqlite3.Error, ValueError)
+except ImportError:
+    _DB_ERRORS = (sqlite3.Error,)
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS cache (
     namespace  TEXT NOT NULL,
@@ -100,6 +111,69 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# 자식 프로세스에서 레플리카 connect+sync 를 수행하는 코드 (초기 pull 프로브).
+# 왜 자식 프로세스인가: libsql 의 connect()/sync() 는 GIL 을 쥔 채 네이티브에서
+# 블로킹함 → 같은 프로세스의 감시 스레드는 GIL 을 못 잡아 타임아웃이 영원히
+# 안 돌아옴 (스레드 워치독은 무력). 프로세스 경계만이 확실한 타임아웃 수단.
+# 자식이 sync 를 마치고 종료한 **뒤에** 부모가 레플리카를 열므로
+# '레플리카 파일 = 한 프로세스' 규칙(§4.10 #9)도 지켜짐.
+_PROBE_CHILD_CODE = """
+import os, sys
+import libsql_experimental as l
+c = l.connect(sys.argv[1], sync_url=os.environ['TURSO_DATABASE_URL'],
+              auth_token=os.environ.get('TURSO_AUTH_TOKEN', ''))
+c.sync()
+"""
+
+
+def _probe_initial_sync(db_path: Path, url: str, token: str | None) -> str:
+    """자식 프로세스로 레플리카 초기 pull 시도. 반환: "ok"/"error"/"timeout".
+
+    timeout → 네트워크 블랙홀/행 (자식은 kill 됨). error → 빠른 실패
+    (인증 오류·연결 거부 등, stale 레플리카로 진행 가능). 토큰은 argv 가 아니라
+    env 로 전달 (ps 노출 방지, §4.9).
+    """
+    import subprocess
+    import sys
+
+    env = {**os.environ, "TURSO_DATABASE_URL": url, "TURSO_AUTH_TOKEN": token or ""}
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", _PROBE_CHILD_CODE, str(db_path)],
+            capture_output=True, timeout=_sync_timeout(), env=env, text=True,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("Turso 초기 pull 프로브 %.0fs 타임아웃 — 자식 프로세스 kill",
+                       _sync_timeout())
+        return "timeout"
+    except OSError as e:
+        logger.warning("초기 pull 프로브 실행 불가 — 프로브 없이 진행: %s", e)
+        return "error"
+    if proc.returncode != 0:
+        logger.warning("Turso 초기 pull 실패 (프로브 rc=%d) — 로컬 레플리카로 진행: %s",
+                       proc.returncode, (proc.stderr or "").strip()[-300:])
+        return "error"
+    logger.debug("Turso 초기 pull 프로브 OK")
+    return "ok"
+
+
+def _remote_reachable(url: str, timeout: float = 5.0) -> bool:
+    """Turso 호스트 TCP 도달성 사전 점검 (순수 파이썬 소켓 — 타임아웃 확실).
+
+    libsql sync()/execute() 는 GIL 을 쥔 채 무한 블로킹할 수 있으므로,
+    push 전에 싸게 찔러보고 막혀 있으면 sync 자체를 건너뜀.
+    """
+    import socket
+    from urllib.parse import urlparse
+
+    host = urlparse(url).hostname or url.split("//")[-1].split("/")[0]
+    try:
+        with socket.create_connection((host, 443), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
 class Storage:
     """SQLite 기반 (namespace, key) → payload 캐시.
 
@@ -143,6 +217,26 @@ class Storage:
                 "Turso 설정됨(TURSO_DATABASE_URL) 이지만 libsql 미설치 — "
                 "pip install -e \".[hosting]\""
             ) from e
+        # 초기 pull 은 **자식 프로세스 프로브**로 — libsql 은 GIL 을 쥔 채
+        # 블로킹하므로 스레드 워치독으로는 행을 못 끊음 (프로세스 경계만 확실).
+        # 프로브가 connect() 자체의 행까지 함께 가드함.
+        status = self._probe_initial_sync(self.db_path, url, settings.turso_auth_token)
+        if status == "timeout":
+            # 네트워크 블랙홀 — 임베디드 레플리카는 '쓰기'도 원격 왕복이라
+            # libsql conn 을 열어봤자 다음 쓰기에서 또 멈춤. 레플리카 파일을
+            # sqlite3 로 직접 열면 복제 메타데이터 손상(§4.10 #9)이므로
+            # **별도 오프라인 파일**로 강등. 캐시는 cold, 파이프라인은 계속.
+            offline = self._offline_path()
+            logger.warning(
+                "Turso 초기 pull 타임아웃 — 오프라인 캐시로 강등: %s "
+                "(원인 후보: 네트워크 차단/레플리카 손상. QUANT_BOT_OFFLINE=1 로 "
+                "명시 우회 가능, 레플리카 복구는 data/*.db* 삭제 후 재싱크)", offline,
+            )
+            self.db_path = offline
+            return sqlite3.connect(offline)
+        # "error" 는 빠른 실패 (인증·거부 등) — 종전 동작대로 stale 레플리카로 진행.
+        # "ok" 면 자식이 방금 sync 했으므로 부모는 초기 sync 생략 (이중 pull 방지).
+
         try:
             conn = libsql.connect(
                 str(self.db_path), sync_url=url, auth_token=settings.turso_auth_token
@@ -150,24 +244,12 @@ class Storage:
         except Exception as e:  # noqa: BLE001 — libsql 예외 타입을 도메인 예외로 변환
             raise StorageError(f"Turso 연결 실패: {self.db_path}") from e
 
-        status = self._safe_sync(conn, "초기 pull")
-        if status == "timeout":
-            # 네트워크 블랙홀 — 임베디드 레플리카는 '쓰기'도 원격 왕복이라
-            # 이 conn 을 계속 쓰면 다음 쓰기에서 또 멈춤. 스레드에 유기된 conn 과의
-            # 파일 경합·복제 메타데이터 손상을 피해 **별도 오프라인 파일**로 강등.
-            # 캐시는 cold 지만 파이프라인은 계속 (설계 원칙 #1: 캐시는 best-effort).
-            offline = self._offline_path()
-            logger.warning(
-                "Turso 초기 sync 타임아웃 — 오프라인 캐시로 강등: %s "
-                "(원인 후보: 네트워크 차단/레플리카 손상. QUANT_BOT_OFFLINE=1 로 "
-                "명시 우회 가능, 레플리카 복구는 data/*.db* 삭제 후 재싱크)", offline,
-            )
-            self.db_path = offline
-            return sqlite3.connect(offline)
-
         self.is_turso = True
-        logger.info("Turso 임베디드 레플리카 연결: %s", self.db_path)
+        logger.info("Turso 임베디드 레플리카 연결: %s (초기 pull=%s)", self.db_path, status)
         return conn
+
+    # 테스트에서 monkeypatch 하기 쉽도록 클래스 경유로 노출
+    _probe_initial_sync = staticmethod(_probe_initial_sync)
 
     def _offline_path(self) -> Path:
         """Turso 우회/강등 시 쓰는 로컬 전용 캐시 파일 (레플리카와 분리)."""
@@ -176,12 +258,13 @@ class Storage:
     def _safe_sync(self, conn, what: str) -> str:
         """클라우드 동기화 (best-effort + 감시 타임아웃). 반환: "ok"/"error"/"timeout".
 
-        libsql 의 sync() 는 자체 타임아웃이 없어 블랙홀 네트워크에서 예외 없이
-        무한 대기함 (실사고 2026-07-06: 다이제스트·fetch 전 진입점 행).
-        데몬 스레드에서 돌리고 QUANT_BOT_SYNC_TIMEOUT(기본 20s) 만 기다림 —
-        타임아웃 시 스레드는 유기(daemon)하고 호출부가 강등을 결정.
-        부수 효과: Ctrl-C 가 Rust 네이티브 호출 안에서 pyo3 panic 을 내던 것도
-        메인 스레드가 join 대기 중이라 깔끔한 KeyboardInterrupt 로 바뀜.
+        ⚠️ 한계: libsql 은 GIL 을 쥔 채 네이티브에서 블로킹하므로, 진짜
+        블랙홀 행에서는 이 스레드 워치독의 join(timeout) 도 GIL 을 못 잡아
+        무력하다 (실사고 2026-07-06 의 교훈). 그래서 실제 가드는 3중:
+        (1) 초기 pull 은 자식 프로세스 프로브(_probe_initial_sync),
+        (2) push 전 소켓 사전 점검(_remote_reachable — 순수 파이썬이라 확실),
+        (3) 서버 systemd WatchdogSec (docs/DEPLOYMENT.md).
+        이 워치독은 GIL 을 놓는 유형의 지연/실패에만 유효한 보조 수단.
         """
         result: dict[str, Any] = {}
 
@@ -207,21 +290,29 @@ class Storage:
         return "ok"
 
     def sync(self) -> None:
-        """로컬 변경을 클라우드로 push. 쓰기 배치 후 호출. 로컬 sqlite3 면 no-op.
+        """클라우드와 동기화. 쓰기 배치 후 호출. 로컬 sqlite3 면 no-op.
 
-        push 가 타임아웃되면(유기 스레드가 conn 을 계속 참조) 같은 conn 으로
-        추가 sync 를 겹쳐 돌리지 않도록 이후 push 는 스킵 — 프로세스 재시작이
-        복구 수단 (systemd 봇/타이머 구조상 자연 복구).
+        주의: 임베디드 레플리카에서 **쓰기(execute/commit)는 이미 원격 왕복**이고
+        (§4.10 #4 실측), sync() 는 레플리카 프레임 동기화다. push 전에
+        순수 파이썬 소켓으로 도달성을 점검해(확실한 타임아웃) 막혀 있으면
+        sync 를 아예 건너뜀 — libsql 호출은 GIL 을 쥔 채 행할 수 있어서다.
+        타임아웃/유기가 한 번 발생하면 같은 conn 에 sync 를 겹치지 않도록
+        이후 push 는 스킵 (systemd 재시작이 복구 수단).
         """
         if not self.is_turso:
             return
         if getattr(self, "_sync_degraded", False):
             logger.debug("Turso push 스킵 — 이전 sync 타임아웃으로 강등 상태")
             return
+        url = settings.turso_database_url
+        if url and not _remote_reachable(url):
+            logger.warning("Turso 도달 불가 (소켓 사전점검 실패) — push 건너뜀, "
+                           "다음 호출에서 재시도")
+            return
         if self._safe_sync(self._conn, "push") == "timeout":
             self._sync_degraded = True
             logger.warning("Turso push 타임아웃 — 이 프로세스의 이후 push 는 스킵 "
-                           "(로컬 레플리카에는 반영됨, 재시작 시 재동기화)")
+                           "(재시작 시 재동기화)")
 
     def _resolve_path(self, db_path: Path | None) -> Path:
         self._db_path_was_injected = db_path is not None
@@ -240,7 +331,7 @@ class Storage:
                 "SELECT payload, fetched_at FROM cache WHERE namespace=? AND key=?",
                 (namespace, key),
             ).fetchone()
-        except sqlite3.Error:
+        except _DB_ERRORS:
             logger.warning("캐시 읽기 실패 (%s/%s) — miss 취급", namespace, key, exc_info=True)
             return None
         if row is None:
@@ -344,7 +435,7 @@ class Storage:
                 (namespace, key),
             ).fetchone()
             return json.loads(row[0]) if row else None
-        except (sqlite3.Error, json.JSONDecodeError):
+        except (*_DB_ERRORS, json.JSONDecodeError):
             logger.warning("상태 읽기 실패 (%s/%s) — 첫 실행 취급", namespace, key, exc_info=True)
             return None
 

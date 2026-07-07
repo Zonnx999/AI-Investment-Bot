@@ -19,6 +19,8 @@ Phase 11b — 상시 인터랙티브 봇 (폴링 워커).
 
 from __future__ import annotations
 
+import os
+import socket
 import time
 from typing import NoReturn
 
@@ -60,9 +62,31 @@ def _is_subscriber(chat_id: str, owner: str | None) -> bool:
     return subscribers.subscriber_status(chat_id) == "active"
 
 
+def _sd_notify(state: str) -> None:
+    """systemd sd_notify (stdlib 구현, 의존성 0) — NOTIFY_SOCKET 없으면 no-op.
+
+    용도: `Type=notify` + `WatchdogSec=` 유닛에서 하트비트. libsql 쓰기가
+    GIL 을 쥔 채 블랙홀에 걸리면 파이썬 레벨 가드가 전부 무력하므로
+    (docs/DEPLOYMENT.md §5), 핑이 끊기면 systemd 가 죽이고 Restart 로 복구
+    — 프로세스 밖 워치독이 최종 안전망.
+    """
+    addr = os.environ.get("NOTIFY_SOCKET")
+    if not addr:
+        return
+    if addr.startswith("@"):                        # abstract namespace socket
+        addr = "\0" + addr[1:]
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as s:
+            s.connect(addr)
+            s.send(state.encode())
+    except OSError as e:
+        logger.debug("sd_notify 실패 (무시): %s", e)
+
+
 def run() -> NoReturn:
     """폴링 루프 — 정상 흐름에선 반환하지 않음 (종료는 예외로만: Ctrl+C 등)."""
     store = get_storage()
+    _sd_notify("READY=1")
     subscribers.ensure_owner()                       # 소유자 항상 active
     owner = str(settings.telegram_chat_id) if settings.telegram_chat_id else None
     limiter = bot_commands.RateLimiter(max_calls=RATE_MAX_CALLS, window_sec=RATE_WINDOW_SEC)
@@ -70,6 +94,9 @@ def run() -> NoReturn:
     logger.info("봇 시작 (offset=%s, long-poll=%ds)", offset, LONG_POLL_SEC)
 
     while True:
+        # 하트비트 — 루프가 어딘가(특히 libsql 원격 쓰기)에서 멈추면 핑이 끊겨
+        # systemd WatchdogSec 이 프로세스를 재시작 (설정은 DEPLOYMENT.md §5)
+        _sd_notify("WATCHDOG=1")
         try:
             updates = get_updates(offset=offset, timeout=LONG_POLL_SEC)
         except DataFetchError as e:

@@ -43,6 +43,18 @@ echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 
 ## 5. systemd 서비스 `quant-bot`
 서비스 파일 `/etc/systemd/system/quant-bot.service` — WorkingDirectory=repo, ExecStart=venv python `scripts/bot.py`, `Restart=always`, `RestartSec=5`, enabled(부팅 자동).
+
+**⚠️ 워치독 필수 (2026-07-06 행 사고 재발 방지)**: libsql 쓰기는 GIL 을 쥔 채 원격 왕복하므로
+네트워크 블랙홀 시 프로세스가 '살아있지만 얼어붙음' — `Restart=always` 는 못 잡는다.
+봇이 매 루프 `WATCHDOG=1` 핑을 보내니 (`scripts/bot.py _sd_notify`) 유닛에 다음을 추가:
+```
+[Service]
+Type=notify
+WatchdogSec=300
+NotifyAccess=main
+```
+핑이 300초 끊기면 systemd 가 죽이고 재시작 — offset 은 커밋된 지점부터라 텔레그램이
+미확인 업데이트를 재전달하므로 유실 없음. 적용: 유닛 수정 후 `sudo systemctl daemon-reload && sudo systemctl restart quant-bot`.
 ```
 sudo systemctl status quant-bot --no-pager     # 상태
 journalctl -u quant-bot -f                      # 실시간 로그
@@ -55,7 +67,11 @@ sudo systemctl restart quant-bot                # 재시작
 방지로 **전용 레플리카 경로**(`QUANT_BOT_DB_PATH=.../data/digest_replica.db`)를 씀 — 봇과 같은 Turso 로
 sync 되어 데이터는 일치.
 - 유닛: `quant-digest@.service`(템플릿 `%i`=시장, `Environment=QUANT_BOT_DB_PATH=...digest_replica.db`,
-  `ExecStart=... send_digest.py --no-sync --market %i`) + 타이머 2개:
+  `ExecStart=... send_digest.py --no-sync --market %i`) + 타이머 2개.
+  **⚠️ `TimeoutStartSec=900` 를 [Service] 에 추가할 것** — `Type=oneshot` 의 기본
+  타임아웃은 무한이라, libsql 행(위 §5 참조) 시 유닛이 'activating' 에 영원히 붙잡혀
+  **이후 매일의 타이머 발화가 전부 조용히 무시됨** (다이제스트 무한 중단). 900초가
+  지나면 죽고 다음날 타이머는 정상 발화:
   - `quant-digest-kr.timer`: `OnCalendar=Mon..Fri 08:30 Asia/Seoul`
   - `quant-digest-us.timer`: `OnCalendar=Mon..Fri 09:00 America/New_York`
   - systemd OnCalendar 의 **타임존 지정**으로 KST/ET·DST 자동 처리 (UTC 게이트 불필요), `Persistent=true`.

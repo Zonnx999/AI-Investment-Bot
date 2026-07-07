@@ -252,21 +252,32 @@ def test_offline_env_bypasses_turso(tmp_path, monkeypatch):
         object.__setattr__(storage_mod.settings, "turso_database_url", prev)
 
 
-def test_initial_sync_timeout_degrades_to_offline_file(tmp_path, monkeypatch):
-    """초기 pull 타임아웃 → libsql conn 유기 + 별도 오프라인 파일로 강등 (행 없음)."""
+def _turso_env(tmp_path, monkeypatch):
+    """Turso 경로 테스트 공통 셋업 — env DB 경로 + settings url (복원값 반환)."""
+    monkeypatch.setenv("QUANT_BOT_DB_PATH", str(tmp_path / "replica.db"))
+    prev = storage_mod.settings.turso_database_url
+    object.__setattr__(storage_mod.settings, "turso_database_url", "libsql://x.turso.io")
+    return prev
+
+
+def test_probe_timeout_degrades_to_offline_file(tmp_path, monkeypatch):
+    """초기 pull 프로브 타임아웃 → libsql 을 아예 안 열고 오프라인 파일로 강등.
+
+    실사고 회귀 (2026-07-06): libsql 은 GIL 을 쥔 채 블로킹하므로 스레드
+    워치독이 무력 → 자식 프로세스 프로브가 유일하게 확실한 타임아웃 수단.
+    """
     import sys
     import types
 
-    ev = threading.Event()
     fake_libsql = types.ModuleType("libsql_experimental")
-    fake_libsql.connect = lambda *a, **k: _FakeSyncConn("hang", ev)
+    fake_libsql.connect = lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("프로브 타임아웃이면 부모는 libsql 을 열면 안 됨"))
     monkeypatch.setitem(sys.modules, "libsql_experimental", fake_libsql)
-    monkeypatch.setenv("QUANT_BOT_DB_PATH", str(tmp_path / "replica.db"))
-    monkeypatch.setenv("QUANT_BOT_SYNC_TIMEOUT", "1")
-    prev = storage_mod.settings.turso_database_url
-    object.__setattr__(storage_mod.settings, "turso_database_url", "libsql://x.turso.io")
+    monkeypatch.setattr(Storage, "_probe_initial_sync",
+                        staticmethod(lambda *a, **k: "timeout"))
+    prev = _turso_env(tmp_path, monkeypatch)
     try:
-        s = Storage()                                   # 1s 내 강등되어 반환돼야 함
+        s = Storage()
         try:
             assert s.is_turso is False
             assert s.db_path.name == "replica.offline.db"
@@ -275,8 +286,66 @@ def test_initial_sync_timeout_degrades_to_offline_file(tmp_path, monkeypatch):
         finally:
             s.close()
     finally:
-        ev.set()
         object.__setattr__(storage_mod.settings, "turso_database_url", prev)
+
+
+def test_probe_ok_or_error_connects_without_parent_sync(tmp_path, monkeypatch):
+    """프로브 ok/error → 부모는 libsql 로 열되 초기 sync 를 다시 하지 않음
+    (자식이 방금 pull 했거나, 빠른 실패라 stale 레플리카로 진행 — 종전 의미론)."""
+    import sys
+    import types
+
+    sync_calls = []
+
+    class _NoSyncConn:
+        def sync(self):
+            sync_calls.append(1)
+
+        def executescript(self, *_a):
+            return None
+
+        def commit(self):
+            return None
+
+    fake_libsql = types.ModuleType("libsql_experimental")
+    fake_libsql.connect = lambda *a, **k: _NoSyncConn()
+    monkeypatch.setitem(sys.modules, "libsql_experimental", fake_libsql)
+    prev = _turso_env(tmp_path, monkeypatch)
+    try:
+        for status in ("ok", "error"):
+            monkeypatch.setattr(Storage, "_probe_initial_sync",
+                                staticmethod(lambda *a, s=status, **k: s))
+            st = Storage()
+            assert st.is_turso is True
+            assert st.db_path.name == "replica.db"
+            assert sync_calls == []                     # 부모 초기 sync 없음
+    finally:
+        object.__setattr__(storage_mod.settings, "turso_database_url", prev)
+
+
+def test_probe_subprocess_states(tmp_path, monkeypatch):
+    """_probe_initial_sync 자체 — subprocess 결과 → 3상태 매핑."""
+    import subprocess
+
+    probe = storage_mod._probe_initial_sync
+
+    class _Rc:
+        def __init__(self, rc):
+            self.returncode = rc
+            self.stderr = "boom"
+
+    monkeypatch.setattr(storage_mod.subprocess if hasattr(storage_mod, "subprocess")
+                        else subprocess, "run",
+                        lambda *a, **k: _Rc(0))
+    assert probe(tmp_path / "r.db", "libsql://x", "t") == "ok"
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Rc(1))
+    assert probe(tmp_path / "r.db", "libsql://x", "t") == "error"
+
+    def _raise_timeout(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="python", timeout=1)
+
+    monkeypatch.setattr(subprocess, "run", _raise_timeout)
+    assert probe(tmp_path / "r.db", "libsql://x", "t") == "timeout"
 
 
 def test_push_sync_timeout_marks_degraded_and_skips(store, monkeypatch):
