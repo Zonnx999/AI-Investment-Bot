@@ -68,13 +68,13 @@ libsql 호출(connect/sync/execute)은 **GIL 을 쥔 채 무한 블로킹 가능
 
 > 상세는 `CURRENT_STATE.md` "인계 (2026-07-05)" 섹션. 순서대로:
 
-1. **FMP 뉴스 필드**: `QUANT_BOT_CACHE=off python -c "from src.data_fetcher import fetch_stock_news; print(fetch_stock_news('AAPL'))"` — 필드 다르면 `fetch_stock_news` 파서만 수정
-2. **MiniMax 모델 id**: `python scripts/send_digest.py --dry-run` — 🧠 줄 없으면 로그 확인, `MINIMAX_MODEL` 로 교체 (틀려도 다이제스트는 안전)
-3. **인라인 버튼 실텔레그램**: /start → 버튼 탭 승인 → 이중탭 "이미 처리됨" → 48h 경과 메시지 edit 거부 시 로그만 남는지
-4. **실 Turso 스모크**: 브랜치 pull 후 아무 스크립트 1회 (subscribers/universe 변경분 + 새 프로브 경로)
-5. **DB 재점수** (점수 공식 다수 변경): `python scripts/build_universe.py --enrich --force` (~2-3분)
-6. **`python scripts/check_portfolio.py`** 실네트워크 1회 (Phase 13 사이징 + All Weather 리플레이)
-7. **서버 systemd 유닛 2개** (`DEPLOYMENT.md §5` 스니펫 그대로): quant-bot `Type=notify`+`WatchdogSec=300`, quant-digest@ `TimeoutStartSec=900`
+1. ✅ **FMP 뉴스 필드**: 필드(title/publishedDate/site/url) 완전 일치 확인, 파서 수정 불필요 (2026-07-11)
+2. ✅ **MiniMax 모델 id**: `minimaxai/minimax-m2` NIM 퇴역 → `minimaxai/minimax-m2.7` 교체 (m3 타임아웃 실측); `src/config.py`·`src/llm.py`·`.env.example` 수정 완료 (2026-07-11)
+3. ✅ **인라인 버튼 실텔레그램**: 탭 승인/거절·이중탭 동작 확인 (2026-07-13)
+4. ✅ **실 Turso 스모크**: 통과 + 실버그 발굴·수정 (`_put_payload`/`put_state` libsql `ValueError` 미포착 → `_DB_ERRORS` 교체, 테스트 422 그린) (2026-07-11)
+5. ✅ **DB 재점수** 완료: US 2175종목 갱신·실패 0, §4.10 #5 함정(음수 ROE 고득점 등) 0건, 다이제스트 dry-run 정상 (2026-07-11)
+6. ✅ **`python scripts/check_portfolio.py`** 실네트워크 통과 — Kelly/All Weather 수치 정상 (2026-07-11)
+7. ⏳ **서버 systemd 유닛 2개** (`DEPLOYMENT.md §5` 스니펫 그대로): quant-bot `Type=notify`+`WatchdogSec=300`, quant-digest@ `TimeoutStartSec=900`
 
 그 다음: main 머지 → push → 서버 자동 배포(~15분) → `journalctl -u quant-bot -f` 로 확인.
 ⚠️ 머지 후 다이제스트 점수가 눈에 띄게 달라짐 (12-1 모멘텀 첫 실가동 + 점수 가드들) — 버그 수정이지 회귀 아님.

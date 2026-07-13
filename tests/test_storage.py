@@ -358,3 +358,65 @@ def test_push_sync_timeout_marks_degraded_and_skips(store, monkeypatch):
     assert calls == ["push"] and store._sync_degraded is True
     store.sync()                                        # 강등 상태 — 추가 호출 없음
     assert calls == ["push"]
+
+
+# ---------------- libsql ValueError 쓰기 가드 회귀 ----------------
+# 실사고 (2026-07-11 smoke): build_universe --enrich 192/2190 에서
+# libsql_experimental 이 "stream not found" 를 plain ValueError 로 올림.
+# _put_payload / put_state 가 sqlite3.Error 만 잡던 시절엔 파이프라인이 크래시.
+# 픽스: except _DB_ERRORS (ValueError 포함). 이 테스트가 회귀를 막는다.
+
+
+class _StubConnRaisesValueError:
+    """execute() 호출 시 libsql 스타일 ValueError 를 던지는 가짜 conn."""
+
+    HRANA_MSG = "Hrana: api error: status=404 Not Found (stream not found)"
+
+    def execute(self, *_a, **_kw):
+        raise ValueError(self.HRANA_MSG)
+
+    def commit(self):
+        pass  # put_payload 분기에서 commit 은 execute 예외로 도달 안 하지만 안전하게 no-op
+
+    def close(self):
+        pass  # store fixture teardown(s.close() → conn.close()) 을 위한 no-op
+
+
+@pytest.mark.skipif(
+    ValueError not in storage_mod._DB_ERRORS,
+    reason="libsql_experimental 없는 환경 — ValueError 가 _DB_ERRORS 에 없어 스킵",
+)
+def test_put_payload_and_put_state_swallow_libsql_valueerror(store):
+    """_put_payload / put_state 가 libsql ValueError 를 삼켜 외부로 전파하지 않음.
+
+    실사고 회귀: except sqlite3.Error 만 잡았을 때 Hrana ValueError 가 누출되어
+    build_universe 전체가 192번째 심볼에서 크래시한 사건.
+    """
+    # 정상 conn 을 libsql 스타일 ValueError 를 던지는 stub 으로 교체
+    store._conn = _StubConnRaisesValueError()
+
+    # _put_payload (put_json 경유) — 예외가 밖으로 새지 않아야 함
+    store.put_json("ns", "smoke_key", {"v": 1})         # 예외 없으면 통과
+
+    # put_state — 동일 보장
+    store.put_state("ns", "smoke_state", {"v": 2})      # 예외 없으면 통과
+
+
+@pytest.mark.skipif(
+    ValueError not in storage_mod._DB_ERRORS,
+    reason="libsql_experimental 없는 환경 — ValueError 가 _DB_ERRORS 에 없어 스킵",
+)
+def test_get_payload_and_get_state_swallow_libsql_valueerror(store):
+    """읽기 가드(_get_payload / get_state)도 libsql ValueError 를 삼킴 — 쓰기와 대칭.
+
+    _get_payload 는 이미 _DB_ERRORS 를 쓰고 있었으나, 대칭 계약을 명시적으로
+    검증해 나중에 가드가 좁아지는 회귀를 막는다.
+    """
+    store._conn = _StubConnRaisesValueError()
+
+    # 읽기 경로 — None 반환이어야 하고 예외가 새면 안 됨
+    result_df = store.get_dataframe("ns", "k", TTL)
+    assert result_df is None
+
+    result_state = store.get_state("ns", "k")
+    assert result_state is None

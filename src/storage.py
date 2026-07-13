@@ -352,7 +352,9 @@ class Storage:
                 (namespace, key, kind, payload, _utcnow().isoformat()),
             )
             self._conn.commit()
-        except sqlite3.Error:
+        except _DB_ERRORS:
+            # best-effort — 캐시 장애가 파이프라인을 막지 않음 (§4.4). libsql 은
+            # sqlite3.Error 가 아니라 ValueError 를 던짐 (§4.10 #9) → _DB_ERRORS 로 포착.
             logger.warning("캐시 쓰기 실패 (%s/%s) — 무시", namespace, key, exc_info=True)
 
     # ---------------- DataFrame / Series / JSON ----------------
@@ -424,7 +426,8 @@ class Storage:
                 (namespace, key, json.dumps(obj, ensure_ascii=False), _utcnow().isoformat()),
             )
             self._conn.commit()
-        except sqlite3.Error:
+        except _DB_ERRORS:
+            # best-effort (§4.4) — libsql ValueError 포착 (§4.10 #9, get_state 와 대칭)
             logger.warning("상태 쓰기 실패 (%s/%s) — 무시", namespace, key, exc_info=True)
 
     def get_state(self, namespace: str, key: str) -> Any | None:

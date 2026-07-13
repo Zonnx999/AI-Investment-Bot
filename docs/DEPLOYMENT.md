@@ -169,3 +169,5 @@ sudo systemctl start quant-bot
 - **Turso 일시 장애**: `get_storage()` 실패 → 봇 크래시 → systemd 5s 후 재시작(self-heal). 장기 장애 시 크래시 루프 (로컬 sqlite 폴백은 향후 과제).
 - **libsql 마이그레이션**: 컬럼 추가는 `storage.add_column_if_missing`(중복 컬럼 오류 삼킴) 사용 — 로컬 PRAGMA(stale) vs 원격 ALTER 불일치 크래시 방지.
 - **WAL 사이드카**(`data/*.db-*`)는 gitignore — 절대 커밋 금지(클론 시 레플리카 손상 원인).
+- **초기 레플리카 풀 지연 (노트북/일회성 실행)**: 임베디드 레플리카 초기 동기화가 60-120s+ 걸릴 수 있음 — 20s 기본 프로브 타임아웃이 너무 짧아 오프라인으로 강등됨. 대화형/일회성 실행 시 `QUANT_BOT_SYNC_TIMEOUT=240` 로 늘릴 것. 서버(상시 가동)는 기본값 유지해도 무방.
+- **대량 재점수/유니버스 빌드 시 캐시 끄기**: `QUANT_BOT_CACHE=off python scripts/build_universe.py --enrich --force` — 캐시 on 상태에서는 심볼당 2-3회 Turso 원격 쓰기(태평양 왕복)가 발생해 ~0.1 symbol/s. `QUANT_BOT_CACHE=off` 시 ~1.5 symbol/s (~15x).

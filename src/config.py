@@ -38,7 +38,9 @@ class Settings:
     # ⚠️ 기본 모델 id 는 배포 전 라이브 스모크로 검증 필수 (§4.10 #3, src/llm.py 참고)
     minimax_api_key: str = os.getenv("MINIMAX_API_KEY", "")
     minimax_base_url: str = os.getenv("MINIMAX_BASE_URL", "https://integrate.api.nvidia.com/v1")
-    minimax_model: str = os.getenv("MINIMAX_MODEL", "minimaxai/minimax-m2")
+    # 2026-07 라이브 스모크: minimax-m2 는 NIM 카탈로그에서 은퇴.
+    # m2.7(~7s)·m3(~54s, read timeout 초과) 중 m2.7 채택
+    minimax_model: str = os.getenv("MINIMAX_MODEL", "minimaxai/minimax-m2.7")
 
     # 알림 채널 (Phase 7) — telegram_chat_id 는 소유자(Phase 11a 승인자) 겸 항상 수신자
     telegram_bot_token: str = os.getenv("TELEGRAM_BOT_TOKEN", "")

@@ -79,16 +79,23 @@
   13d `scripts/check_portfolio.py` All Weather 리플레이. ⚠️ `check_portfolio` 실네트워크 스모크 1회 권장.
 - 테스트 216 → **399개** (오프라인 ~14초, 전부 그린).
 - ⚠️ **머지 전 라이브 스모크 체크리스트** (§4.10 #1·#3 — 오프라인 세션이라 미검증):
-  1. FMP `/news/stock` 엔드포인트 경로·필드명(title/publishedDate/site/url) 1콜 확인 → 다르면 `fetch_stock_news` 파서만 수정
-  2. MiniMax 모델 id(기본 `minimaxai/minimax-m2`)·응답 스키마 1콜 확인 (`MINIMAX_MODEL` 로 교체 가능; 틀려도 다이제스트는 정상 발송)
-  3. 인라인 버튼 실 텔레그램: 탭 승인/거절, 이중탭 "이미 처리됨", 48h 경과 메시지 edit 거부 시 로그만 남는지
-  4. subscribers/universe 변경분 실 Turso 레플리카 1회 스모크 (tuple 파라미터·stale 레플리카 규칙)
-  5. 점수 공식 변경(KR PBR·빈 fundamentals skip + **자본잠식 ROE/부채 가드·NDE 적자 가드**) →
-     **DB 재점수**: `python scripts/build_universe.py --enrich --force`
-  6. `python scripts/check_portfolio.py` 실네트워크 1회 (Phase 13 사이징 검증)
-  7. **서버 systemd 유닛 2개 수정** (`DEPLOYMENT.md §5`): quant-bot 에 `Type=notify`+`WatchdogSec=300`,
+  1. ✅ FMP `/news/stock` 엔드포인트 경로·필드명(title/publishedDate/site/url) 1콜 확인 → 필드 완전 일치, 파서 수정 불필요 (2026-07-11)
+  2. ✅ MiniMax 모델 id: NIM 에서 `minimaxai/minimax-m2` 퇴역 확인 → `minimaxai/minimax-m2.7` 로 교체 (m3 ≈54s > 25s read timeout; m2.7 ≈7s); `src/config.py`·`src/llm.py`·`.env.example` 수정 완료 (2026-07-11)
+  3. ✅ 인라인 버튼 실 텔레그램: 탭 승인/거절·이중탭 "이미 처리됨" 동작 확인 (2026-07-13)
+  4. ✅ 실 Turso 스모크 통과 — **추가 버그 발굴**: `_put_payload`/`put_state` 가 `sqlite3.Error` 만 잡아 libsql `ValueError`(`Hrana: stream not found`) 가 best-effort 가드를 뚫고 크래시 (192/2190 행에서 재현). 두 메서드를 `_DB_ERRORS` 로 교체, 회귀 테스트 2개 추가 → 스위트 422 그린 (2026-07-11)
+  5. ✅ DB 재점수 완료 — `QUANT_BOT_CACHE=off QUANT_BOT_SYNC_TIMEOUT=240 python scripts/build_universe.py --enrich --force`:
+     US 2175종목 갱신·실패 0, §4.10 #5 함정(음수 ROE ≥80점 등) 0건, top-10 전부 흑자,
+     다이제스트 dry-run 정상 (12-1 모멘텀 첫 실가동 — 발굴 리스트 교체는 버그 수정이지 회귀 아님) (2026-07-11)
+  6. ✅ `python scripts/check_portfolio.py` 실네트워크 통과 — Kelly 31% 현금, 음수 엣지 종목 0 할당, All Weather 역변동성 vol 6.4% vs 10.6%, MDD -20.2% vs -26.7% (2026-07-11)
+  7. ⏳ **서버 systemd 유닛 2개 수정** (`DEPLOYMENT.md §5`): quant-bot 에 `Type=notify`+`WatchdogSec=300`,
      quant-digest@ 에 `TimeoutStartSec=900` — libsql 이 GIL 을 쥔 채 행하면 파이썬 가드가
      무력이라 프로세스 밖 워치독이 최종 안전망 (2026-07-06 행 사고 재발 방지)
+
+**2026-07-11 세션 메모** (머지 체크 진행 중):
+- Check 4 에서 `_put_payload`/`put_state` 의 libsql `ValueError` 미포착 실버그 발굴·수정 (스위트 422 그린).
+- Check 2 에서 기본 모델 `m2`→`m2.7` 교체 (NIM 퇴역 + m3 타임아웃 실측).
+- Turso 초기 레플리카 풀이 노트북에서 60-120s+ 걸릴 수 있음 → 대화형/일회성 실행 시 `QUANT_BOT_SYNC_TIMEOUT=240` 권장.
+- 대량 재점수 시 `QUANT_BOT_CACHE=off` 로 실행할 것 (캐시 on 은 심볼당 원격 쓰기 2-3회 = ~0.1 symbol/s; off 는 ~1.5/s).
 
 ### 인계 (2026-07-06) — 전수 버그헌트 (노트북 행 사고 후속)
 - 🐛 **실사고**: 노트북에서 Turso sync() 가 예외 없이 무한 행 → 전 진입점 멈춤.
