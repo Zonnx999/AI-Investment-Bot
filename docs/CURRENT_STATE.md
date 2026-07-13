@@ -58,6 +58,58 @@
   - 박스 `.env` 에 `FRED_API_KEY`·`FMP_API_KEY` (US 다이제스트 팩터·국면용). KR 은 키 없이도 동작.
 - ⏳ **다음 기능 후보** (`ROADMAP.md §1`): 인라인 `[승인][거절]` 버튼(승인 부담↓), `/news`, `/regime`·`/predict` 즉답.
 
+### 인계 (2026-07-05) — 브랜치 `claude/project-improvement-exploration-cf70v4`
+- 🔀 **이 섹션은 개선 탐사 브랜치 전용** (사용자 요청으로 phase-gate 예외 세션, 멀티에이전트 병렬 작업).
+  main 머지 전 아래 라이브 스모크 체크리스트 필수.
+- ✅ **ROADMAP §2.2 백로그 일괄 반영**: KR PBR 완화(`_kr_pbr_points`) · 빈 fundamentals skip(`has_fundamentals`) ·
+  음수 earningsYield→PER None · `utils.clip` 통합 · vol 단일화(`FactorScores.vol_pct`) · subscribers 공개 API +
+  스키마 init 메모이즈 · `symbols_needing_enrichment(market)` · Markdown 폴백 400 기반 · drawdown_alerts 단일 호출.
+- ✅ **백테스트 프레임워크** (`src/backtest.py` + `scripts/check_backtest.py`): run_backtest(거래비용, t→t+1 무선견편향) /
+  walk_forward_topn(모멘텀 top-N vs 동일가중 벤치) / evaluate_lead_lag_oos(확장윈도우 OOS 방향 적중률).
+- ✅ **Phase 11b 잔여 완료**: 인라인 `[승인][거절]` 버튼(callback_query, 멱등, 소유자 게이트) + `/news <티커>`(FMP, 30분 캐시).
+- ✅ **LLM 한 줄 요약** (`src/llm.py`): 합의 설계(표현 레이어만·실패 시 생략 폴백·`--no-llm`/`QUANT_BOT_LLM` 킬스위치).
+- ✅ **적대적 리뷰 라운드** (4관점 병렬 리뷰 → 발견별 반박 검증): 확정 버그 수정 —
+  백테스트 MDD 초기자본 앵커 누락(첫 기간 하락 과소보고) · lead-lag 발표지연 선견편향
+  (`publication_lag_months`, 기본 1) · `has_fundamentals` 가 FMP 식별자 문자열에 오발화 ·
+  cron 경로 인라인 버튼 부착 시 탭 유실(`interactive_buttons` 게이트) · LLM `<think>`/Markdown
+  문자 유출 · `/news` 응답 평문 전송(400 폴백 2배 방지).
+- ✅ **Phase 13 포트폴리오 레이어 전체** (07-06): 13a `Finding` 공통 dataclass(다이제스트·대시보드
+  공유 shape, 렌더 바이트 동일) · 13b `src/portfolio.py` 사이징 파이프라인(역변동성→상관 페널티→
+  Kelly 상한) + `weighted_backtest` 검증기 · 13c 다이제스트 "제안 N%" 열(best-effort, `--no-weights`) ·
+  13d `scripts/check_portfolio.py` All Weather 리플레이. ⚠️ `check_portfolio` 실네트워크 스모크 1회 권장.
+- 테스트 216 → **399개** (오프라인 ~14초, 전부 그린).
+- ⚠️ **머지 전 라이브 스모크 체크리스트** (§4.10 #1·#3 — 오프라인 세션이라 미검증):
+  1. ✅ FMP `/news/stock` 엔드포인트 경로·필드명(title/publishedDate/site/url) 1콜 확인 → 필드 완전 일치, 파서 수정 불필요 (2026-07-11)
+  2. ✅ MiniMax 모델 id: NIM 에서 `minimaxai/minimax-m2` 퇴역 확인 → `minimaxai/minimax-m2.7` 로 교체 (m3 ≈54s > 25s read timeout; m2.7 ≈7s); `src/config.py`·`src/llm.py`·`.env.example` 수정 완료 (2026-07-11)
+  3. ✅ 인라인 버튼 실 텔레그램: 탭 승인/거절·이중탭 "이미 처리됨" 동작 확인 (2026-07-13)
+  4. ✅ 실 Turso 스모크 통과 — **추가 버그 발굴**: `_put_payload`/`put_state` 가 `sqlite3.Error` 만 잡아 libsql `ValueError`(`Hrana: stream not found`) 가 best-effort 가드를 뚫고 크래시 (192/2190 행에서 재현). 두 메서드를 `_DB_ERRORS` 로 교체, 회귀 테스트 2개 추가 → 스위트 422 그린 (2026-07-11)
+  5. ✅ DB 재점수 완료 — `QUANT_BOT_CACHE=off QUANT_BOT_SYNC_TIMEOUT=240 python scripts/build_universe.py --enrich --force`:
+     US 2175종목 갱신·실패 0, §4.10 #5 함정(음수 ROE ≥80점 등) 0건, top-10 전부 흑자,
+     다이제스트 dry-run 정상 (12-1 모멘텀 첫 실가동 — 발굴 리스트 교체는 버그 수정이지 회귀 아님) (2026-07-11)
+  6. ✅ `python scripts/check_portfolio.py` 실네트워크 통과 — Kelly 31% 현금, 음수 엣지 종목 0 할당, All Weather 역변동성 vol 6.4% vs 10.6%, MDD -20.2% vs -26.7% (2026-07-11)
+  7. ⏳ **서버 systemd 유닛 2개 수정** (`DEPLOYMENT.md §5`): quant-bot 에 `Type=notify`+`WatchdogSec=300`,
+     quant-digest@ 에 `TimeoutStartSec=900` — libsql 이 GIL 을 쥔 채 행하면 파이썬 가드가
+     무력이라 프로세스 밖 워치독이 최종 안전망 (2026-07-06 행 사고 재발 방지)
+
+**2026-07-11 세션 메모** (머지 체크 진행 중):
+- Check 4 에서 `_put_payload`/`put_state` 의 libsql `ValueError` 미포착 실버그 발굴·수정 (스위트 422 그린).
+- Check 2 에서 기본 모델 `m2`→`m2.7` 교체 (NIM 퇴역 + m3 타임아웃 실측).
+- Turso 초기 레플리카 풀이 노트북에서 60-120s+ 걸릴 수 있음 → 대화형/일회성 실행 시 `QUANT_BOT_SYNC_TIMEOUT=240` 권장.
+- 대량 재점수 시 `QUANT_BOT_CACHE=off` 로 실행할 것 (캐시 on 은 심볼당 원격 쓰기 2-3회 = ~0.1 symbol/s; off 는 ~1.5/s).
+
+### 인계 (2026-07-06) — 전수 버그헌트 (노트북 행 사고 후속)
+- 🐛 **실사고**: 노트북에서 Turso sync() 가 예외 없이 무한 행 → 전 진입점 멈춤.
+  근본원인 체인: libsql 은 **GIL 을 쥔 채** 네이티브 블로킹 (스레드 워치독 무력) +
+  임베디드 레플리카는 **쓰기도 원격 왕복** + 모든 진입점이 Storage 초기화를 강제.
+- ✅ 3중 가드: 초기 pull **자식 프로세스 프로브**(타임아웃 시 오프라인 파일 강등) /
+  push 전 소켓 사전점검 / systemd 워치독(위 체크리스트 7). + `QUANT_BOT_OFFLINE=1` 킬스위치.
+- ✅ 전수 버그헌트 확정 12건 수정 — 굵직한 것: **MC 이중 Ito 보정**(P50 비관 편향),
+  **모멘텀 주 브랜치가 1y 데이터론 영원히 죽은 코드**(→2y), 혼합 캘린더 월요일 수익률 유실,
+  자본잠식 KR 만점 함정, discover 의 enrichment 신선도 오염, libsql ValueError 미포착
+  (베스트에포트 가드 전체가 Turso 에서 무력이었음), FMP 200 에러 dict 중앙 차단.
+- 테스트 **420개** (오프라인 ~14초). ⚠️ 재점수·모멘텀 변화로 **다이제스트 점수가 눈에 띄게
+  달라질 수 있음** — 버그 수정이지 회귀가 아님 (12-1 모멘텀이 처음으로 실제 가동).
+
 ### 인계 (2026-06-30)
 - ✅ **이번 세션 전부 배포·검증**: 코드리뷰 버그 5건 + 다이제스트 UX(회사명·범례·위계·예측) +
   `/announce` 소유자 공지 + Phase 12 대시보드 **라이브**(Actions Pages 배포) + **서버 자동 배포** + 문서 5개로 정리.

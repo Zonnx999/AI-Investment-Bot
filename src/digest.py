@@ -16,6 +16,12 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from src.exceptions import QuantBotError
+from src.findings import (
+    CONFIDENCE_RELIABLE,
+    from_factor_scores,
+    from_prediction,
+    from_screen_candidate,
+)
 from src.logger import get_logger
 from src.predictors import LeadLagResult
 from src.signals import SignalReport
@@ -46,6 +52,24 @@ def _alert_line(alert) -> str:
     return f"  {_ALERT_ICON.get(alert.severity, 'ℹ️')} {alert.message}"
 
 
+def _titled_line(ticker: str, names: dict[str, str], rest: str) -> str:
+    """발굴/스크리닝 공통 종목 줄: 티커(+회사명 있으면) — 나머지."""
+    nm = names.get(ticker, "")
+    if nm:
+        return f"  `{ticker}` *{nm}* — {rest}"
+    return f"  `{ticker}` — {rest}"
+
+
+def with_summary(text: str, summary: str | None) -> str:
+    """LLM 요약을 다이제스트 맨 위에 붙임 (순수 함수).
+
+    요약은 선택적 표현 레이어(ROADMAP §2.1) — 없으면(None/빈 문자열) 원문 그대로.
+    """
+    if not summary:
+        return text
+    return f"🧠 {summary}\n\n{text}"
+
+
 def format_digest(
     report: SignalReport,
     predictions: list[LeadLagResult],
@@ -53,6 +77,8 @@ def format_digest(
     market: str = "US",
     kr_picks: "list | None" = None,
     names: "dict[str, str] | None" = None,
+    summary: str | None = None,
+    weights: "dict[str, float] | None" = None,
 ) -> str:
     """리포트 객체들 → 텔레그램 Markdown 메시지 (순수 함수).
 
@@ -64,6 +90,13 @@ def format_digest(
 
     names: 티커 → 회사명 맵(선택). US 발굴/스크리닝 종목에 회사명을 곁들임
     (순수 함수 유지를 위해 조회는 build_daily_digest 가 담당, 여기엔 주입만).
+
+    summary: LLM 한 줄 요약(선택). 주어지면 맨 위에 렌더 — 생성은 src/llm.py,
+    호출은 오케스트레이터(send_daily_digest / scripts) 책임 (순수 함수 유지).
+
+    weights: 티커 → 제안 비중(0~1) 맵(선택, Phase 13c — src/portfolio.propose 산출).
+    US 발굴 종목 라인에 "제안 N%" 를 곁들임 (정보 제공용 — 주문 집행 없음).
+    None 이면 렌더 출력은 종전과 동일 (계산·조회는 오케스트레이터 책임).
     """
     now = now or datetime.now(KST)
     market = (market or "US").upper()
@@ -106,44 +139,50 @@ def format_digest(
         if report.factors:
             lines.append("")
             lines.append("*📈 오늘의 발굴 종목*")
-            for f in sorted(report.factors, key=lambda x: x.composite, reverse=True):
-                nm = names.get(f.ticker, "")
-                head = (
-                    f"  `{f.ticker}` *{nm}* — 종합 *{f.composite}*"
-                    if nm
-                    else f"  `{f.ticker}` — 종합 *{f.composite}*"
+            # Finding 공통 shape 소비 (13a): title=티커, score=종합, summary=팩터 내역
+            for fd in sorted(
+                (from_factor_scores(f) for f in report.factors),
+                key=lambda x: x.score, reverse=True,
+            ):
+                # 제안 비중 (13c) — weights 에 있는 종목만. 정확히 0% 는 '엣지 없음'
+                # 신호라 의미 있음 — 반올림으로 0% 가 되는 미세 양수(<0.5%)는 "<1%" 로
+                # 구분 표기 (§4.10 #5: 경계값이 정반대 의미로 읽히지 않게).
+                w = weights.get(fd.title) if weights else None
+                if w is not None:
+                    pct = f"{w * 100:.0f}"
+                    w_txt = "<1%" if (pct == "0" and w > 0) else f"{pct}%"
+                tail = f"종합 *{fd.score:.0f}*" + (
+                    f" · 제안 {w_txt}" if w is not None else ""
                 )
-                lines.append(head)
-                lines.append(
-                    f"     모멘텀 {f.momentum} · 밸류 {f.value} · "
-                    f"퀄리티 {f.quality} · 로우볼 {f.low_vol}"
-                )
+                lines.append(_titled_line(fd.title, names, tail))
+                lines.append(f"     {fd.summary}")
             lines.append("  └ _모멘텀·밸류·퀄리티·로우볼 종합 (0~100, 높을수록 매력적)_")
+            if weights:
+                cash = max(0.0, 1.0 - sum(weights.values()))
+                cash_txt = f", 현금 {cash * 100:.0f}%" if cash >= 0.005 else ""
+                lines.append(
+                    "  └ _제안 비중: 역변동성·Kelly 상한 — 정보 제공용"
+                    f"{cash_txt} (`check_portfolio` 상세)_"
+                )
         # ---- 발굴 종목 (스크리닝 통과 — US 라이브 스크리너) ----
         if report.candidates:
             lines.append("")
             lines.append("*💎 스크리닝 통과*")
-            for c in report.candidates[:5]:
-                pe = f"P/E {c['pe']:.1f}" if c.get("pe") else "적자"
-                nm = names.get(c["ticker"], "")
-                if nm:
-                    lines.append(f"  `{c['ticker']}` *{nm}* — {pe}")
-                else:
-                    lines.append(f"  `{c['ticker']}` — {pe}")
+            for fd in (from_screen_candidate(c) for c in report.candidates[:5]):
+                lines.append(_titled_line(fd.title, names, fd.summary))
 
     # ---- 선행지표 예측 ----
     if predictions:
-        reliable = [p for p in predictions if p.reliable]
-        weak = len(predictions) - len(reliable)
+        # Finding 공통 shape 소비 (13a): score=R², confidence=기존 reliable 라벨
+        pred_findings = [from_prediction(p) for p in predictions]
+        reliable = [f for f in pred_findings if f.confidence == CONFIDENCE_RELIABLE]
+        weak = len(pred_findings) - len(reliable)
         lines.append("")
         lines.append("*🔮 선행지표 예측*")
         if reliable:
-            for p in sorted(reliable, key=lambda x: x.r_squared, reverse=True):
-                icon = _direction_icon(p.direction)
-                lines.append(
-                    f"  {icon} {p.target_name}: {p.direction} "
-                    f"({p.best_lag_months}개월 선행, 신뢰도 R² {p.r_squared:.2f})"
-                )
+            for fd in sorted(reliable, key=lambda x: x.score, reverse=True):
+                # summary 는 "목표: 방향 (…)" — 방향 아이콘은 summary 에서 판별
+                lines.append(f"  {_direction_icon(fd.summary)} {fd.summary}")
         else:
             lines.append("  _신뢰할 만한 예측 없음 (R²<0.3)_")
         if weak:
@@ -151,7 +190,7 @@ def format_digest(
 
     lines.append("")
     lines.append("_상관 기반 통계 모델 — 투자 결정은 본인 판단_")
-    return "\n".join(lines)
+    return with_summary("\n".join(lines), summary)
 
 
 def _us_names(symbols: list[str]) -> dict[str, str]:
@@ -174,6 +213,36 @@ def _us_names(symbols: list[str]) -> dict[str, str]:
     return out
 
 
+def _propose_weights(tickers: "list[str]") -> "dict[str, float] | None":
+    """US 발굴 종목 제안 비중 (13c) — best-effort. 실패 시 None (다이제스트 불변).
+
+    가격은 직전의 generate_signal_report 가 같은 종목을 방금 조회해 캐시가
+    따뜻함 → 추가 API 비용 ~0. 종목별 조회 실패는 해당 종목만 제외,
+    파이프라인 실패(표본 부족 등)는 비중 섹션 전체 생략.
+    """
+    uniq = list(dict.fromkeys(tickers))
+    if len(uniq) < 2:                       # propose 는 최소 2종목 필요
+        return None
+    from src import portfolio
+    from src.data_fetcher import fetch_prices
+    from src.utils import close_series
+
+    prices = {}
+    for t in uniq:
+        try:
+            prices[t] = close_series(fetch_prices(t))
+        except QuantBotError as e:
+            logger.debug("제안 비중용 가격 스킵 %s — %s", t, e)
+    try:
+        proposal = portfolio.propose(list(prices), prices)
+    except QuantBotError as e:
+        logger.warning("제안 비중 생략 — %s", e)
+        return None
+    for note in proposal.notes:
+        logger.info("제안 비중 노트: %s", note)
+    return proposal.weights
+
+
 def _collect_predictions() -> list[LeadLagResult]:
     """선행지표 예측 — 글로벌(시장 무관). 개별 실패는 스킵(로그)."""
     from src.predictors import PREDICTORS
@@ -191,6 +260,7 @@ def build_daily_digest(
     market: str = "us",
     top_n: int = 6,
     tickers: tuple[str, ...] | None = None,
+    suggest_weights: bool = True,
 ) -> str:
     """fetch + 분석 → 시장별 다이제스트 문자열.
 
@@ -199,6 +269,8 @@ def build_daily_digest(
       오프라인(API 0콜). 한국 코드는 yfinance 가격 접미사(.KS/.KQ)가 필요해 라이브
       팩터 파이프라인을 안 태움 (Step 1 결정: DB 점수 사용).
     국면·알림·예측은 글로벌이라 두 시장 공통.
+    suggest_weights: US 발굴 종목에 제안 비중(13c, best-effort) 곁들임 — KR 은
+    가격 파이프라인이 없어 미지원. 실패 시 비중만 생략.
     """
     from src import universe
     from src.signals import (
@@ -233,18 +305,26 @@ def build_daily_digest(
     names = _us_names(
         [f.ticker for f in report.factors] + [c["ticker"] for c in report.candidates]
     )
-    return format_digest(report, predictions, market="US", names=names)
+    weights = (
+        _propose_weights([f.ticker for f in report.factors])
+        if suggest_weights and report.factors else None
+    )
+    return format_digest(report, predictions, market="US", names=names, weights=weights)
 
 
 def send_daily_digest(
     market: str = "us",
     top_n: int = 6,
     tickers: tuple[str, ...] | None = None,
+    use_llm: bool = True,
+    suggest_weights: bool = True,
 ) -> dict[str, int]:
     """시장별 다이제스트 1회 조립 후 **active 구독자 전원**에게 브로드캐스트 (Phase 11a).
 
     무거운 조립(fetch+분석)은 한 번만, 전송은 경량 N회. 소유자는 ensure_owner 로 항상 포함.
     개별 전송 실패는 best-effort (한 명 실패가 나머지·파이프라인을 막지 않음).
+    use_llm=True 면 LLM 한 줄 요약을 맨 위에 시도 (best-effort — 실패 시 요약만 생략,
+    ROADMAP §2.1). ``QUANT_BOT_LLM=0`` / ``--no-llm`` 킬스위치로 끌 수 있음.
     Returns {"sent", "failed", "recipients"}.
     """
     from src import subscribers
@@ -258,7 +338,11 @@ def send_daily_digest(
         logger.warning("active 구독자 없음 — 다이제스트 조립 생략")
         return {"sent": 0, "failed": 0, "recipients": 0}
 
-    text = build_daily_digest(market=market, top_n=top_n, tickers=tickers)   # 무거운 조립 1회
+    text = build_daily_digest(market=market, top_n=top_n, tickers=tickers,
+                              suggest_weights=suggest_weights)   # 무거운 조립 1회
+    if use_llm:
+        from src import llm
+        text = with_summary(text, llm.summarize_safe(text))   # 실패 시 None → 원문 그대로
 
     sent = failed = 0
     for chat_id, _name in recipients:

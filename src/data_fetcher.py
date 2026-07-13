@@ -68,6 +68,7 @@ TTL_PROFILE = timedelta(days=30)       # 회사 프로필 — 거의 불변
 TTL_SNAPSHOT = timedelta(hours=6)      # yfinance .info 스냅샷
 TTL_WIKI = timedelta(days=1)           # 위키피디아 페이지뷰 — 일 단위 갱신
 TTL_SCREENER = timedelta(hours=12)     # company-screener 유니버스 발굴 (구성 거의 불변)
+TTL_NEWS = timedelta(minutes=30)       # 종목 뉴스 헤드라인 — 자주 갱신되나 /news 남용 방지
 
 
 @cached("prices", TTL_PRICES, "dataframe")
@@ -217,6 +218,14 @@ def fetch_macro(series_id: str, start: str | None = None) -> pd.Series:
     if start is None:
         start = (datetime.now(timezone.utc) - timedelta(days=365 * 5)).strftime("%Y-%m-%d")
 
+    # fredapi 는 timeout 없는 bare urlopen 을 씀 — 유일하게 src/http.py 의
+    # 강제 타임아웃을 우회하는 네트워크 경계라, 블랙홀 시 다이제스트가 통째로
+    # 멈춤. 전역 소켓 기본 타임아웃으로 감싸고 finally 로 복원 (이 시점의
+    # 파이프라인은 단일 스레드라 전역 변경이 안전).
+    import socket
+
+    prev_timeout = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(30)
     try:
         series = fred.get_series(series_id, observation_start=start)
     except ValueError as e:
@@ -228,6 +237,8 @@ def fetch_macro(series_id: str, start: str | None = None) -> pd.Series:
         raise DataFetchError(
             f"FRED 호출 실패: series_id={series_id}", source="FRED"
         ) from e
+    finally:
+        socket.setdefaulttimeout(prev_timeout)
 
     if series is None or series.empty:
         raise DataValidationError(
@@ -432,7 +443,16 @@ def _fmp_get(endpoint: str, params: dict | None = None) -> list:
             f"FMP {endpoint}: HTTP {code}", status_code=code, source="FMP"
         )
 
-    return response.json()
+    body = response.json()
+    # FMP 는 일부 오류를 200 + {"Error Message": ...} dict 로 줌 — 이걸 데이터인 척
+    # 흘려보내면 fetch_quote/profile 이 에러 dict 를 반환해 _safe 가 전부 default 로
+    # 채운 '조용한 엉터리 점수' 가 됨 (§4.10 #3). 여기서 중앙 차단.
+    if isinstance(body, dict) and "Error Message" in body:
+        raise DataValidationError(
+            f"FMP {endpoint}: 200 이지만 에러 응답 — {str(body['Error Message'])[:200]}",
+            source="FMP",
+        )
+    return body
 
 
 def _fmp_to_dataframe(data: list) -> pd.DataFrame:
@@ -557,6 +577,68 @@ def fetch_profile(ticker: str) -> dict:
             f"FMP profile 빈 응답: ticker={ticker}", source="FMP"
         )
     return data[0] if isinstance(data, list) else data
+
+
+@cached("fmp_news", TTL_NEWS, "json")
+def fetch_stock_news(symbol: str, limit: int = 5) -> list[dict]:
+    """FMP /stable/news/stock — 종목 최신 뉴스 헤드라인 (Phase 11b `/news`).
+
+    ⚠️ 라이브 스모크 필요 (CLAUDE.md §4.10 #3): 오프라인 환경에서 작성됨.
+    아래 가정은 실키 1콜(``news/stock?symbols=AAPL&limit=5``)로 확인 후 확정할 것.
+      - 엔드포인트 경로: ``news/stock`` + 쿼리 ``symbols=<SYM>&limit=<n>``
+      - 응답 형태: list[dict], 항목 필드 ``title`` / ``publishedDate`` /
+        ``site`` / ``url`` (FMP 문서 기준 — 실제 이름이 다를 수 있음)
+    필드명이 다르면 이 파서만 고치면 됨 — 호출부(bot_commands.format_news)는
+    title/publishedDate/site/url 4개 키의 dict 리스트만 봄.
+
+    캐시 주의: 프로젝트 컨벤션상 @cached 는 **빈 결과를 캐시하지 않으므로**
+    뉴스가 없는 티커는 /news 호출마다 FMP 실콜이 나감 — 남용 방어는
+    bot_commands 의 유저별 rate limiter 가 담당 (의도된 트레이드오프).
+
+    Parameters
+    ----------
+    symbol : str
+        종목 티커 (예: "AAPL"). 형식 검증은 호출부(bot_commands) 책임.
+    limit : int
+        최대 헤드라인 수 (기본 5).
+
+    Returns
+    -------
+    list[dict]
+        ``[{"title", "publishedDate", "site", "url"}, ...]`` — 최대 limit 개.
+        뉴스 없음 / 200 + 에러 dict / 전 항목 malformed 는 **빈 리스트**
+        (호출부가 "뉴스 없음" 안내). title·url 없는 항목은 표시 불가라 스킵.
+
+    Raises
+    ------
+    MissingApiKeyError / ApiAuthError / ApiAuthorizationError / RateLimitError /
+    ApiHttpError / ApiTimeoutError / ApiConnectionError — ``_fmp_get`` 과 동일.
+    """
+    data = _fmp_get("news/stock", {"symbols": symbol, "limit": limit})
+    # FMP 가 200 + 에러 dict 를 줄 때가 있음 → list 아니면 빈 결과 (screener 와 동일 가드)
+    if not isinstance(data, list):
+        logger.warning(
+            "FMP news/stock 비정상 응답 형태 (symbol=%s): %s", symbol, type(data).__name__
+        )
+        return []
+
+    items: list[dict] = []
+    for raw in data:
+        if not isinstance(raw, dict):
+            continue
+        title = raw.get("title")
+        url = raw.get("url")
+        if not title or not url:  # 제목/링크 없으면 표시 불가 → 스킵 (방어 파싱)
+            continue
+        items.append({
+            "title": str(title).strip(),
+            "publishedDate": raw.get("publishedDate"),
+            "site": raw.get("site"),
+            "url": str(url).strip(),
+        })
+        if len(items) >= limit:
+            break
+    return items
 
 
 @cached("crypto_top", TTL_CRYPTO, "json")

@@ -116,3 +116,36 @@ def test_scenario_revenue_shock_scales_price():
     # 마진/멀티플 충격 없이 매출 -10% → 가격도 -10%
     r = scenario_impact(100.0, revenue_shock_pct=-10)
     assert r["new_price"] == pytest.approx(90.0)
+
+
+# ---------------- 전수 리뷰 회귀 (2026-07-06) ----------------
+
+
+def test_monte_carlo_drift_not_double_ito_corrected():
+    """mu(log-수익률 평균)는 이미 Ito 보정 반영 — 0.5σ² 재차감 금지 회귀.
+
+    합성 GBM(알려진 log-drift)에서 시뮬레이션 경로의 중앙값 log-drift 가
+    입력 시계열에서 추정된 mu_hat 과 일치해야 함 (이중 차감 시 0.5σ² 낮게 나옴).
+    """
+    rng = np.random.default_rng(7)
+    m, s, n = 0.001, 0.03, 500                       # 일당 log-drift / 변동성
+    log_rets = rng.normal(m, s, n)
+    prices = pd.Series(100.0 * np.exp(np.cumsum(log_rets)),
+                       index=pd.bdate_range("2023-01-02", periods=n))
+    mu_hat = float(np.log(prices / prices.shift(1)).dropna().mean())
+
+    res = monte_carlo_simulation(prices, days_forward=250, n_paths=4000, seed=11)
+    med_drift = float(np.log(np.median(res.final_prices) / res.start_price)) / 250
+    assert med_drift == pytest.approx(mu_hat, abs=0.5 * (0.03 ** 2) * 0.5)
+    # 이중 차감이면 mu_hat - 0.00045 근처로 떨어져 위 허용오차를 벗어남
+    assert abs(med_drift - (mu_hat - 0.5 * 0.03 ** 2)) > abs(med_drift - mu_hat)
+
+
+def test_scenario_impact_floors_at_zero_price():
+    """마진 붕괴 시나리오는 $0 바닥 — 음수 주가 금지 (§4.10 #5)."""
+    r = scenario_impact(100.0, revenue_shock_pct=-30, margin_shock_pp=-5,
+                        multiple_shock_pct=-50, current_operating_margin_pct=2)
+    assert r["new_price"] == 0.0
+    assert r["price_change_pct"] == pytest.approx(-100.0)
+    r2 = scenario_impact(100.0, margin_shock_pp=-8, current_operating_margin_pct=5)
+    assert r2["new_price"] >= 0.0

@@ -21,7 +21,7 @@ import numpy as np
 import pandas as pd
 
 from src.data_fetcher import fetch_macro, fetch_prices
-from src.exceptions import ConfigError, DataFetchError
+from src.exceptions import ConfigError, DataFetchError, InsufficientDataError
 from src.utils import TRADING_DAYS_PER_YEAR, close_series
 
 # ----------------------------------------------------------------------
@@ -88,8 +88,15 @@ def fetch_cross_asset_panel(
 
 
 def daily_returns(prices: pd.DataFrame) -> pd.DataFrame:
-    """가격 → 일별 수익률 (%변화)."""
-    return prices.pct_change().dropna(how="all")
+    """가격 → 일별 수익률 (%변화) — **자산별 자기 캘린더 기준**.
+
+    패널이 혼합 캘린더(BTC 는 주말 거래, ETF 는 평일만)라 패널 전체에
+    pct_change() 를 돌리면 ETF 의 월요일 수익률(금→월, 최고 분산 구간)이
+    전부 NaN 이 되어 변동성·상관이 화·금 표본으로만 계산되는 편향 발생
+    (pandas 3.x 는 fill_method=None 기본이라 조용히 유실). 컬럼별로
+    자기 관측일 기준 변화율을 구해 이를 방지.
+    """
+    return prices.apply(lambda col: col.dropna().pct_change()).dropna(how="all")
 
 
 def correlation_matrix(prices: pd.DataFrame) -> pd.DataFrame:
@@ -111,6 +118,10 @@ def annualized_volatility(
 
 def cumulative_returns(prices: pd.DataFrame) -> pd.Series:
     """기간 시작 → 끝의 누적 수익률 (각 자산별 단일 값)."""
+    if prices.empty:
+        # 빈 패널에 .iloc[0] 는 raw IndexError — 도메인 예외로 (호출부 강등 가능)
+        raise InsufficientDataError("가격 패널이 비어 있음 — 누적수익률 계산 불가",
+                                    n_points=0, required=1)
     first = prices.bfill().iloc[0]
     last = prices.ffill().iloc[-1]
     return (last / first - 1) * 100
@@ -141,6 +152,9 @@ def current_drawdown(prices: pd.DataFrame) -> pd.Series:
     한 패널에 섞이면 마지막 행에 NaN 이 끼어 결과가 NaN 으로 떨어짐.
     forward-fill 로 각 자산의 마지막 가용 종가까지 연장한 뒤 계산.
     """
+    if prices.empty:
+        raise InsufficientDataError("가격 패널이 비어 있음 — 낙폭 계산 불가",
+                                    n_points=0, required=1)
     p = prices.ffill()
     peak = p.cummax()
     return ((p - peak) / peak).iloc[-1] * 100

@@ -163,3 +163,291 @@ def test_main_keyboard_owner_gets_admin_row():
     assert "📋 구독자" not in flat_user                 # 일반 사용자엔 관리자 버튼 없음
     flat_owner = [b for row in bc.main_keyboard(is_owner=True)["keyboard"] for b in row]
     assert "📋 구독자" in flat_owner and "⏳ 승인 대기" in flat_owner
+
+
+# ---------------- 인라인 승인/거절 버튼 (callback_query) ----------------
+
+
+@pytest.fixture
+def owner_set():
+    """소유자 chat_id = '1' (test_subscribers 와 동일 패턴)."""
+    from src.config import settings
+
+    backup = settings.telegram_chat_id
+    object.__setattr__(settings, "telegram_chat_id", "1")
+    yield "1"
+    object.__setattr__(settings, "telegram_chat_id", backup)
+
+
+@pytest.fixture
+def tg_capture(monkeypatch):
+    """notifier 의 콜백/편집/전송 safe 함수들을 기록기로 대체 (네트워크 없음)."""
+    calls = {"answers": [], "edits": [], "sent": []}
+    monkeypatch.setattr(
+        "src.notifier.answer_callback_safe",
+        lambda cq_id, text=None, show_alert=False: calls["answers"].append((cq_id, text)) or True,
+    )
+    monkeypatch.setattr(
+        "src.notifier.edit_message_safe",
+        lambda chat_id, message_id, text, parse_mode=None, reply_markup=None:
+            calls["edits"].append((chat_id, message_id, text)) or True,
+    )
+    monkeypatch.setattr(
+        "src.notifier.send_safe",
+        lambda text, chat_id=None, parse_mode="Markdown", reply_markup=None:
+            calls["sent"].append((chat_id, text)) or True,
+    )
+    return calls
+
+
+def _cq(data, from_id=1, cq_id="cbq1", message_id=42, chat_id=1,
+        msg_text="🔔 가입 요청: alice (chat_id=100)"):
+    """텔레그램 callback_query update 조각 (필요 필드만)."""
+    return {"id": cq_id, "from": {"id": from_id}, "data": data,
+            "message": {"message_id": message_id, "chat": {"id": chat_id}, "text": msg_text}}
+
+
+def _seed_pending(chat_id="100", name="alice"):
+    from src import subscribers
+
+    conn = subscribers._conn()
+    subscribers.upsert_request(conn, chat_id, name)
+    conn.commit()
+    return subscribers
+
+
+def test_approval_keyboard_callback_data_format():
+    kb = bc.approval_keyboard("12345")
+    buttons = kb["inline_keyboard"][0]
+    assert [b["callback_data"] for b in buttons] == ["approve:12345", "deny:12345"]
+    assert buttons[0]["text"] == "✅ 승인" and buttons[1]["text"] == "❌ 거절"
+
+
+def test_parse_callback_valid_and_invalid():
+    assert bc.parse_callback("approve:12345") == ("approve", "12345")
+    assert bc.parse_callback("deny:12345") == ("deny", "12345")
+    assert bc.parse_callback("approve:") is None      # 대상 누락
+    assert bc.parse_callback("approve") is None       # 구분자 없음
+    assert bc.parse_callback("hack:123") is None      # 미지원 action
+    assert bc.parse_callback("") is None
+
+
+def test_callback_approve_tap(fresh_db, owner_set, tg_capture):
+    subs = _seed_pending("100")
+    bc.handle_callback(_cq("approve:100"), owner_set)
+
+    assert subs.subscriber_status("100") == "active"                 # /approve 와 동일 상태 변화
+    assert tg_capture["answers"] == [("cbq1", "승인 완료")]           # 토스트
+    assert len(tg_capture["edits"]) == 1                             # 원본 알림 편집(버튼 제거)
+    chat, mid, text = tg_capture["edits"][0]
+    assert chat == "1" and mid == 42
+    assert text.startswith("🔔 가입 요청") and text.endswith("→ ✅ 승인됨")
+    assert any(cid == "100" and "승인되었습니다" in txt
+               for cid, txt in tg_capture["sent"])                   # 신청자 알림
+
+
+def test_callback_deny_tap(fresh_db, owner_set, tg_capture):
+    subs = _seed_pending("100")
+    bc.handle_callback(_cq("deny:100"), owner_set)
+
+    assert subs.subscriber_status("100") == "inactive"
+    assert tg_capture["answers"] == [("cbq1", "거절 완료")]
+    assert tg_capture["edits"][0][2].endswith("→ ❌ 거절됨")
+    assert any(cid == "100" and "거절" in txt for cid, txt in tg_capture["sent"])
+
+
+def test_callback_owner_gate_rejects_non_owner(fresh_db, owner_set, tg_capture):
+    subs = _seed_pending("100")
+    bc.handle_callback(_cq("approve:100", from_id=999), owner_set)   # 비소유자 탭
+
+    assert subs.subscriber_status("100") == "pending"                # 상태 불변
+    assert len(tg_capture["answers"]) == 1                           # 콜백엔 항상 응답
+    assert "소유자만" in tg_capture["answers"][0][1]
+    assert tg_capture["edits"] == [] and tg_capture["sent"] == []    # 편집/알림 없음
+
+
+def test_callback_second_tap_is_idempotent(fresh_db, owner_set, tg_capture):
+    subs = _seed_pending("100")
+    bc.handle_callback(_cq("approve:100"), owner_set)                # 1차 탭 → 승인
+    bc.handle_callback(_cq("approve:100", cq_id="cbq2"), owner_set)  # 더블탭
+    bc.handle_callback(_cq("deny:100", cq_id="cbq3"), owner_set)     # 승인 후 거절 탭도 무변화
+
+    assert subs.subscriber_status("100") == "active"                 # 1차 결과 유지
+    assert tg_capture["answers"] == [("cbq1", "승인 완료"),
+                                     ("cbq2", "이미 처리됨"), ("cbq3", "이미 처리됨")]
+    assert len(tg_capture["edits"]) == 1                             # 재편집 없음
+
+
+def test_callback_after_typed_approve_is_idempotent(fresh_db, owner_set, tg_capture):
+    subs = _seed_pending("100")
+    assert subs.decide_request("100", approve=True) == "approved"    # 텍스트 /approve 선처리
+    bc.handle_callback(_cq("approve:100"), owner_set)                # 그 뒤 버튼 탭
+
+    assert subs.subscriber_status("100") == "active"
+    assert tg_capture["answers"] == [("cbq1", "이미 처리됨")]
+    assert tg_capture["edits"] == []
+
+
+def test_callback_unknown_target_and_bad_data(fresh_db, owner_set, tg_capture):
+    bc.handle_callback(_cq("approve:777"), owner_set)                # 기록 없는 대상
+    assert "기록이 없습니다" in tg_capture["answers"][-1][1]
+    bc.handle_callback(_cq("hack:1", cq_id="cbq2"), owner_set)       # 형식 불일치 data
+    assert tg_capture["answers"][-1] == ("cbq2", "알 수 없는 버튼입니다.")
+    assert tg_capture["edits"] == []
+
+
+def test_callback_answers_even_when_handler_errors(fresh_db, owner_set, tg_capture, monkeypatch):
+    """decide_request 예외에도 answerCallbackQuery 는 반드시 호출 (finally 경로)."""
+    from src import subscribers
+
+    _seed_pending("100")
+
+    def boom(target, approve, send_notifications=True):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(subscribers, "decide_request", boom)
+    with pytest.raises(RuntimeError):                                # 예외는 폴링 루프 가드가 처리
+        bc.handle_callback(_cq("approve:100"), owner_set)
+    assert len(tg_capture["answers"]) == 1
+    assert "오류" in tg_capture["answers"][0][1]
+    assert tg_capture["edits"] == []                                 # 실패 시 결과 표기 없음
+
+
+def test_callback_without_message_still_processes(fresh_db, owner_set, tg_capture):
+    """message 필드 없는 콜백(오래된 메시지 등)도 상태 변경 + 응답은 수행 (편집만 생략)."""
+    subs = _seed_pending("100")
+    cq = {"id": "cbq1", "from": {"id": 1}, "data": "approve:100"}    # message 없음
+    bc.handle_callback(cq, owner_set)
+    assert subs.subscriber_status("100") == "active"
+    assert tg_capture["answers"] == [("cbq1", "승인 완료")]
+    assert tg_capture["edits"] == []
+
+
+# ---------------- /news (Phase 11b — 뉴스 헤드라인) ----------------
+
+
+def _seed_active_subscriber(chat_id="200", name="bob"):
+    from src import subscribers
+
+    conn = subscribers._conn()
+    subscribers.set_status(conn, chat_id, "active", name=name)
+    conn.commit()
+
+
+_NEWS_ITEMS = [
+    {"title": "Apple hits record high", "publishedDate": "2026-07-04 12:30:00",
+     "site": "Reuters", "url": "https://example.com/a"},
+    {"title": "Chip supply update", "publishedDate": "garbage-date",
+     "site": None, "url": "https://example.com/b"},
+]
+
+
+@pytest.fixture
+def fake_news(monkeypatch):
+    """data_fetcher.fetch_stock_news 를 기록기로 대체 (네트워크 없음).
+
+    handle_news 는 호출 시점에 lazy import 하므로 모듈 속성 패치로 충분.
+    """
+    import src.data_fetcher as df
+
+    calls = []
+
+    def fake(symbol, limit=5):
+        calls.append((symbol, limit))
+        return _NEWS_ITEMS
+
+    monkeypatch.setattr(df, "fetch_stock_news", fake)
+    return calls
+
+
+def test_parse_news_command():
+    assert bc.parse_command("/news AAPL") == bc.Command("news", "AAPL")
+    assert bc.parse_command("/news@MyBot tsla") == bc.Command("news", "tsla")
+    assert bc.parse_command("/news") == bc.Command("news", None)
+
+
+def test_help_text_lists_news():
+    assert "/news" in bc.HELP_TEXT
+
+
+def test_format_news_plain_layout():
+    out = bc.format_news("AAPL", _NEWS_ITEMS)
+    lines = out.split("\n")
+    assert lines[0] == "📰 AAPL 최근 뉴스"
+    assert lines[1] == "• [Reuters] Apple hits record high (07-04)"
+    assert lines[2] == "  https://example.com/a"
+    assert lines[3] == "• [?] Chip supply update"       # site None → ?, 깨진 날짜 → 꼬리 생략
+    assert "*" not in out and "`" not in out            # Markdown 엔티티 없음 (평문 안전)
+
+
+def test_format_news_caps_at_limit():
+    many = [{"title": f"t{i}", "url": f"https://e.com/{i}"} for i in range(10)]
+    out = bc.format_news("AAPL", many)
+    assert out.count("• ") == bc.NEWS_LIMIT
+
+
+def test_news_date_helper_defensive():
+    assert bc._news_date("2026-07-04 12:30:00") == "07-04"
+    assert bc._news_date("2026-07-04T12:30:00Z") == "07-04"
+    assert bc._news_date("July 4") == ""
+    assert bc._news_date(None) == ""
+    assert bc._news_date(20260704) == ""
+
+
+def test_news_gate_rejects_non_subscriber(fresh_db, owner_set, fake_news):
+    out = bc.respond("/news AAPL", "999")               # 미가입 chat
+    assert "구독자 전용" in out
+    assert fake_news == []                              # fetch 자체가 없어야 함
+
+
+def test_news_owner_and_active_subscriber_allowed(fresh_db, owner_set, fake_news):
+    assert "Apple hits record high" in bc.respond("/news AAPL", owner_set)   # 소유자
+    _seed_active_subscriber("200")
+    assert "Apple hits record high" in bc.respond("/news AAPL", "200")       # active 구독자
+    assert fake_news == [("AAPL", bc.NEWS_LIMIT)] * 2
+
+
+def test_news_usage_hint_without_arg(fresh_db, owner_set, fake_news):
+    assert "사용법" in bc.respond("/news", owner_set)
+    assert fake_news == []
+
+
+def test_news_ticker_validation_rejects_garbage(fresh_db, owner_set, fake_news):
+    for bad in ("AAPL;DROP", "a b", "&apikey=x", "WAYTOOLONG123", "../etc"):
+        assert "형식" in bc.handle_news(bad, owner_set)
+    assert fake_news == []                              # 검증 실패 시 fetch 호출 없음
+    assert "Apple" in bc.handle_news(" aapl ", owner_set)   # 소문자/공백 정규화
+    assert "Apple" in bc.handle_news("BRK.B", owner_set)    # 점 티커 허용
+    assert fake_news[0] == ("AAPL", bc.NEWS_LIMIT)
+
+
+def test_news_fetch_error_is_polite_message(fresh_db, owner_set, monkeypatch):
+    import src.data_fetcher as df
+    from src.exceptions import DataFetchError, MissingApiKeyError
+
+    def boom(symbol, limit=5):
+        raise DataFetchError("down", source="FMP")
+
+    monkeypatch.setattr(df, "fetch_stock_news", boom)
+    out = bc.respond("/news AAPL", owner_set)           # 크래시 없이 안내
+    assert "실패" in out and "AAPL" in out
+
+    def no_key(symbol, limit=5):
+        raise MissingApiKeyError("FMP_API_KEY")
+
+    monkeypatch.setattr(df, "fetch_stock_news", no_key)
+    assert "설정되지 않았습니다" in bc.handle_news("AAPL", owner_set)
+
+
+def test_news_empty_result_message(fresh_db, owner_set, monkeypatch):
+    import src.data_fetcher as df
+
+    monkeypatch.setattr(df, "fetch_stock_news", lambda symbol, limit=5: [])
+    assert "최근 뉴스가 없습니다" in bc.respond("/news ZZZZ", owner_set)
+
+
+def test_news_rate_limit_applies(fresh_db, owner_set, fake_news):
+    rl = bc.RateLimiter(max_calls=1, window_sec=60, clock=lambda: 0.0)
+    assert bc.respond("/news AAPL", owner_set, rl) is not None
+    assert bc.respond("/news AAPL", owner_set, rl) is None   # 한도 초과 → 드롭
+    assert len(fake_news) == 1

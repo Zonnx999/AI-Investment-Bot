@@ -113,6 +113,32 @@ def test_digest_prediction_direction_icon():
     assert "개월 선행" in out   # 'M' → '개월 선행' 풀어쓰기
 
 
+# ---------------- Finding 기반 렌더링 — 기존 포맷 byte-identical (13a) ----------------
+
+
+def test_digest_factor_lines_exact_format():
+    # 팩터 섹션이 Finding 경로로 바뀌어도 줄 포맷은 리팩토링 전과 동일해야 함
+    out = format_digest(_report(), [], now=NOW, names={"NVDA": "NVIDIA Corp"})
+    assert "  `NVDA` *NVIDIA Corp* — 종합 *64*" in out       # 이름 있음 (int 렌더 유지)
+    assert "  `CPNG` — 종합 *29*" in out                     # 이름 없음
+    assert "     모멘텀 100 · 밸류 14 · 퀄리티 77 · 로우볼 0" in out
+
+
+def test_digest_candidate_lines_exact_format():
+    rep = _report(candidates=[{"ticker": "AAPL", "pe": 12.5, "reasons": []},
+                              {"ticker": "RIVN", "pe": None, "reasons": []}])
+    out = format_digest(rep, [], now=NOW, names={"AAPL": "Apple Inc."})
+    assert "  `AAPL` *Apple Inc.* — P/E 12.5" in out
+    assert "  `RIVN` — 적자" in out
+
+
+def test_digest_prediction_lines_exact_format():
+    preds = [_pred("BTC 수익률", True, 0.63), _pred("XHB 수익률", False, 0.11)]
+    out = format_digest(_report(), preds, now=NOW)
+    assert "  📈 BTC 수익률: 상승 ↑ (6개월 선행, 신뢰도 R² 0.63)" in out
+    assert "  _그 외 1개 약함 (참고 제외)_" in out
+
+
 # ---------------- 시장별 (Step 1: KR/US 발굴 분리) ----------------
 
 
@@ -172,3 +198,157 @@ def test_broadcast_skips_build_when_no_recipients(monkeypatch):
 
     result = digest.send_daily_digest()
     assert result == {"sent": 0, "failed": 0, "recipients": 0}
+# ---------------- LLM 한 줄 요약 (ROADMAP §2.1 — 표현 레이어) ----------------
+
+
+def test_digest_renders_summary_at_top():
+    out = format_digest(_report(), [], now=NOW, summary="오늘은 위험선호 분위기가 이어졌습니다.")
+    assert out.startswith("🧠 오늘은 위험선호 분위기가 이어졌습니다.\n\n")
+    assert "일일 투자 신호" in out             # 본문은 그대로 뒤따름
+    assert "NVDA" in out
+
+
+def test_digest_without_summary_unchanged():
+    out = format_digest(_report(), [], now=NOW)
+    assert "🧠" not in out
+    assert out.startswith("*📊 일일 투자 신호*")
+
+
+def test_with_summary_pure_helper():
+    from src.digest import with_summary
+    assert with_summary("본문", "요약") == "🧠 요약\n\n본문"
+    assert with_summary("본문", None) == "본문"      # 실패/생략 시 원문 그대로
+    assert with_summary("본문", "") == "본문"
+
+
+# ---------------- send_daily_digest 배선 — LLM 실패해도 발송 불가침 ----------------
+
+
+def _broadcast_env(monkeypatch, digest_text="본문 다이제스트"):
+    """send_daily_digest 의 무거운 조립/전송/DB 를 전부 스텁. 전송된 텍스트 목록 반환."""
+    import src.digest as digest_mod
+
+    sent: list[str] = []
+
+    class _FakeStorage:
+        def sync(self):
+            pass
+
+    monkeypatch.setattr(digest_mod, "build_daily_digest", lambda **kw: digest_text)
+    monkeypatch.setattr("src.subscribers.ensure_owner", lambda: None)
+    monkeypatch.setattr("src.subscribers.active_subscribers", lambda: [("1", "leo")])
+    monkeypatch.setattr("src.notifier.send_safe",
+                        lambda text, chat_id: sent.append(text) or True)
+    monkeypatch.setattr("src.storage.get_storage", lambda: _FakeStorage())
+    return sent
+
+
+def test_send_daily_digest_sends_even_when_llm_fails(monkeypatch):
+    import src.digest as digest_mod
+    import src.llm as llm_mod
+    from src.exceptions import ApiHttpError
+
+    sent = _broadcast_env(monkeypatch)
+
+    def _boom(text):
+        raise ApiHttpError("LLM down", status_code=500, source="NVIDIA-NIM")
+
+    monkeypatch.setattr(llm_mod, "summarize", _boom)
+    result = digest_mod.send_daily_digest(use_llm=True)
+    assert result == {"sent": 1, "failed": 0, "recipients": 1}
+    assert sent == ["본문 다이제스트"]           # 요약 실패 → 원문 그대로 발송
+
+
+def test_send_daily_digest_prepends_summary_on_success(monkeypatch):
+    import src.digest as digest_mod
+    import src.llm as llm_mod
+
+    sent = _broadcast_env(monkeypatch)
+    monkeypatch.setattr(llm_mod, "summarize", lambda text: "조용한 하루였습니다.")
+    digest_mod.send_daily_digest(use_llm=True)
+    assert sent == ["🧠 조용한 하루였습니다.\n\n본문 다이제스트"]
+
+
+def test_send_daily_digest_use_llm_false_skips_llm_entirely(monkeypatch):
+    import src.digest as digest_mod
+    import src.llm as llm_mod
+
+    sent = _broadcast_env(monkeypatch)
+    called: list[str] = []
+    monkeypatch.setattr(llm_mod, "summarize_safe",
+                        lambda text: called.append(text) or "요약")
+    digest_mod.send_daily_digest(use_llm=False)
+    assert called == []                          # --no-llm: 호출 자체가 없어야 함
+    assert sent == ["본문 다이제스트"]
+
+
+# ---------------- 제안 비중 (Phase 13c) ----------------
+
+
+def test_digest_weights_rendered_with_cash_legend():
+    """weights 주어지면 발굴 라인에 '제안 N%' + 현금 잔여 범례. 0% 도 표시(엣지 없음)."""
+    out = format_digest(_report(), [], now=NOW,
+                        weights={"NVDA": 0.25, "CPNG": 0.0})
+    assert "종합 *64* · 제안 25%" in out
+    assert "종합 *29* · 제안 0%" in out
+    assert "제안 비중: 역변동성·Kelly 상한" in out
+    assert "현금 75%" in out                                # 1 - 0.25 잔여
+
+
+def test_digest_weights_partial_and_full_invested():
+    """weights 에 없는 종목은 종전 그대로, 합≈1 이면 현금 문구 생략."""
+    out = format_digest(_report(), [], now=NOW, weights={"NVDA": 1.0})
+    assert "종합 *64* · 제안 100%" in out
+    assert "  `CPNG` — 종합 *29*\n" in out                  # 비중 없는 종목은 종전 포맷
+    assert "현금" not in out
+
+
+def test_digest_weights_none_output_identical():
+    """weights=None(기본) 은 리팩토링 전과 동일 출력 — '제안' 문구 자체가 없음."""
+    assert format_digest(_report(), [], now=NOW) == format_digest(
+        _report(), [], now=NOW, weights=None)
+    assert "제안" not in format_digest(_report(), [], now=NOW)
+
+
+def test_propose_weights_guards(monkeypatch):
+    """_propose_weights — 2종목 미만 None / 파이프라인 실패 None (다이제스트 불변 원칙)."""
+    from src import digest as digest_mod
+    from src.exceptions import InsufficientDataError
+
+    assert digest_mod._propose_weights(["NVDA"]) is None    # <2 종목: 조회 없이 종료
+
+    import pandas as pd
+    idx = pd.bdate_range("2024-01-01", periods=100)
+    fake_px = pd.DataFrame({"Close": range(100, 200)}, index=idx)
+    monkeypatch.setattr("src.data_fetcher.fetch_prices", lambda t, **k: fake_px)
+    monkeypatch.setattr(
+        "src.portfolio.propose",
+        lambda *a, **k: (_ for _ in ()).throw(InsufficientDataError("표본 부족")),
+    )
+    assert digest_mod._propose_weights(["NVDA", "CPNG"]) is None
+
+
+def test_propose_weights_happy_path(monkeypatch):
+    """정상 경로 — propose 결과의 weights 가 그대로 반환 + 노트는 로그로만."""
+    import pandas as pd
+    from src import digest as digest_mod
+    from src.portfolio import PortfolioProposal
+
+    idx = pd.bdate_range("2024-01-01", periods=100)
+    fake_px = pd.DataFrame({"Close": range(100, 200)}, index=idx)
+    monkeypatch.setattr("src.data_fetcher.fetch_prices", lambda t, **k: fake_px)
+    monkeypatch.setattr(
+        "src.portfolio.propose",
+        lambda cands, prices, **k: PortfolioProposal(
+            weights={"NVDA": 0.6, "CPNG": 0.2}, cash_weight=0.2, notes=("테스트",)),
+    )
+    assert digest_mod._propose_weights(["NVDA", "CPNG", "NVDA"]) == {
+        "NVDA": 0.6, "CPNG": 0.2}
+
+
+def test_digest_weights_sub_half_percent_renders_lt1_not_zero():
+    """0 < w < 0.5% 는 '제안 <1%' — 정확한 0(엣지 없음)과 구분 (§4.10 #5 회귀)."""
+    out = format_digest(_report(), [], now=NOW,
+                        weights={"NVDA": 0.004, "CPNG": 0.0})
+    assert "종합 *64* · 제안 <1%" in out
+    assert "종합 *29* · 제안 0%" in out                     # 진짜 0 은 그대로 0%

@@ -7,6 +7,7 @@ Phase 11b — 상시 인터랙티브 봇 (폴링 워커).
 매 메시지를 라우팅:
   · 조회 명령(/stock·/scan·/help) → bot_commands.respond → 응답 전송
   · 구독 명령(/start·/stop·/approve·/deny·/pending) → subscribers.apply_events
+  · callback_query(인라인 [승인][거절] 버튼) → bot_commands.handle_callback
 무거운 분석은 cron 이 Turso 에 사전계산 → 이 봇은 **DB 읽기 위주(경량)**.
 
 ⚠️ 이 봇이 getUpdates 를 소유하므로, 같이 도는 다이제스트 cron 은 구독 동기화를 끄고
@@ -18,7 +19,10 @@ Phase 11b — 상시 인터랙티브 봇 (폴링 워커).
 
 from __future__ import annotations
 
+import os
+import socket
 import time
+from typing import NoReturn
 
 from src import bot_commands, subscribers
 from src.config import settings
@@ -48,21 +52,51 @@ def _extract(update: dict) -> tuple[str | None, str]:
 
 
 def _is_subscriber(chat_id: str, owner: str | None) -> bool:
-    """active 구독자 또는 소유자면 True (조회 명령 접근 제어). 소유자는 승인 없이 허용."""
+    """active 구독자 또는 소유자면 True (조회 명령 접근 제어). 소유자는 승인 없이 허용.
+
+    subscribers.subscriber_status 는 프로세스 단일 connection 재사용 (스키마 초기화 1회) —
+    메시지마다 Turso 왕복을 만들지 않음.
+    """
     if owner and chat_id == owner:
         return True
-    return subscribers.get_status(subscribers._conn(), chat_id) == "active"
+    return subscribers.subscriber_status(chat_id) == "active"
 
 
-def run() -> int:
+def _sd_notify(state: str) -> None:
+    """systemd sd_notify (stdlib 구현, 의존성 0) — NOTIFY_SOCKET 없으면 no-op.
+
+    용도: `Type=notify` + `WatchdogSec=` 유닛에서 하트비트. libsql 쓰기가
+    GIL 을 쥔 채 블랙홀에 걸리면 파이썬 레벨 가드가 전부 무력하므로
+    (docs/DEPLOYMENT.md §5), 핑이 끊기면 systemd 가 죽이고 Restart 로 복구
+    — 프로세스 밖 워치독이 최종 안전망.
+    """
+    addr = os.environ.get("NOTIFY_SOCKET")
+    if not addr:
+        return
+    if addr.startswith("@"):                        # abstract namespace socket
+        addr = "\0" + addr[1:]
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as s:
+            s.connect(addr)
+            s.send(state.encode())
+    except OSError as e:
+        logger.debug("sd_notify 실패 (무시): %s", e)
+
+
+def run() -> NoReturn:
+    """폴링 루프 — 정상 흐름에선 반환하지 않음 (종료는 예외로만: Ctrl+C 등)."""
     store = get_storage()
+    _sd_notify("READY=1")
     subscribers.ensure_owner()                       # 소유자 항상 active
     owner = str(settings.telegram_chat_id) if settings.telegram_chat_id else None
     limiter = bot_commands.RateLimiter(max_calls=RATE_MAX_CALLS, window_sec=RATE_WINDOW_SEC)
-    offset = store.get_state(subscribers._OFFSET_NS, subscribers._OFFSET_KEY)
+    offset = subscribers.get_updates_offset()
     logger.info("봇 시작 (offset=%s, long-poll=%ds)", offset, LONG_POLL_SEC)
 
     while True:
+        # 하트비트 — 루프가 어딘가(특히 libsql 원격 쓰기)에서 멈추면 핑이 끊겨
+        # systemd WatchdogSec 이 프로세스를 재시작 (설정은 DEPLOYMENT.md §5)
+        _sd_notify("WATCHDOG=1")
         try:
             updates = get_updates(offset=offset, timeout=LONG_POLL_SEC)
         except DataFetchError as e:
@@ -80,7 +114,18 @@ def run() -> int:
             if msg and msg.get("text") in bot_commands.BUTTON_TO_COMMAND:
                 msg["text"] = bot_commands.BUTTON_TO_COMMAND[msg["text"]]
 
-        # 1) 조회 명령 즉답 — /stock·/scan 은 active 구독자(또는 소유자)만, /help·/menu 는 공개
+        # 1) 콜백 쿼리 (인라인 [승인][거절] 버튼) — 소유자 검증·응답·편집은 handle_callback 이
+        #    전담. per-update try/except 로 poison callback 이 루프를 죽이지 않게 함.
+        for u in updates:
+            cq = u.get("callback_query")
+            if not cq:
+                continue
+            try:
+                bot_commands.handle_callback(cq, owner)
+            except Exception:  # noqa: BLE001 — poison 콜백이 봇을 크래시 루프시키지 않도록
+                logger.exception("콜백 처리 실패 (update_id=%s) — 건너뜀", u.get("update_id"))
+
+        # 2) 조회 명령 즉답 — /stock·/scan 은 active 구독자(또는 소유자)만, /help·/menu 는 공개
         for u in updates:
             chat_id, text = _extract(u)
             if not chat_id or not text:
@@ -96,27 +141,32 @@ def run() -> int:
                     # help/menu 응답에 버튼 메뉴 부착 (소유자는 관리자 버튼 포함)
                     kb = (bot_commands.main_keyboard(owner is not None and chat_id == owner)
                           if cmd.kind == "help" else None)
-                    send_safe(reply, chat_id, reply_markup=kb)
+                    # /news 는 의도적 평문([site]·URL 포함) — Markdown 으로 보내면
+                    # 매번 400 → 평문 폴백으로 전송이 2배가 되므로 처음부터 평문.
+                    pm = None if cmd.kind == "news" else "Markdown"
+                    send_safe(reply, chat_id, parse_mode=pm, reply_markup=kb)
             except Exception:  # noqa: BLE001 — poison 메시지가 봇을 크래시 루프시키지 않도록
                 logger.exception("명령 처리 실패 (chat=%s) — 건너뜀", chat_id)
 
-        # 2) 구독 명령 처리 (조회 명령은 parse_updates 가 "ignore" 로 흘림)
+        # 3) 구독 명령 처리 (조회 명령은 parse_updates 가 "ignore" 로 흘림 —
+        #    callback_query update 는 메시지가 없어 이벤트 없이 offset 만 전진)
         events, next_offset = subscribers.parse_updates(updates)
         try:
-            subscribers.apply_events(events)
+            # 상시 봇만 인라인 버튼 부착 — callback_query 를 이 루프가 처리하므로.
+            subscribers.apply_events(events, interactive_buttons=True)
         except Exception:  # noqa: BLE001 — 한 배치 처리 실패가 루프를 죽이지 않도록
             logger.exception("구독 이벤트 처리 실패 — 계속 진행")
 
-        # 3) offset 전진 + 클라우드 동기화 (처리한 메시지 재수신 방지)
+        # 4) offset 전진 + 클라우드 동기화 (처리한 메시지 재수신 방지)
         if next_offset is not None:
             offset = next_offset
-            store.put_state(subscribers._OFFSET_NS, subscribers._OFFSET_KEY, offset)
+            subscribers.set_updates_offset(offset)
         store.sync()
 
 
 def main() -> int:
     try:
-        return run()
+        run()                                        # NoReturn — 예외로만 빠져나옴
     except KeyboardInterrupt:
         logger.info("봇 종료 (KeyboardInterrupt)")
         return 0

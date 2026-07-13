@@ -20,5 +20,7 @@ Requires-Dist: matplotlib>=3.8.0; extra == "viz"
 Requires-Dist: plotly>=5.20.0; extra == "viz"
 Provides-Extra: llm
 Requires-Dist: anthropic>=0.40.0; extra == "llm"
+Provides-Extra: hosting
+Requires-Dist: libsql-experimental>=0.0.49; extra == "hosting"
 Provides-Extra: ui
 Requires-Dist: streamlit>=1.36.0; extra == "ui"

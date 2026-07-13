@@ -3,7 +3,7 @@
 > 현재 상태·완료 상세는 `CURRENT_STATE.md` + `git log`. 이 파일은 **앞으로 할 일**에 집중합니다.
 > 작업 규칙(phase-gate·리뷰 톤·결정 시 옵션 제시)은 `CLAUDE.md §4`.
 
-**권장 순서**: Phase 4–12 ✅ (봇·대시보드 라이브) → **상용화 전환 Phase A→E (아래 §1)**.
+**권장 순서**: Phase 4–13 ✅ (봇·대시보드 라이브 + 포트폴리오 레이어 — 07-05 개선 브랜치, 라이브 스모크 후 머지 07-13) → **상용화 전환 Phase A→E (아래 §1)**.
 운영 런북 `docs/DEPLOYMENT.md` · 대시보드 https://zonnx999.github.io/AI-Investment-Bot/ · 수익화 전략 전문 `MARKETING.md`(현재 별도 브랜치, main 편입 예정).
 
 ---
@@ -18,9 +18,12 @@
 **결제·티어는 리텐션 >40% 검증 *후에만*** 붙인다 (리텐션 전 결제 도입 = 대표적 실수, 획득비만 태움).
 시퀀스: **획득(A·B·D) → 리텐션 측정(C) → 인터뷰 → 결제(E)**.
 
-> ❌ **DROP — 인라인 `[승인][거절]` 버튼** (구 11b 잔여 1순위였음). 사람(소유자) 승인은 확장의 *병목*이고,
-> 버튼은 그 병목을 *빠르게* 만들 뿐 *없애지* 못함. 대신 셀프서비스 가입으로 병목 자체를 제거(Phase A).
-> 단, 그 버튼이 쓰려던 **`callback_query` 처리 인프라는 약관 동의 "[동의합니다]" 버튼에 재사용**한다.
+> (07-13 머지) 개선 브랜치의 Phase 13 포트폴리오 레이어·11b 잔여(인라인 버튼·`/news`)·LLM 요약·백테스트는
+> 전부 완료되어 §3 완료 이력으로 이동. 머지 게이트 라이브 스모크 7항목은 `CURRENT_STATE.md` 인계 참조.
+
+> ℹ️ **인라인 `[승인][거절]` 버튼** — 06-30 에 DROP 결정했으나 개선 브랜치(07-05)에서 이미 구현·라이브 검증됨(07-13).
+> DROP 의 논리(사람 승인은 확장의 병목 — 셀프서비스 가입으로 병목 자체를 제거)는 Phase A 에 그대로 유효하며,
+> 이때 **`callback_query` 처리 인프라(구현 완료)를 약관 동의 "[동의합니다]" 버튼에 재사용**한다.
 
 ### Phase A — 가입 모델 전환 + 약관/고지 (획득의 전제) ← 다음 1순위
 오너 수동 승인 → **셀프서비스 가입**. 가입과 약관 동의는 **법적으로 분리 불가 → 한 묶음**(수익화 §6).
@@ -62,26 +65,51 @@ North Star 측정 인프라. **데이터는 소급 백필 불가** → A·B 와 
 ## 2. 부록 — 선택 기능 / 백로그
 
 ### 2.1 다음 후보 기능
-- **봇 명령 확장** — `/news <티커>`(`NEWS_API_KEY`/FMP 뉴스, 응답 캐시 + rate limit, 선택 Haiku 센티먼트) ·
-  `/regime`·`/predict`·`/me`(내 상태) 즉답(국면/예측은 라이브 fetch라 봇에 다소 무거움). (구 Phase 11b 잔여 — Phase A 이후로 미룸)
-- **LLM 요약 한 줄** — 다이제스트 맨 위 한 문단. 후보: **MiniMax-M3(NVIDIA API, `MINIMAX_API_KEY` 이미 .env 에 있음)** 또는 Haiku.
-  방향만 합의(2026-06-29, 구현 대기): 결정론적 다이제스트 **위 표현 레이어만** — 숫자·티커 생성/수정 금지,
-  API 실패/레이트리밋 시 **요약 생략 폴백**(다이제스트는 그대로 발송, §4.10 #10 사상), 하루 1회 호출.
-  배선: `src/llm.py`(호출+폴백, http 세션 재사용) + `config` 에 키 로딩 + http 마스킹 등록. 구현 전 모델 id 검증(§4.10 #3).
-- **백테스트 프레임워크** — Phase 5 신호 / Phase 6 예측의 과거 성과 검증 (예측 R² 우려 정량 해소)
+- **봇 명령 확장** — `/regime`·`/predict`·`/me`(내 상태) 즉답(국면/예측은 라이브 fetch라 봇에 다소 무거움 — Phase A 이후로 미룸).
+  `/news <티커>` 는 ✅ 완료 (07-05 브랜치 — FMP 뉴스, 30분 캐시 + rate limit, 평문 포맷. Haiku 센티먼트는 미포함).
+- ✅ **LLM 요약 한 줄** — 구현 완료 (07-05, 브랜치): `src/llm.py`(summarize/summarize_safe/킬스위치 `QUANT_BOT_LLM`),
+  합의 설계 그대로 — 표현 레이어만, 실패 시 요약 생략 폴백, `--no-llm` 플래그.
+  모델 id 라이브 스모크 완료 (07-11): 기본 `minimaxai/minimax-m2.7` (m2 는 NIM 퇴역, m3 는 타임아웃 초과).
+- ✅ **백테스트 프레임워크** — 구현 완료 (07-05, 브랜치): `src/backtest.py`(순수 엔진: run_backtest/walk_forward_topn/
+  evaluate_lead_lag_oos) + `scripts/check_backtest.py`(실데이터 대시보드). 예측 R² 우려는 OOS 방향 적중률로 정량화.
 - **지표 확장** (구 UPGRADE_PLAN P2) — VIX/DXY → `classify_regime` 보강, earnings revision, short interest 알림
 - **포트폴리오 최적화 엔진** (구 P3) — 자산군 비중 산출 (All Weather 비중 검증과 연결)
 - **알파 신호** (구 P4) — insider trading 알림, earnings-call NLP(LLM), 한국 BOK ECOS API(`ECOS_API_KEY`)
 - **미구현(의존성 대기)**: Google Trends(pytrends, 불안정), SEC EDGAR 13F(파싱·45일 지연)
 - **Streamlit** — Phase 12 대시보드로 대체됨, skip
 
-### 2.2 코드 개선 backlog (출처: 코드리뷰 2026-06-23 — [BUG] 5건은 06-29 수정 완료)
-- **점수 정확성**: KR PBR 공식 완화(중대형주에 가혹, PBR 2.0→0점), KR 배당 DART 연동(현재 0 고정),
-  빈 fundamentals 는 0점 대신 skip(현재 누락=조용한 저점), 음수 earningsYield→PER `None` 명시
-- **DRY/구조**: `_clip`·`_MARKET_LABEL` → `utils`, vol 계산 중복 → `FactorScores.vol_pct`,
-  `subscribers` private 심볼 public API + 봇 conn 재사용(매 메시지 Turso 왕복↓), `run()→NoReturn`,
-  `symbols_needing_enrichment(market)` 파라미터화
-- **견고성**: Markdown 폴백을 `status_code==400` 기반으로(현 "parse" 문자열 매칭은 취약), `drawdown_alerts` 단일 호출 리팩토링
+### 2.2 코드 개선 backlog — ✅ 대부분 완료 (07-05, 브랜치)
+- [x] **점수 정확성**: KR PBR 공식 완화(`_kr_pbr_points`: ≤0.5 만점, 4.5에서 0점 선형), 빈 fundamentals skip
+  (`has_fundamentals`, scan 랭킹 제외 — **DB 재점수 필요**), 음수 earningsYield→PER `None`(signals + check_fundamentals)
+- [x] **DRY/구조**: `_clip`→`utils.clip`, vol 단일화(`annualized_vol_pct`+`FactorScores.vol_pct`),
+  `subscribers` 공개 API(subscriber_status/get·set_updates_offset)+스키마 init 메모이즈(메시지당 Turso 왕복 제거),
+  `run()→NoReturn`, `symbols_needing_enrichment(market)`. `_MARKET_LABEL` 은 digest 단독 사용이라 이동 안 함
+- [x] **견고성**: Markdown 폴백 `status_code==400` 기반, `drawdown_alerts` 단일 호출
+- [ ] **잔여**: KR 배당 DART 연동(현재 0 고정 — DART API 필드 라이브 검증 필요해 보류)
+
+### 2.3 아키텍처 리뷰 트리아지 (2026-07-06 — 외부 AI 아키텍트 리뷰 15개 항목)
+> 재논의 방지용 결정 기록. 원칙: **1인 사용자·무료 티어 박스·오프라인 테스트**라는 실제 제약
+> 기준으로 판정. 추상적으로 옳아도 이 프로젝트 규모에 비용>효익이면 기각.
+
+**채택 (2건)**
+- **포트폴리오 레이어** → Phase 13 (§1.1). 유일한 진짜 공백 — 기존 §2.1 후보와도 일치.
+- **구조화 리서치 결과** → 13a. 다이제스트·대시보드가 소비하는 공통 dataclass — 저비용 고효익.
+
+**이미 반영됨 (해당 없음)**
+- 결정론/LLM 분리(창립 원칙), 불변 결과 객체(ScoreCard·FactorScores·BacktestResult),
+  플러그인 레지스트리(PREDICTORS), 레이어 경계(§4.4 순수함수/오케스트레이터 분리).
+
+**기각 (사유 기록)**
+- **플랫폼 레이어링·전면 DI**: src ~5.5k 줄 1인 코드베이스에 간접층 2배 — 현 module 함수 +
+  settings 싱글톤 + monkeypatch 로 테스트 13초면 충분. 테스트가 아파질 때 국소 채택.
+- **AI 애널리스트 위원회**: Phase 3 말 비용·결정론 이유로 명시 폐기한 방향과 정면 충돌.
+  '위원회'가 필요하면 **결정론 모델 N개 투표 + LLM 은 회의록만** 형태로.
+- **이벤트 드리븐**: push 이벤트 소스가 없음(FRED 는 웹훅 없음) — 타이머 폴링에 이벤트 버스
+  이름만 붙는 꼴. §4.10 #11 교훈대로 schedule-driven 유지. 실제 push 소스 생기면 재고.
+- **피처 스토어**: @cached SQLite + 사전 enrich 유니버스 DB(스캔 API 0콜)가 이미 그 역할.
+  별도 스토어는 제2의 진실원천 + Turso staleness 문제만 추가.
+- **data_fetcher 분할**: '외부 호출 한 파일' 은 의도된 규칙(§4.4) — 데코레이터 오배치 사고를
+  잡아낸 것도 grep 한 방이 가능했기 때문. ~1.2k 줄로 아직 임계 미달, 막히면 그때 패키지화.
 
 ---
 
@@ -98,8 +126,9 @@ North Star 측정 인프라. **데이터는 소급 백필 불가** → A·B 와 
 | Phase 9 KRX 발굴 + DART 펀더멘털 점수 | ✅ |
 | Phase 10 데이터 호스팅 (Turso/libSQL) | ✅ |
 | Phase 11a 멀티유저 브로드캐스트 (소유자 승인제) | ✅ |
-| Phase 11b 실시간 인터랙티브 봇 (`/stock`·`/scan`·`/announce`) | ✅ |
+| Phase 11b 실시간 인터랙티브 봇 (`/stock`·`/scan`·`/announce`·인라인 승인버튼·`/news`) | ✅ |
 | Phase 12 대시보드 통합 (GitHub Pages 라이브) | ✅ |
+| Phase 13 포트폴리오 레이어 (Finding·사이징 엔진·다이제스트 제안 비중·All Weather 검증) | ✅ |
 
 ---
 

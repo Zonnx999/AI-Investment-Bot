@@ -8,6 +8,7 @@ from src.screener import (
     _safe,
     calculate_health_score,
     calculate_value_score,
+    has_fundamentals,
     health_scorecard,
     value_scorecard,
 )
@@ -158,3 +159,79 @@ def test_nan_metric_scores_zero_not_full():
     card = health_scorecard({"grossProfitMargin": float("nan")})
     gp = next(c for c in card.components if c.label == "총이익률(GP)")
     assert gp.points == 0.0   # NaN → default(0) → 0점 (이전엔 만점 25)
+
+
+# ---------------- has_fundamentals (빈 fundamentals → skip 판정) ----------------
+
+
+def test_has_fundamentals_rejects_empty_and_all_missing():
+    """빈 dict / 전부 None·NaN·빈 문자열 → False (점수 생략 대상)."""
+    assert has_fundamentals({}) is False
+    assert has_fundamentals({"returnOnEquity": None, "evToSales": None}) is False
+    assert has_fundamentals({"returnOnEquity": float("nan"), "x": float("inf")}) is False
+    assert has_fundamentals({"symbol": "", "returnOnEquity": None}) is False
+
+
+def test_has_fundamentals_accepts_real_data_including_zero():
+    """정당한 0 값은 결측이 아님 — True (0 과 '데이터 없음' 구분)."""
+    assert has_fundamentals({"netDebtToEBITDA": 0.0}) is True
+    assert has_fundamentals({"returnOnEquity": 0.15, "evToSales": None}) is True
+
+
+def test_screen_one_skips_when_fundamentals_empty(monkeypatch):
+    """fundamentals 가 빈 종목은 0점 랭킹 바닥 대신 skip(None) (#backlog 점수정확성)."""
+    from src import screener
+
+    monkeypatch.setattr(
+        "src.screener.fetch_quote",
+        lambda t: {"price": 100.0, "name": "Empty Co", "marketCap": 5e9},
+    )
+    monkeypatch.setattr("src.screener.latest_fundamentals", lambda t: {})
+    assert screener.screen_one("EMPTY") is None
+
+    monkeypatch.setattr(
+        "src.screener.latest_fundamentals", lambda t: {"returnOnEquity": None}
+    )
+    assert screener.screen_one("ALLNONE") is None
+
+
+def test_screen_one_scores_when_fundamentals_present(monkeypatch):
+    from src import screener
+
+    monkeypatch.setattr(
+        "src.screener.fetch_quote",
+        lambda t: {"price": 100.0, "name": "Good Co", "marketCap": 5e9,
+                   "lastDividend": 2.0, "sector": "Industrials", "industry": "Machinery"},
+    )
+    monkeypatch.setattr("src.screener.latest_fundamentals", lambda t: dict(GOOD))
+    row = screener.screen_one("GOOD")
+    assert row is not None
+    assert row["total_score"] > 0
+
+
+def test_has_fundamentals_ignores_identifier_strings():
+    """실제 FMP 행 형태 — 수치 메트릭이 전부 null 이어도 식별자 문자열
+    (symbol/fiscalYear/period/reportedCurrency)은 항상 존재. 문자열을 데이터로
+    세면 skip 가드가 실데이터에서 절대 발화하지 않으므로 전부 무시해야 함."""
+    shell_row = {
+        "symbol": "XYZ", "fiscalYear": "2024", "period": "FY",
+        "reportedCurrency": "USD",
+        "returnOnEquity": None, "earningsYield": None, "evToSales": float("nan"),
+    }
+    assert has_fundamentals(shell_row) is False
+    # 식별자 + 실제 수치 하나라도 있으면 True
+    assert has_fundamentals({**shell_row, "returnOnEquity": 0.12}) is True
+
+
+def test_health_nde_negative_from_loss_scores_zero():
+    """음수 NDE 의 두 얼굴 회귀: 적자발(EBITDA<0, evToEBITDA<0)은 0점 '적자',
+    순현금발(netDebt<0, EBITDA>0)은 종전대로 만점."""
+    loss = {"netDebtToEBITDA": -4.0, "evToEBITDA": -6.0}
+    sc = health_scorecard(loss)
+    comp = next(c for c in sc.components if c.label == "순부채/EBITDA")
+    assert comp.points == 0.0 and "적자" in comp.detail
+
+    net_cash = {"netDebtToEBITDA": -1.0, "evToEBITDA": 8.0}
+    sc2 = health_scorecard(net_cash)
+    comp2 = next(c for c in sc2.components if c.label == "순부채/EBITDA")
+    assert comp2.points == 20.0 and "적자" not in comp2.detail

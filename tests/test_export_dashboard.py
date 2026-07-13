@@ -8,12 +8,11 @@ Phase 12 — export_dashboard.py 순수 헬퍼 오프라인 테스트.
 
 from __future__ import annotations
 
-import math
-
 import pytest
 
 from scripts.export_dashboard import (
     clean_float,
+    finding_to_json,
     prediction_to_dict,
     regime_to_dict,
     row_to_crypto,
@@ -202,6 +201,23 @@ def test_regime_to_dict_signals():
     assert d["failures"] == []
 
 
+def test_regime_to_dict_legacy_keys_unchanged():
+    # 대시보드 JS(index.html renderRegime)가 읽는 기존 키 — 이름 변경/삭제 금지 (13a)
+    d = regime_to_dict(_make_fake_summary())
+    assert {"label", "score", "signals", "failures", "panel", "correlations"} <= set(d)
+    assert isinstance(d["score"], int)      # JS 가 숫자 비교 — 기존 int 유지
+
+
+def test_regime_to_dict_has_finding_shape():
+    # 13a: 다이제스트와 동일한 Finding shape 를 추가 키로 공유
+    d = regime_to_dict(_make_fake_summary())
+    fd = d["finding"]
+    assert fd["kind"] == "regime"
+    assert fd["title"] == d["label"]
+    assert fd["score"] == pytest.approx(d["score"])
+    assert fd["evidence"] == d["signals"]
+
+
 # ----------------------------------------------------------------------
 # prediction_to_dict
 # ----------------------------------------------------------------------
@@ -247,3 +263,37 @@ def test_prediction_to_dict_unreliable():
     d = prediction_to_dict("테스트", result)
     assert d["reliable"] is False
     assert d["r_squared"] == pytest.approx(0.08)
+
+
+def test_prediction_to_dict_legacy_keys_unchanged():
+    # 대시보드 JS(index.html renderPredictions)가 읽는 기존 키 — 이름 변경/삭제 금지 (13a)
+    d = prediction_to_dict("M2 → 비트코인", _make_fake_result())
+    assert {"name", "leading", "target", "best_lag_months", "correlation", "r_squared",
+            "direction", "predicted_change_pct", "reliable", "n_obs", "notes"} <= set(d)
+    assert d["notes"] == ["최적 선행 3개월", "예측 +15.3%"]   # 리스트 유지 (JSON 배열)
+
+
+def test_prediction_to_dict_has_finding_shape():
+    # 13a: 다이제스트와 동일한 Finding shape 를 추가 키로 공유
+    d = prediction_to_dict("M2 → 비트코인", _make_fake_result())
+    fd = d["finding"]
+    assert fd["kind"] == "prediction"
+    assert fd["title"] == "M2 → 비트코인"
+    assert fd["score"] == pytest.approx(d["r_squared"])
+    assert fd["confidence"] == "신뢰"
+    assert fd["evidence"] == d["notes"]
+
+
+# ----------------------------------------------------------------------
+# finding_to_json
+# ----------------------------------------------------------------------
+
+
+def test_finding_to_json_cleans_nan_score():
+    from src.findings import Finding
+
+    fd = Finding(kind="prediction", title="t", score=float("nan"),
+                 confidence="약함", summary="s", evidence=("e",))
+    d = finding_to_json(fd)
+    assert d["score"] is None            # NaN → JSON null (json.dumps 'NaN' 방지)
+    assert d["evidence"] == ["e"]

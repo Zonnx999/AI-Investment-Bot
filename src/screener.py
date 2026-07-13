@@ -42,6 +42,7 @@ from src.data_fetcher import (
 )
 from src.exceptions import DataFetchError
 from src.logger import get_logger
+from src.utils import clip as _clip  # 공용 순수 헬퍼 (utils 로 통합 — universe 와 공유)
 
 logger = get_logger(__name__)
 
@@ -89,6 +90,29 @@ def latest_fundamentals(ticker: str) -> dict:
         for k, v in rt.iloc[-1].to_dict().items():
             merged.setdefault(k, v)
     return merged
+
+
+def has_fundamentals(metrics: dict) -> bool:
+    """metrics 에 '실제 데이터' 가 하나라도 있는지 판별 (순수 함수).
+
+    빈 dict / 값이 전부 None·NaN·Inf·빈 문자열이면 False — 이런 종목을 그대로
+    점수 함수에 태우면 default 기반의 '조용한 0점' 이 되어 랭킹 바닥에 깔림
+    → 호출부(screen_one / universe._compute_enrich)가 **점수 생략(skip)** 하도록.
+
+    주의: 값이 '정당한 0' (예: netDebtToEBITDA=0.0) 이면 True — 결측과 0 을 구분.
+    문자열은 전부 비데이터 취급 — 실제 FMP 행은 수치 메트릭이 전부 null 이어도
+    식별자 문자열(symbol/fiscalYear/period/reportedCurrency)을 항상 포함하므로,
+    문자열을 데이터로 세면 이 가드가 실데이터에서 절대 발화하지 않음.
+    """
+    for v in metrics.values():
+        if v is None:
+            continue
+        if isinstance(v, str):
+            continue   # 식별자·"N/A" 류 — 점수 입력은 전부 수치
+        if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+            continue
+        return True
+    return False
 
 
 # ----------------------------------------------------------------------
@@ -159,10 +183,6 @@ def _safe(d: dict, key: str, default: float = 0.0) -> float:
     return f
 
 
-def _clip(v: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, v))
-
-
 def health_scorecard(metrics: dict) -> ScoreCard:
     """재무 건전성 (0~100) — 학술 근거 기반 Quality 팩터 (병합 metrics 필요).
 
@@ -181,8 +201,9 @@ def health_scorecard(metrics: dict) -> ScoreCard:
     cr = _safe(metrics, "currentRatio", 1.0)
 
     # 순부채/EBITDA: '낮을수록 좋음' 공식은 EBITDA>0 일 때만 성립. 음수 비율은 두 갈래 —
-    # 순현금(EBITDA>0, 우량) vs 적자 EBITDA(부실). 후자에 만점을 주는 역설(§4.10(5))을
-    # 막기 위해 evToEBITDA 부호로 EBITDA 부호를 판별(EV>0 가정).
+    # 순현금(EBITDA>0, 우량) vs 적자 EBITDA(부실). 후자에 만점을 주는 역설(§4.10 #5)을
+    # 막기 위해 evToEBITDA 부호로 EBITDA 부호를 판별(EV>0 가정). 판별 불가(결측)면
+    # 보수적으로 0점 — 미확인 순현금에 만점을 주지 않는다.
     nde_detail = f"{nde:.1f}x"
     if nde < 0:
         if _safe(metrics, "evToEBITDA", 0.0) > 0:        # EBITDA>0 → 진짜 순현금
@@ -297,6 +318,8 @@ def screen_one(ticker: str) -> ScreenedStock | None:
     """한 종목의 데이터를 받아 dashboard 호환 dict 으로 반환.
 
     실패 시 None (호출자가 skip). 광범위 except 는 호출자 루프에서 처리.
+    fundamentals 가 아예 없으면(빈/전부 결측) 0점으로 랭킹 바닥에 깔리는 대신
+    **skip(None)** — '데이터 없음' 과 '나쁜 점수' 를 구분.
     """
     try:
         quote = fetch_quote(ticker)
@@ -308,7 +331,11 @@ def screen_one(ticker: str) -> ScreenedStock | None:
     try:
         metrics = latest_fundamentals(ticker)   # key-metrics + ratios 병합
     except DataFetchError as e:
-        logger.info("Fundamentals 미가용 — %s: %s (기본값으로 진행)", ticker, e)
+        logger.info("Fundamentals 미가용 — %s: %s", ticker, e)
+
+    if not has_fundamentals(metrics):
+        logger.info("Fundamentals 없음 — %s: 점수 생략 (skip)", ticker)
+        return None
 
     health = calculate_health_score(metrics)
     value = calculate_value_score(quote, metrics)

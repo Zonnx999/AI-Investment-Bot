@@ -246,6 +246,40 @@ def test_enrich_empty_metrics_counts_no_data(fresh_db, monkeypatch):
     assert stats["no_data"] == 1 and stats["enriched"] == 0
 
 
+def test_enrich_all_none_metrics_counts_no_data_not_zero_score(fresh_db, monkeypatch):
+    """전부 None 인 metrics 는 0점 보강이 아니라 no_data(미보강 유지) — scan 에서 제외."""
+    conn = universe._conn()
+    universe._upsert_universe_row(
+        conn, symbol="NULLY", market="US", name="N", sector="x", industry="x",
+        price=10.0, market_cap=2e9, dividend_yield=0.0,
+    )
+    conn.commit()
+    monkeypatch.setattr(
+        "src.screener.latest_fundamentals",
+        lambda ticker: {"returnOnEquity": None, "evToSales": None,
+                        "earningsYield": float("nan")},
+    )
+    stats = universe.enrich()
+    assert stats["no_data"] == 1 and stats["enriched"] == 0
+    assert universe.scan(market="US") == []          # 랭킹에 안 나타남 (0점 바닥 아님)
+
+
+def test_symbols_needing_enrichment_market_param(fresh_db):
+    conn = universe._conn()
+    universe._upsert_universe_row(
+        conn, symbol="AAPL", market="US", name="Apple", sector="Tech", industry="x",
+        price=200.0, market_cap=3e12, dividend_yield=0.5,
+    )
+    universe._upsert_universe_row(
+        conn, symbol="005930", market="KR", name="삼성전자", sector="", industry="",
+        price=70000.0, market_cap=4e14, dividend_yield=0.0,
+    )
+    conn.commit()
+    assert universe.symbols_needing_enrichment() == [("AAPL", "US")]          # 기본 US
+    assert universe.symbols_needing_enrichment(market="KR") == [("005930", "KR")]
+    assert universe.symbols_needing_enrichment(market="CRYPTO") == []
+
+
 # ----------------------------------------------------------------------
 # 배치 쓰기 (executescript) — SQL 리터럴 이스케이프 안전성
 # ----------------------------------------------------------------------
@@ -364,3 +398,92 @@ def test_kr_negative_net_income_no_per():
     assert r["per"] is None
     assert _kr_component(r, "health", "흑자")[1] == 0.0
     assert _kr_component(r, "value", "PER")[1] == 0.0
+# ----------------------------------------------------------------------
+# KR 점수 — PBR 곡선 완화 (backlog: PBR 2.0→0점 은 중대형주에 과가혹)
+# ----------------------------------------------------------------------
+
+
+def test_kr_pbr_points_breakpoints():
+    assert universe._kr_pbr_points(0.3) == 35.0        # 딥밸류 → 만점
+    assert universe._kr_pbr_points(0.5) == 35.0        # 만점 상한 경계
+    assert universe._kr_pbr_points(4.5) == 0.0         # 0점 도달 지점
+    assert universe._kr_pbr_points(6.0) == 0.0         # 그 이상도 0
+    # 완화 확인: 구곡선에서 0점이던 PBR 2.0 이 이제 유의미한 점수
+    assert universe._kr_pbr_points(2.0) == pytest.approx(35.0 * 2.5 / 4.0)   # ≈21.9
+    assert universe._kr_pbr_points(1.0) == pytest.approx(35.0 * 3.5 / 4.0)   # ≈30.6
+
+
+def test_kr_pbr_points_monotonic_decreasing():
+    pts = [universe._kr_pbr_points(p) for p in (0.2, 0.5, 0.8, 1.5, 2.5, 3.5, 4.5, 5.5)]
+    assert all(a >= b for a, b in zip(pts, pts[1:]))
+    assert all(0.0 <= p <= 35.0 for p in pts)
+
+
+def test_kr_pbr_points_negative_zero_none_guard():
+    """자본잠식(음수)·0·None 은 명시적 0점 (CLAUDE.md §4.10 #5)."""
+    assert universe._kr_pbr_points(None) == 0.0
+    assert universe._kr_pbr_points(0.0) == 0.0
+    assert universe._kr_pbr_points(-1.2) == 0.0
+
+
+def test_calculate_kr_scores_negative_equity_pbr_zero():
+    """자본잠식 기업(equity<0 → PBR 음수)이 PBR 만점을 받으면 안 됨."""
+    fin = {"net_income": -1e9, "equity": -5e9, "debt": 1e10,
+           "revenue": 1e10, "op_income": -5e8}
+    sc = universe.calculate_kr_scores(fin, market_cap=1e12)
+    pbr_comp = next(c for c in sc["detail"]["value"]["components"] if c[0] == "PBR")
+    assert pbr_comp[1] == 0.0
+
+
+def test_calculate_kr_scores_midcap_pbr_not_floored():
+    """PBR 2.0(한국 중대형주 흔함)이 0점 바닥이 아니어야 함 (완화 목적 자체)."""
+    fin = {"net_income": 1e11, "equity": 1e12, "debt": 5e11,
+           "revenue": 1e12, "op_income": 1.5e11}
+    sc = universe.calculate_kr_scores(fin, market_cap=2e12)   # PBR = 2.0
+    pbr_comp = next(c for c in sc["detail"]["value"]["components"] if c[0] == "PBR")
+    assert pbr_comp[1] > 15.0   # 구곡선(0점) 대비 유의미한 점수
+
+
+# ---------------- 전수 리뷰 회귀 (2026-07-06) ----------------
+
+
+def test_calculate_kr_scores_negative_equity_zeroes_roe_and_debt():
+    """자본잠식(eq<0): 음수NI/음수EQ = 양수 ROE 만점, 부채/음수EQ = 음수
+    부채비율 만점이던 부호 함정 회귀 — 둘 다 0점·'—' 처리."""
+    sc = universe.calculate_kr_scores(
+        {"net_income": -50e9, "equity": -20e9, "debt": 300e9,
+         "revenue": 100e9, "op_income": -10e9},
+        market_cap=500e9,
+    )
+    comps = {c[0]: c for c in sc["detail"]["health"]["components"]}
+    assert comps["ROE"][1] == 0.0 and comps["ROE"][3] == "—"
+    assert comps["부채비율"][1] == 0.0 and comps["부채비율"][3] == "—"
+    assert comps["흑자"][1] == 0.0                          # 적자
+
+
+def _upsert_oldy(conn, price):
+    universe._upsert_universe_row(
+        conn, symbol="OLDY", market="US", name="Old Co", sector="Tech",
+        industry="SW", price=price, market_cap=1e9, dividend_yield=0.0)
+
+
+def test_discover_upsert_preserves_enrichment_freshness(fresh_db):
+    """discover 재발견이 updated_at 을 밀어올려 만기 종목의 재보강을 영원히
+    스킵시키던 회귀 — upsert 후에도 symbols_needing_enrichment 에 남아야 함."""
+    from datetime import timedelta
+
+    conn = universe._conn()
+    _upsert_oldy(conn, 10.0)
+    # 보강 완료로 표시하되 30일 전으로 백데이트
+    conn.execute("UPDATE screened SET enriched=1, "
+                 "updated_at=datetime('now', '-30 days') "
+                 "WHERE symbol='OLDY' AND market='US'")
+    conn.commit()
+    before = universe.symbols_needing_enrichment(timedelta(days=7))
+    assert any("OLDY" in str(row) for row in before)
+
+    # 주간 배치처럼 enrich 직전에 discover 가 같은 종목을 재발견(upsert)
+    _upsert_oldy(conn, 11.0)
+    conn.commit()
+    after = universe.symbols_needing_enrichment(timedelta(days=7))
+    assert any("OLDY" in str(row) for row in after)

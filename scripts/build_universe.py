@@ -107,7 +107,9 @@ def main() -> int:
     for k, v in universe.stats().items():
         print(f"    {k}: {v}")
 
-    remaining = len(universe.symbols_needing_enrichment(max_age))
+    # 남음 카운트는 실제 신선도 기준으로 — --force(max_age=0)를 그대로 쓰면
+    # 방금 보강한 종목까지 전부 '남음'으로 집계돼 오해를 부름 (2026-07-11 스모크에서 발견)
+    remaining = len(universe.symbols_needing_enrichment(universe.ENRICH_MAX_AGE))
     if remaining:
         print(f"\n  ⏳ 보강 남음 {remaining}종목 — 이어하려면: python scripts/build_universe.py --enrich")
     print("=" * 70)

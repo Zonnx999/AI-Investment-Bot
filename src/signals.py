@@ -73,6 +73,7 @@ class FactorScores:
     composite: int
     notes: list[str] = field(default_factory=list)
     low_vol: int = 0   # 4번째 팩터 (Low Volatility)
+    vol_pct: float | None = None   # 연환산 변동성 % — 단일 계산 지점 (변동성 급등 알림 재사용)
 
 
 @dataclass
@@ -145,21 +146,37 @@ def momentum_score(prices: pd.Series) -> tuple[int, list[str]]:
     return round(final), notes
 
 
-def low_vol_score(prices: pd.Series) -> tuple[int, list[str]]:
+def annualized_vol_pct(prices: pd.Series) -> float | None:
+    """연환산 변동성 % — 팩터/알림이 공유하는 **단일 계산 지점**.
+
+    252(거래일) 연환산 — 주식 기준. 크립토(365일 거래)엔 적용되지 않음
+    (크립토는 calculate_crypto_scores 사용). 추후 크립토가 이 경로를 타면 365 필요.
+    수익률이 비면(가격 <2개) None.
+    """
+    returns = prices.dropna().pct_change().dropna()
+    if returns.empty:
+        return None
+    return float(returns.std() * np.sqrt(TRADING_DAYS_PER_YEAR) * 100)
+
+
+def low_vol_score(prices: pd.Series) -> tuple[int, list[str], float | None]:
     """Low Volatility 팩터 (0~100) — 변동성 낮을수록 높음.
 
     Robeco/MSCI 가 독립적 알파 원천으로 확인한 팩터. 연환산 변동성 기준
     ~15% → 100, ~30% → 50, ~60% → 25 (score = clip(30/vol × 50)).
+
+    Returns (점수, 근거, vol_pct) — vol_pct 는 데이터 부족 시 None (중립 50점).
+    호출부(factor_scores)가 vol_pct 를 FactorScores 에 실어 변동성 급등 알림이
+    재계산 없이 재사용 (계산 중복 제거).
     """
     p = prices.dropna()
     if len(p) < MOMENTUM_LOOKBACK_SHORT_D:
-        return 50, ["변동성 데이터 부족 — 중립(50)"]
-    returns = p.pct_change().dropna()
-    # 252(거래일) 연환산 — 주식 기준. 크립토(365일 거래)엔 적용되지 않음
-    # (크립토는 calculate_crypto_scores 사용). 추후 크립토가 이 경로를 타면 365 필요.
-    vol = float(returns.std() * np.sqrt(TRADING_DAYS_PER_YEAR) * 100)
+        return 50, ["변동성 데이터 부족 — 중립(50)"], None
+    vol = annualized_vol_pct(p)
+    if vol is None:
+        return 50, ["변동성 데이터 부족 — 중립(50)"], None
     score = max(0.0, min(100.0, (30.0 / max(vol, 1.0)) * 50.0))
-    return round(score), [f"연환산 변동성 {vol:.1f}% → Low Vol {round(score)}"]
+    return round(score), [f"연환산 변동성 {vol:.1f}% → Low Vol {round(score)}"], vol
 
 
 # ----------------------------------------------------------------------
@@ -267,9 +284,11 @@ def factor_scores(ticker: str) -> FactorScores:
     """한 종목의 4팩터 점수 (모멘텀/밸류/퀄리티/로우볼). 데이터 미가용 시 0점 + note."""
     from src.data_fetcher import fetch_prices, fetch_quote
 
-    closes = close_series(fetch_prices(ticker, period="1y"))
+    # 2y 필수: 12-1 스킵월 모멘텀은 273 거래일 초과 필요 — 1y(~250행)면
+    # 주 브랜치가 영원히 죽은 코드가 되고 3개월 폴백만 돌게 됨 (리뷰 회귀)
+    closes = close_series(fetch_prices(ticker, period="2y"))
     momentum, notes = momentum_score(closes)
-    low_vol, lv_notes = low_vol_score(closes)
+    low_vol, lv_notes, vol_pct = low_vol_score(closes)
     notes.extend(lv_notes)
 
     quote: dict = {}
@@ -293,7 +312,8 @@ def factor_scores(ticker: str) -> FactorScores:
         + quality * COMPOSITE_WEIGHTS["quality"]
         + low_vol * COMPOSITE_WEIGHTS["low_vol"]
     )
-    return FactorScores(ticker, momentum, value, quality, composite, notes, low_vol=low_vol)
+    return FactorScores(ticker, momentum, value, quality, composite, notes,
+                        low_vol=low_vol, vol_pct=vol_pct)
 
 
 def screen_candidates(tickers: list[str]) -> list[dict]:
@@ -312,9 +332,12 @@ def screen_candidates(tickers: list[str]) -> list[dict]:
             continue
         m = df.iloc[-1]
         ey = pick_first(m, ["earningsYield"])
+        # FMP stable 은 P/E 를 earningsYield 로 줌 → 역수. 음수 yield(적자)의 역수는
+        # '음수 PER' 이라는 무의미한 저평가 신호가 되므로 **명시적으로 None** —
+        # apply_screen_rules 가 '데이터 없음(P/E 룰 면제)' 경로로 처리 (§4.10 #5).
         rows.append({
             "ticker": t,
-            "pe": (1.0 / ey) if ey else None,   # FMP stable 은 P/E 를 yield 로 줌
+            "pe": (1.0 / ey) if (ey and ey > 0) else None,
             "roe": pick_first(m, ["returnOnEquity", "roe"]),
             "fcf_yield": pick_first(m, ["freeCashFlowYield"]),
         })
@@ -346,7 +369,6 @@ def generate_signal_report(
       timeline 으로 돌아 서로의 vols/regime baseline 을 덮어쓰지 않도록. US 는 기존
       키 유지(연속성), 그 외 시장은 suffix. tickers=() 면 팩터는 비고 국면/알림만.
     """
-    from src.data_fetcher import fetch_prices
     from src.macro_analyzer import classify_regime, current_drawdown, fetch_cross_asset_panel
 
     store = get_storage()
@@ -364,16 +386,17 @@ def generate_signal_report(
     vols: dict[str, float] = {}
     for t in tickers:
         try:
-            factors.append(factor_scores(t))
-            closes = close_series(fetch_prices(t, period="1y"))  # 캐시 적중 — 추가 호출 없음
-            returns = closes.pct_change().dropna()
-            vols[t] = float(returns.std() * np.sqrt(TRADING_DAYS_PER_YEAR) * 100)
+            fs = factor_scores(t)
+            factors.append(fs)
+            if fs.vol_pct is not None:   # 팩터 계산 때 이미 산출 — 재계산/재fetch 없음
+                vols[t] = fs.vol_pct
         except (DataFetchError, InsufficientDataError) as e:
             logger.warning("팩터 스킵 %s — %s", t, e)
 
     # --- 알림 (이전 실행 대비 변화) ---
-    # 낙폭 breach 상태는 알림 억제와 무관하게 항상 계산 → 상태 저장에 사용.
-    _, dd_state = drawdown_alerts(dd, prev.get("dd_breached", {}))
+    # drawdown_alerts 는 순수 함수라 한 번만 호출 — 알림과 새 breach 상태를 함께 받고,
+    # 첫 실행이면 알림만 버리고 상태는 시딩에 사용 (구현 전엔 같은 인자로 두 번 호출했었음).
+    dd_alerts, dd_state = drawdown_alerts(dd, prev.get("dd_breached", {}))
     alerts: list[Alert] = []
     if not first_run:
         # 첫 실행은 비교 기준이 없으므로 변화 알림 일괄 생략 (regime/낙폭/변동성 일관 처리),
@@ -381,7 +404,6 @@ def generate_signal_report(
         a = regime_change_alert(regime.regime, prev.get("regime"))
         if a:
             alerts.append(a)
-        dd_alerts, _ = drawdown_alerts(dd, prev.get("dd_breached", {}))
         alerts.extend(dd_alerts)
         alerts.extend(vol_spike_alerts(vols, prev.get("vols", {})))
 
