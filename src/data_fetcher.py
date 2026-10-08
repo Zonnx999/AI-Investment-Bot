@@ -976,3 +976,88 @@ def fetch_wikipedia_pageviews(
 # TODO(향후 대체 데이터 — 새 의존성 필요, 사용자 우선순위 대기):
 # - Google Trends (pytrends, fragile), SEC EDGAR 13F (파싱 부담)
 # - 한국은행 ECOS API (한국 거시지표 더 풍부 — 금리/환율/물가/산업생산)
+
+
+# ----------------------------------------------------------------------
+# 신호 원장 채점용 종가 패널 (WP-LEDGER) — 캐시 없음 (의도적)
+# ----------------------------------------------------------------------
+# 왜 캐시 데코레이터를 안 붙이나: 패널 1건이 Turso cache 행 ~365KB 쓰기(태평양 왕복)를 유발하고
+# (심사 실측), 채점기는 일 2회 '새 종가'가 필요해 캐시 적중 가치도 없다 (§4.10 #4).
+CLOSE_PANEL_MAX_TICKERS = 200
+
+
+def fetch_close_panel(tickers: tuple, start, end=None) -> pd.DataFrame:
+    """여러 티커의 일별 **Adj Close**(배당 포함) 패널 — yfinance 배치 1콜, 캐시 없음.
+
+    Parameters
+    ----------
+    tickers : tuple
+        yfinance 심볼들 (예: ("CALM", "SPY", "009970.KS")). 최대 200개.
+    start, end :
+        yfinance 기간 (end 는 배타). 문자열 'YYYY-MM-DD' 또는 date.
+
+    Returns
+    -------
+    pd.DataFrame
+        index = tz 없는 일자(DatetimeIndex, 오름차순), columns = 요청 티커 순서 그대로
+        (응답에 없는 티커는 전부 NaN 컬럼). 모든 값이 NaN 인 날은 제거.
+
+    Raises
+    ------
+    DataFetchError
+        yfinance 호출 자체 실패.
+    DataValidationError
+        티커 없음/200개 초과, 빈 응답, Adj Close 컬럼 없음 (Close 로 대체하지 않음 —
+        종목·벤치가 서로 다른 가격 기준이 섞이는 것을 막기 위해).
+    """
+    tick = tuple(dict.fromkeys(str(t).strip() for t in tickers if str(t).strip()))
+    if not tick:
+        raise DataValidationError("fetch_close_panel: 티커 없음", source="yfinance")
+    if len(tick) > CLOSE_PANEL_MAX_TICKERS:
+        raise DataValidationError(
+            f"fetch_close_panel: 티커 {len(tick)}개 > {CLOSE_PANEL_MAX_TICKERS}",
+            source="yfinance",
+        )
+    try:
+        raw = yf.download(
+            list(tick),
+            start=start,
+            end=end,
+            auto_adjust=False,
+            progress=False,
+            group_by="column",
+            threads=True,
+        )
+    except Exception as e:  # noqa: BLE001  yfinance 는 여러 종류의 예외를 던짐
+        raise DataFetchError(
+            f"yfinance 종가 패널 다운로드 실패: 티커 {len(tick)}개", source="yfinance"
+        ) from e
+
+    if raw is None or raw.empty:
+        raise DataValidationError(
+            f"yfinance 가 빈 종가 패널 반환: 티커 {len(tick)}개", source="yfinance"
+        )
+    if isinstance(raw.columns, pd.MultiIndex):
+        if "Adj Close" not in raw.columns.get_level_values(0):
+            raise DataValidationError("종가 패널에 Adj Close 없음", source="yfinance")
+        panel = raw["Adj Close"]
+        if isinstance(panel, pd.Series):
+            panel = panel.to_frame(tick[0])
+    else:
+        if "Adj Close" not in raw.columns:
+            raise DataValidationError("종가 패널에 Adj Close 없음", source="yfinance")
+        panel = raw[["Adj Close"]].copy()
+        panel.columns = [tick[0]]
+
+    panel = panel.reindex(columns=list(tick)).apply(pd.to_numeric, errors="coerce")
+    idx = pd.DatetimeIndex(panel.index)
+    if idx.tz is not None:
+        idx = idx.tz_localize(None)
+    panel.index = idx.normalize()
+    panel = panel.sort_index()
+    panel = panel[~panel.index.duplicated(keep="last")].dropna(how="all")
+    if panel.empty:
+        raise DataValidationError(
+            f"종가 패널이 전부 결측: 티커 {len(tick)}개", source="yfinance"
+        )
+    return panel
