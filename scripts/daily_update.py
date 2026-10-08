@@ -105,10 +105,12 @@ def _make_signals_section(tickers: list[str]):
     def run() -> str:
         from src.signals import generate_signal_report
 
+        # 상태는 쓰지 않음 — 알림 기준은 다이제스트 발송 성공 후에만 커밋된다
         report = generate_signal_report(tickers=tuple(tickers))
         n_alerts = len(report.alerts)
-        seed = " (첫 실행 — 상태 시딩)" if report.first_run else ""
-        return f"팩터 {len(report.factors)}종목, 알림 {n_alerts}건{seed}"
+        base = " (비교 기준 없음)" if report.first_run else ""
+        issues = f", 데이터 이슈 {len(report.data_issues)}건" if report.data_issues else ""
+        return f"팩터 {len(report.factors)}종목, 알림 {n_alerts}건{base}{issues} (미리보기)"
 
     return run
 

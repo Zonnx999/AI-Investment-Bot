@@ -344,6 +344,31 @@ class Storage:
         logger.debug("캐시 적중 %s/%s (age=%s)", namespace, key, age)
         return payload
 
+    def _get_payload_any_age(self, namespace: str, key: str) -> tuple[str, datetime] | None:
+        """TTL 을 무시하고 (payload, fetched_at) 반환 — stale-if-error 폴백 전용.
+
+        만료된 행도 cache 테이블에 남아 있으므로(purge 전까지) 일시 장애 때
+        '마지막으로 받은 값' 을 대신 쓸 수 있다. 나이 판단은 호출부 책임.
+        읽기 실패/없음/fetched_at 손상은 None (best-effort — 원칙 #1).
+        """
+        try:
+            row = self._conn.execute(
+                "SELECT payload, fetched_at FROM cache WHERE namespace=? AND key=?",
+                (namespace, key),
+            ).fetchone()
+        except _DB_ERRORS:
+            logger.warning("캐시(any-age) 읽기 실패 (%s/%s) — 없음 취급", namespace, key,
+                           exc_info=True)
+            return None
+        if row is None:
+            return None
+        payload, fetched_at = row
+        try:
+            return payload, datetime.fromisoformat(fetched_at)
+        except (TypeError, ValueError):
+            logger.warning("캐시 fetched_at 손상 (%s/%s) — 없음 취급", namespace, key)
+            return None
+
     def _put_payload(self, namespace: str, key: str, kind: CacheKind, payload: str) -> None:
         try:
             self._conn.execute(
@@ -381,6 +406,9 @@ class Storage:
         payload = self._get_payload(namespace, key, max_age)
         if payload is None:
             return None
+        return self._parse_dataframe(namespace, key, payload)
+
+    def _parse_dataframe(self, namespace: str, key: str, payload: str) -> pd.DataFrame | None:
         try:
             return self._normalize_datetimes(pd.read_json(StringIO(payload), orient="table"))
         except ValueError:
@@ -395,6 +423,9 @@ class Storage:
         payload = self._get_payload(namespace, key, max_age)
         if payload is None:
             return None
+        return self._parse_series(namespace, key, payload)
+
+    def _parse_series(self, namespace: str, key: str, payload: str) -> pd.Series | None:
         try:
             df = self._normalize_datetimes(pd.read_json(StringIO(payload), orient="table"))
             return df.iloc[:, 0].rename(df.columns[0])
@@ -409,11 +440,41 @@ class Storage:
         payload = self._get_payload(namespace, key, max_age)
         if payload is None:
             return None
+        return self._parse_json(namespace, key, payload)
+
+    @staticmethod
+    def _parse_json(namespace: str, key: str, payload: str) -> Any | None:
         try:
             return json.loads(payload)
         except json.JSONDecodeError:
             logger.warning("캐시 payload 손상 (%s/%s) — miss 취급", namespace, key)
             return None
+
+    # ---------------- TTL 무시 조회 (stale-if-error 전용) ----------------
+    # 반환: (값, fetched_at[UTC]) 또는 None. 나이 상한은 호출부(cached.stale)가 판단.
+
+    def get_dataframe_any_age(
+        self, namespace: str, key: str
+    ) -> tuple[pd.DataFrame, datetime] | None:
+        hit = self._get_payload_any_age(namespace, key)
+        if hit is None:
+            return None
+        value = self._parse_dataframe(namespace, key, hit[0])
+        return None if value is None else (value, hit[1])
+
+    def get_series_any_age(self, namespace: str, key: str) -> tuple[pd.Series, datetime] | None:
+        hit = self._get_payload_any_age(namespace, key)
+        if hit is None:
+            return None
+        value = self._parse_series(namespace, key, hit[0])
+        return None if value is None else (value, hit[1])
+
+    def get_json_any_age(self, namespace: str, key: str) -> tuple[Any, datetime] | None:
+        hit = self._get_payload_any_age(namespace, key)
+        if hit is None:
+            return None
+        value = self._parse_json(namespace, key, hit[0])
+        return None if value is None else (value, hit[1])
 
     # ---------------- 영속 상태 (TTL 없음 — 신호 엔진의 실행 간 비교용) ----------------
 
@@ -430,15 +491,23 @@ class Storage:
             # best-effort (§4.4) — libsql ValueError 포착 (§4.10 #9, get_state 와 대칭)
             logger.warning("상태 쓰기 실패 (%s/%s) — 무시", namespace, key, exc_info=True)
 
-    def get_state(self, namespace: str, key: str) -> Any | None:
-        """상태 조회. 없거나 손상 시 None (= 첫 실행 취급)."""
+    def get_state(self, namespace: str, key: str, strict: bool = False) -> Any | None:
+        """상태 조회. 행이 없으면 None (= 첫 실행).
+
+        strict=False(기본): DB 오류·손상도 None (= 첫 실행 취급, 종전 동작).
+        strict=True: DB 오류·손상은 ``StorageError`` — '없음' 과 '못 읽음' 을 구분해야
+        하는 호출부(신호 엔진 baseline)용. 못 읽은 걸 첫 실행으로 보고 시드로 덮어쓰면
+        좋은 상태가 사라지기 때문.
+        """
         try:
             row = self._conn.execute(
                 "SELECT payload FROM state WHERE namespace=? AND key=?",
                 (namespace, key),
             ).fetchone()
             return json.loads(row[0]) if row else None
-        except (*_DB_ERRORS, json.JSONDecodeError):
+        except (*_DB_ERRORS, json.JSONDecodeError) as e:
+            if strict:
+                raise StorageError(f"상태 읽기 실패 ({namespace}/{key})") from e
             logger.warning("상태 읽기 실패 (%s/%s) — 첫 실행 취급", namespace, key, exc_info=True)
             return None
 
@@ -510,6 +579,8 @@ def get_storage() -> Storage:
 
 _GETTERS = {"dataframe": "get_dataframe", "series": "get_series", "json": "get_json"}
 _PUTTERS = {"dataframe": "put_dataframe", "series": "put_series", "json": "put_json"}
+_ANY_AGE_GETTERS = {"dataframe": "get_dataframe_any_age", "series": "get_series_any_age",
+                    "json": "get_json_any_age"}
 
 
 def _is_empty(result: Any) -> bool:
@@ -526,10 +597,18 @@ def cached(namespace: str, ttl: timedelta, kind: CacheKind):
 
     빈 결과는 캐시하지 않음 (8단계 빈 데이터 컨벤션과 충돌 방지).
     캐시 계층의 어떤 실패도 원본 fetch 를 막지 않음.
+
+    부착 속성: ``wrapper.stale(*args, max_age=timedelta, **kwargs)`` — TTL 이 지난
+    캐시를 (값, fetched_at) 로 돌려주는 stale-if-error 폴백 (없으면 None).
     """
 
     def decorator(fn: Callable):
         sig = inspect.signature(fn)
+
+        def _key(args, kwargs) -> str:
+            bound = sig.bind(*args, **kwargs)
+            bound.apply_defaults()
+            return ":".join(f"{k}={v}" for k, v in bound.arguments.items())
 
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
@@ -537,9 +616,7 @@ def cached(namespace: str, ttl: timedelta, kind: CacheKind):
             if mode == "off":
                 return fn(*args, **kwargs)
 
-            bound = sig.bind(*args, **kwargs)
-            bound.apply_defaults()
-            key = ":".join(f"{k}={v}" for k, v in bound.arguments.items())
+            key = _key(args, kwargs)
 
             try:
                 store = get_storage()
@@ -557,6 +634,34 @@ def cached(namespace: str, ttl: timedelta, kind: CacheKind):
                 getattr(store, _PUTTERS[kind])(namespace, key, result)
             return result
 
+        def stale(*args, max_age: timedelta, **kwargs) -> tuple[Any, datetime] | None:
+            """stale-if-error: TTL 이 지났어도 max_age 이내인 캐시를 (값, fetched_at) 로.
+
+            원본 fetch 가 일시 장애로 실패했을 때 호출부가 명시적으로 쓰는 폴백
+            (정규 호출과 같은 키 — positional/keyword 무관). 캐시 off 거나 없거나
+            max_age 초과면 None. 캐시 계층 실패도 None (best-effort).
+            """
+            if _cache_mode() == "off":
+                return None
+            key = _key(args, kwargs)
+            try:
+                store = get_storage()
+            except StorageError:
+                logger.warning("캐시 DB 사용 불가 — stale 폴백 없음", exc_info=True)
+                return None
+            hit = getattr(store, _ANY_AGE_GETTERS[kind])(namespace, key)
+            if hit is None:
+                return None
+            value, fetched_at = hit
+            if fetched_at.tzinfo is None:
+                fetched_at = fetched_at.replace(tzinfo=timezone.utc)
+            if _utcnow() - fetched_at > max_age:
+                logger.debug("stale 캐시도 너무 오래됨 %s/%s (fetched_at=%s > %s)",
+                             namespace, key, fetched_at, max_age)
+                return None
+            return value, fetched_at
+
+        wrapper.stale = stale
         return wrapper
 
     return decorator

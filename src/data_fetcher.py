@@ -188,65 +188,142 @@ FRED_SERIES = {
 }
 
 
+FRED_OBSERVATIONS_URL = "https://api.stlouisfed.org/fred/series/observations"
+
+
+def _fred_error_message(response) -> str:
+    """FRED 오류 응답 본문의 error_message (없거나 비 JSON 이면 빈 문자열).
+
+    FRED 는 오류를 ``{"error_code": 400, "error_message": "..."}`` 로 준다 (2026-10-08
+    실호출 확인). 혹시 모를 키 에코에 대비해 마스킹 + 길이 제한 후 사용 (§4.9).
+    """
+    from src.http import mask_secrets
+
+    try:
+        body = response.json()
+    except ValueError:
+        return ""
+    if not isinstance(body, dict):
+        return ""
+    return mask_secrets(str(body.get("error_message") or ""))[:200]
+
+
+def _fred_get(series_id: str, start: str) -> list[dict]:
+    """FRED REST ``series/observations`` GET → observations 리스트.
+
+    fredapi(타임아웃 없는 urlopen, 상태코드를 ValueError 로 뭉갬 — 502 가
+    '시리즈 없음' 으로 오분류되던 사고) 대신 표준 세션(src/http.py: 타임아웃
+    5s/25s 강제, 429·5xx 재시도 0→2→4초, Retry-After 존중)으로 직접 호출.
+
+    상태코드 → 도메인 예외 (실측: 잘못된 series_id·잘못된 키 모두 400 + error_message)
+      400 + 'api_key' 언급 → ApiAuthError / 그 외 400·404 → DataValidationError
+      401 → ApiAuthError / 403 → ApiAuthorizationError / 429 → RateLimitError
+      5xx·기타 비정상 → ApiHttpError(status_code)
+      200 인데 JSON 파싱 실패 → DataFetchError / observations 비면 DataValidationError
+    예외 메시지에는 URL·키를 넣지 않음 (§4.9 — 원인 체인의 URL 은 로그에서
+    SecretMaskingFilter 가 fred_api_key 를 마스킹).
+    """
+    import requests
+
+    api_key = settings.require("fred_api_key")  # raises MissingApiKeyError
+    params = {
+        "series_id": series_id,
+        "api_key": api_key,
+        "file_type": "json",
+        "observation_start": start,
+    }
+    what = f"FRED {series_id}"
+    try:
+        response = get_http_session().get(FRED_OBSERVATIONS_URL, params=params)
+    except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+        # Retry 가 개입하면 read timeout 도 ConnectionError 로 나옴 → is_timeout 으로 구분
+        if is_timeout(e):
+            raise ApiTimeoutError(
+                f"{what} 타임아웃 (connect {DEFAULT_TIMEOUT[0]:.0f}s / "
+                f"read {DEFAULT_TIMEOUT[1]:.0f}s, 재시도 {RETRY_TOTAL}회 포함)",
+                source="FRED",
+            ) from e
+        raise ApiConnectionError(
+            f"{what} 연결 실패 (재시도 {RETRY_TOTAL}회 포함)", source="FRED"
+        ) from e
+    except requests.exceptions.RequestException as e:
+        raise DataFetchError(f"{what} 요청 실패", source="FRED") from e
+
+    code = response.status_code
+    if code == 400:
+        msg = _fred_error_message(response)
+        if "api_key" in msg.lower():
+            raise ApiAuthError(f"{what}: FRED 키가 무효합니다 (400)", source="FRED")
+        raise DataValidationError(
+            f"FRED 시리즈 '{series_id}' 요청이 거부됨 (400){': ' + msg if msg else ''}",
+            source="FRED",
+        )
+    if code == 404:
+        raise DataValidationError(
+            f"FRED 시리즈 '{series_id}' 가 존재하지 않음 (404)", source="FRED"
+        )
+    if code == 401:
+        raise ApiAuthError(f"{what}: FRED 키가 무효합니다 (401)", source="FRED")
+    if code == 403:
+        raise ApiAuthorizationError(f"{what}: 접근 권한 없음 (403)", source="FRED")
+    if code == 429:
+        raise RateLimitError(
+            f"{what}: 호출 한도 초과 (429, 재시도 후에도 지속)", source="FRED"
+        )
+    if not response.ok:
+        raise ApiHttpError(f"{what}: HTTP {code}", status_code=code, source="FRED")
+
+    try:
+        body = response.json()
+    except ValueError as e:
+        raise DataFetchError(f"{what}: 200 이지만 JSON 파싱 실패", source="FRED") from e
+    if not isinstance(body, dict):
+        raise DataFetchError(f"{what}: 200 이지만 예상 밖 응답 형태", source="FRED")
+    observations = body.get("observations")
+    if not observations:
+        raise DataValidationError(
+            f"FRED 시리즈 '{series_id}' 가 빈 응답을 돌려줌", source="FRED"
+        )
+    return observations
+
+
 @cached("macro", TTL_MACRO, "series")
 def fetch_macro(series_id: str, start: str | None = None) -> pd.Series:
-    """FRED 에서 단일 시계열 가져오기.
+    """FRED 에서 단일 시계열 가져오기 (REST 직접 호출 — ``_fred_get``).
 
-    참고: fredapi 는 내부적으로 urllib.request.urlopen 을 사용해서
-    표준 HTTP 세션(src/http.py 의 retry/timeout)을 주입할 수 없습니다.
-    여기는 도메인 예외 wrapping 만 적용 (3단계 리팩토링 결정).
+    결측값 '.' 은 NaN 으로 바꾼 뒤 제거. 인덱스는 관측일 DatetimeIndex, name=series_id.
+    일시 장애 폴백은 ``fetch_macro.stale(series_id, max_age=...)`` (cached 부착 속성)
+    을 호출부(macro_analyzer._fetch_resilient)가 명시적으로 사용.
 
     Raises
     ------
     MissingApiKeyError
         FRED_API_KEY 미설정.
-    DataFetchError
-        fredapi 호출 자체 실패.
+    ApiAuthError / ApiAuthorizationError / RateLimitError / ApiHttpError
+        상태코드별 (``_fred_get`` 참고).
+    ApiTimeoutError / ApiConnectionError / DataFetchError
+        네트워크·파싱 실패.
     DataValidationError
         시리즈 ID 가 존재하지 않거나 빈 응답.
     """
-    try:
-        from fredapi import Fred
-    except ImportError as e:
-        raise DataFetchError(
-            "fredapi 패키지가 설치되어 있지 않습니다. pip install fredapi", source="FRED"
-        ) from e
-
-    api_key = settings.require("fred_api_key")  # raises MissingApiKeyError
-    fred = Fred(api_key=api_key)
-
     if start is None:
         start = (datetime.now(timezone.utc) - timedelta(days=365 * 5)).strftime("%Y-%m-%d")
 
-    # fredapi 는 timeout 없는 bare urlopen 을 씀 — 유일하게 src/http.py 의
-    # 강제 타임아웃을 우회하는 네트워크 경계라, 블랙홀 시 다이제스트가 통째로
-    # 멈춤. 전역 소켓 기본 타임아웃으로 감싸고 finally 로 복원 (이 시점의
-    # 파이프라인은 단일 스레드라 전역 변경이 안전).
-    import socket
-
-    prev_timeout = socket.getdefaulttimeout()
-    socket.setdefaulttimeout(30)
+    observations = _fred_get(series_id, start)
     try:
-        series = fred.get_series(series_id, observation_start=start)
-    except ValueError as e:
-        # fredapi 가 잘못된 시리즈 ID 에 ValueError 던짐
-        raise DataValidationError(
-            f"FRED 시리즈 '{series_id}' 가 존재하지 않거나 잘못됨", source="FRED"
-        ) from e
-    except Exception as e:  # noqa: BLE001  fredapi 는 다양한 네트워크 예외를 던질 수 있음
+        index = pd.to_datetime([o["date"] for o in observations])
+        values = pd.to_numeric([o.get("value") for o in observations], errors="coerce")
+    except (KeyError, TypeError, ValueError) as e:
         raise DataFetchError(
-            f"FRED 호출 실패: series_id={series_id}", source="FRED"
+            f"FRED {series_id}: observations 형식이 예상과 다름", source="FRED"
         ) from e
-    finally:
-        socket.setdefaulttimeout(prev_timeout)
 
-    if series is None or series.empty:
+    series = pd.Series(values, index=index, name=series_id, dtype="float64").dropna()
+    if series.empty:
         raise DataValidationError(
-            f"FRED 시리즈 '{series_id}' 가 빈 응답을 돌려줌", source="FRED"
+            f"FRED 시리즈 '{series_id}' 가 빈 응답을 돌려줌 (전부 결측)", source="FRED"
         )
-
-    series.name = series_id
-    return series.dropna()
+    return series
 
 
 def fetch_macro_dashboard(start: str | None = None) -> pd.DataFrame:
@@ -342,18 +419,22 @@ def fetch_crypto(coin_id: str = "bitcoin", days: int = 180) -> pd.DataFrame:
 # 한국 수출입 통계 (FRED 경유, OECD 출처)
 # ----------------------------------------------------------------------
 
+KOREA_EXPORTS_LABEL = "수출(금액, USD)"   # 소비처는 위치가 아니라 이 이름으로 선택 (ALR-09)
+
 KOREA_TRADE_SERIES = {
-    "수출(금액, USD)":     "XTEXVA01KRM664S",
+    KOREA_EXPORTS_LABEL:   "XTEXVA01KRM664S",
     "수입(금액, USD)":     "XTIMVA01KRM664S",
-    "무역수지(USD)":       "XTNTVA01KRM664S",
+    # 무역수지(XTNTVA01KRM664S) 는 2024-12 이후 업데이트 중단 → 제거 (ALR-09 부수 사실)
 }
 
 
 def fetch_korea_trade(start: str | None = None) -> pd.DataFrame:
-    """FRED 기반 한국 월간 수출/수입/무역수지 (USD).
+    """FRED 기반 한국 월간 수출/수입 (USD).
 
     OECD가 정리해둔 데이터라 관세청 원본보다 1~2개월 지연이 있지만,
-    매크로 조망용으로는 충분합니다.
+    매크로 조망용으로는 충분합니다. 개별 시리즈 실패는 스킵(배치 컨벤션) —
+    그래서 컬럼은 **이름으로** 고를 것 (``KOREA_EXPORTS_LABEL``). 위치(iloc[:, 0])로
+    고르면 수출이 실패한 날 수입이 '수출' 로 둔갑함.
     """
     frames = {}
     for label, series_id in KOREA_TRADE_SERIES.items():

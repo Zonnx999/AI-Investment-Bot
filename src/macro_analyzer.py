@@ -15,14 +15,26 @@ Phase 4 에서 LLM 이 이 모듈의 함수들을 tool 로 호출하게 됩니�
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from typing import TypedDict
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
 
 from src.data_fetcher import fetch_macro, fetch_prices
-from src.exceptions import ConfigError, DataFetchError, InsufficientDataError
+from src.exceptions import (
+    AnalysisError,
+    ApiAuthError,
+    ApiAuthorizationError,
+    ConfigError,
+    DataFetchError,
+    DataValidationError,
+    InsufficientDataError,
+)
 from src.utils import TRADING_DAYS_PER_YEAR, close_series
+
+KST = ZoneInfo("Asia/Seoul")
 
 # ----------------------------------------------------------------------
 # 국면 분류 임계값 (7단계: 매직 넘버 → 상수. 튜닝/테스트 지점)
@@ -57,29 +69,53 @@ DEFAULT_PANEL = {
 }
 
 
+# 한국 시장 맥락 (KR 아침 스냅샷·알림용). DEFAULT_PANEL 은 market_summary·대시보드가
+# 쓰므로 건드리지 않고, 알림 패널은 별도로 둔다.
+KR_PANEL = {
+    "KOSPI":   "^KS11",
+    "KOSDAQ":  "^KQ11",
+    "원/달러": "KRW=X",
+}
+
+# 낙폭·변동성 알림 대상 (미국 7 + 한국 지수 2). 환율은 낙폭 개념이 맞지 않아 제외.
+ALERT_PANEL = {**DEFAULT_PANEL, "KOSPI": "^KS11", "KOSDAQ": "^KQ11"}
+
+
+def fetch_panel_with_failures(
+    tickers: dict[str, str],
+    period: str = "2y",
+) -> tuple[pd.DataFrame, list[str]]:
+    """여러 자산의 종가 패널 + 조회 실패한 자산 라벨 목록.
+
+    실패 자산은 경고 로그 후 스킵 — 호출부(신호 엔진)는 실패 목록을 사용자 메시지의
+    data_issues 로 노출하고, 그 자산의 이전 알림 상태를 그대로 유지한다 (ALR-08).
+    """
+    frames = {}
+    failures: list[str] = []
+    for label, ticker in tickers.items():
+        try:
+            frames[label] = close_series(fetch_prices(ticker, period=period))
+        except DataFetchError as e:
+            logger.warning(
+                "Cross-asset panel: '%s' (%s) 스킵 — %s", label, ticker, e
+            )
+            failures.append(label)
+    return pd.DataFrame(frames).dropna(how="all"), failures
+
+
 def fetch_cross_asset_panel(
     tickers: dict[str, str] | None = None,
     period: str = "6mo",
 ) -> pd.DataFrame:
-    """여러 자산의 종가를 한 DataFrame 으로 모아 반환.
+    """여러 자산의 종가를 한 DataFrame 으로 모아 반환 (실패 자산은 스킵).
 
     Returns
     -------
     pd.DataFrame
         인덱스가 날짜, 컬럼이 자산 이름(한국어), 값이 Adj Close.
     """
-    panel = tickers or DEFAULT_PANEL
-    frames = {}
-    for label, ticker in panel.items():
-        try:
-            df = fetch_prices(ticker, period=period)
-        except DataFetchError as e:
-            logger.warning(
-                "Cross-asset panel: '%s' (%s) 스킵 — %s", label, ticker, e
-            )
-            continue
-        frames[label] = close_series(df)
-    return pd.DataFrame(frames).dropna(how="all")
+    df, _ = fetch_panel_with_failures(tickers or DEFAULT_PANEL, period=period)
+    return df
 
 
 # ----------------------------------------------------------------------
@@ -183,12 +219,56 @@ def sharpe_ratio(
 
 @dataclass
 class IndicatorOutcome:
-    """단일 거시 지표 평가 결과 (성공 케이스만)."""
+    """단일 거시 지표 평가 결과 (성공 케이스만).
+
+    short_text : 근거 줄용 짧은 표기 (예: "금리차 +0.36%p(+1)") — Markdown 특수문자 없음.
+    asof       : 마지막 관측일 (YYYY-MM-DD).
+    stale_since: 일시 장애로 만료 캐시를 썼으면 그 캐시를 받은 날짜 (KST, YYYY-MM-DD).
+    """
 
     series_id: str
     score_delta: int   # -1, 0, +1
     signal_text: str   # 사용자 리포트에 들어갈 한 줄
     raw_value: float   # 마지막 관측치
+    short_text: str = ""
+    asof: str = ""
+    stale_since: str | None = None
+
+
+# 사용자 메시지용 지표 한글명 — evaluator 이름(yield_curve 등)은 밑줄 때문에 legacy
+# Markdown 을 깨뜨리므로 메시지에는 쓰지 않는다 (§4.10 #10). failures 는 대시보드 호환상 유지.
+INDICATOR_NAMES_KO = {
+    "T10Y2Y": "장단기 금리차",
+    "BAMLH0A0HYM2": "하이일드 스프레드",
+    "ICSA": "신규 실업수당 청구",
+}
+_SHORT_NAMES = {"yield_curve": "금리차", "hy_spread": "HY", "jobless_claims": "실업수당"}
+
+REGIME_HOLD_LABEL = "⚪ 판정 보류"
+
+# stale-if-error: FRED 일시 장애 때 만료 캐시를 이 기간까지 대신 사용
+MACRO_STALE_MAX_AGE = timedelta(days=7)
+# 관측 노후 가드 — 마지막 관측이 이보다 오래되면 data_issues 로 표기 (판정은 유지)
+OBS_MAX_AGE_DAYS = {"T10Y2Y": 10, "BAMLH0A0HYM2": 10, "ICSA": 21}
+
+_MD_UNSAFE = str.maketrans({c: "" for c in "_*`[]\\"})
+
+
+def regime_label_for_score(score: int) -> str:
+    """국면 점수(-3~+3) → 라벨 (지표가 전부 있을 때만 의미 있음)."""
+    if score >= 2:
+        return "🟢 위험선호 (Risk-on)"
+    if score == 1:
+        return "🟡 약한 위험선호"
+    if score == 0:
+        return "⚪ 중립 / 혼조"
+    if score == -1:
+        return "🟠 약한 위험회피"
+    return "🔴 위험회피 (Risk-off / 침체 경고)"
+
+
+def _fmt_delta(d: int) -> str:
+    return "0" if d == 0 else f"{d:+d}"
 
 
 @dataclass
@@ -196,7 +276,11 @@ class RegimeReport:
     """시장 국면 분석 결과.
 
     signals : 성공한 지표들의 사용자용 한 줄 설명만 모음 (에러 메시지 섞이지 않음).
-    failures: 평가에 실패한 지표 ID 의 리스트. 사용자에게는 별도로 표시.
+    failures: 평가에 실패한 지표 이름의 리스트(yield_curve 등). 사용자에게는 별도로 표시.
+    available/total: 평가에 성공한 지표 수 / 전체 지표 수. available < total 이면
+      국면 라벨은 '판정 보류' (부분합 점수로 라벨을 내면 실패가 '중립' 으로 둔갑함).
+    stale   : 만료 캐시(stale-if-error)로 평가한 series_id 목록 (available 에 포함).
+    asof    : series_id → 마지막 관측일.
     """
 
     regime: str
@@ -204,10 +288,39 @@ class RegimeReport:
     signals: list[str] = field(default_factory=list)
     raw: dict[str, float] = field(default_factory=dict)
     failures: list[str] = field(default_factory=list)
+    available: int = 0
+    total: int = 3
+    stale: list[str] = field(default_factory=list)
+    asof: dict[str, str] = field(default_factory=dict)
+    outcomes: list[IndicatorOutcome] = field(default_factory=list)
+
+    @property
+    def complete(self) -> bool:
+        return self.total > 0 and self.available == self.total
+
+    def reason_line(self) -> str:
+        """국면 줄 바로 아래 근거 1줄 (들여쓰기 없음 — 렌더러가 붙임).
+
+        예: "근거: 금리차 +0.36%p(+1) · HY 3.24%(0) · 실업수당 z+0.3(0) — 3/3 지표, 10-07 기준"
+        만료 캐시 지표는 "HY 3.24%(0, 10-06 캐시)", 실패 지표는 "금리차 실패".
+        Markdown 특수문자(_ * ` [ ])는 제거해 텔레그램 legacy Markdown 을 깨지 않음.
+        """
+        parts: list[str] = []
+        for o in self.outcomes:
+            text = o.short_text or o.series_id
+            if o.stale_since:
+                mark = f"{o.stale_since[5:]} 캐시"
+                text = f"{text[:-1]}, {mark})" if text.endswith(")") else f"{text} ({mark})"
+            parts.append(text)
+        parts.extend(f"{_SHORT_NAMES.get(f, '지표')} 실패" for f in self.failures)
+        tail = f"{self.available}/{self.total} 지표"
+        if self.asof:
+            tail += f", {max(self.asof.values())[5:]} 기준"
+        body = " · ".join(parts) if parts else "지표 없음"
+        return f"근거: {body} — {tail}".translate(_MD_UNSAFE)
 
     def __str__(self) -> str:
-        # 점수 범위는 지표 개수에서 동적 계산 (Phase 2 에서 VIX 등 추가 시 자동 반영)
-        rng = len(_REGIME_EVALUATORS)
+        rng = self.total
         lines = [f"국면 판정: {self.regime}  (점수 {self.score:+d} / -{rng} ~ +{rng})"]
         lines.append("")
         lines.append("근거:")
@@ -218,144 +331,185 @@ class RegimeReport:
         return "\n".join(lines)
 
 
-# ---- 개별 지표 평가 헬퍼 ----
-# 각 헬퍼는 IndicatorOutcome 을 반환하거나, 데이터 호출 실패 시
-# DataFetchError 를 그대로 bubble up. 호출자(classify_regime)가
-# 잡아서 failures 에 기록.
+# ---- 개별 지표 평가 (순수 함수: 시계열 → IndicatorOutcome) ----
+# fetch 는 classify_regime 이 _REGIME_INPUTS 를 돌며 수행 (테스트는 합성 시리즈로 직접 호출).
 
 
-def _eval_yield_curve() -> IndicatorOutcome:
+def _require(s: pd.Series, series_id: str) -> pd.Series:
+    s = s.dropna()
+    if s.empty:
+        raise InsufficientDataError(f"{series_id} 시계열이 비어 있음", n_points=0, required=1)
+    return s
+
+
+def _asof(s: pd.Series) -> str:
+    return pd.Timestamp(s.index[-1]).strftime("%Y-%m-%d")
+
+
+def _eval_yield_curve(s: pd.Series) -> IndicatorOutcome:
     """장단기 금리차 (T10Y2Y) — 음수면 경기침체 경고."""
-    s = fetch_macro("T10Y2Y").tail(YIELD_CURVE_LOOKBACK_DAYS)
+    s = _require(s, "T10Y2Y").tail(YIELD_CURVE_LOOKBACK_DAYS)
     latest = float(s.iloc[-1])
     avg_60d = float(s.mean())
 
     if latest < 0:
-        return IndicatorOutcome(
-            "T10Y2Y", -1,
-            f"장단기 금리차 {latest:+.2f}%p 로 역전 상태 — 침체 경고 (-1)",
-            latest,
-        )
-    if latest < avg_60d - YIELD_CURVE_CAUTION_DROP:
-        return IndicatorOutcome(
-            "T10Y2Y", 0,
-            f"장단기 금리차 {latest:+.2f}%p, 60일 평균 대비 하락 — 주의 (0)",
-            latest,
-        )
+        d, text = -1, f"장단기 금리차 {latest:+.2f}%p 로 역전 상태 — 침체 경고 (-1)"
+    elif latest < avg_60d - YIELD_CURVE_CAUTION_DROP:
+        d, text = 0, f"장단기 금리차 {latest:+.2f}%p, 60일 평균 대비 하락 — 주의 (0)"
+    else:
+        d, text = 1, f"장단기 금리차 {latest:+.2f}%p 로 정상 우상향 — 위험선호 (+1)"
     return IndicatorOutcome(
-        "T10Y2Y", 1,
-        f"장단기 금리차 {latest:+.2f}%p 로 정상 우상향 — 위험선호 (+1)",
-        latest,
+        "T10Y2Y", d, text, latest,
+        short_text=f"금리차 {latest:+.2f}%p({_fmt_delta(d)})", asof=_asof(s),
     )
 
 
-def _eval_hy_spread() -> IndicatorOutcome:
+def _eval_hy_spread(s: pd.Series) -> IndicatorOutcome:
     """하이일드 스프레드 — 급등하면 신용 경색."""
-    s = fetch_macro("BAMLH0A0HYM2").tail(HY_SPREAD_LOOKBACK_DAYS)
+    s = _require(s, "BAMLH0A0HYM2").tail(HY_SPREAD_LOOKBACK_DAYS)
     latest = float(s.iloc[-1])
     median_1y = float(s.median())
     p90 = float(s.quantile(HY_SPREAD_STRESS_QUANTILE))
 
     if latest > p90:
-        return IndicatorOutcome(
-            "BAMLH0A0HYM2", -1,
-            f"하이일드 스프레드 {latest:.2f}%, 1년 90분위 초과 — 신용 경색 (-1)",
-            latest,
-        )
-    if latest > median_1y * HY_SPREAD_CAUTION_RATIO:
-        return IndicatorOutcome(
-            "BAMLH0A0HYM2", 0,
-            f"하이일드 스프레드 {latest:.2f}%, 중간값 대비 상승 — 주의 (0)",
-            latest,
-        )
+        d, text = -1, f"하이일드 스프레드 {latest:.2f}%, 1년 90분위 초과 — 신용 경색 (-1)"
+    elif latest > median_1y * HY_SPREAD_CAUTION_RATIO:
+        d, text = 0, f"하이일드 스프레드 {latest:.2f}%, 중간값 대비 상승 — 주의 (0)"
+    else:
+        d, text = 1, f"하이일드 스프레드 {latest:.2f}% 안정 — 위험선호 (+1)"
     return IndicatorOutcome(
-        "BAMLH0A0HYM2", 1,
-        f"하이일드 스프레드 {latest:.2f}% 안정 — 위험선호 (+1)",
-        latest,
+        "BAMLH0A0HYM2", d, text, latest,
+        short_text=f"HY {latest:.2f}%({_fmt_delta(d)})", asof=_asof(s),
     )
 
 
-def _eval_jobless_claims() -> IndicatorOutcome:
+def _eval_jobless_claims(s: pd.Series) -> IndicatorOutcome:
     """주간 신규 실업수당 청구 — 급등하면 노동시장 악화."""
-    s = fetch_macro("ICSA").tail(JOBLESS_LOOKBACK_WEEKS)
+    s = _require(s, "ICSA").tail(JOBLESS_LOOKBACK_WEEKS)
     latest = float(s.iloc[-1])
     mean_1y = float(s.mean())
     std_1y = float(s.std())
-    z = (latest - mean_1y) / std_1y if std_1y > 0 else 0
+    z = (latest - mean_1y) / std_1y if std_1y > 0 else 0.0
 
     if z > JOBLESS_Z_BAD:
-        return IndicatorOutcome(
-            "ICSA", -1,
-            f"신규 실업수당 청구 {int(latest):,}건, z={z:+.1f} — 노동시장 악화 (-1)",
-            latest,
-        )
-    if z < JOBLESS_Z_GOOD:
-        return IndicatorOutcome(
-            "ICSA", 1,
-            f"신규 실업수당 청구 {int(latest):,}건, z={z:+.1f} — 고용 강세 (+1)",
-            latest,
-        )
+        d, tag = -1, "노동시장 악화 (-1)"
+    elif z < JOBLESS_Z_GOOD:
+        d, tag = 1, "고용 강세 (+1)"
+    else:
+        d, tag = 0, "중립 (0)"
     return IndicatorOutcome(
-        "ICSA", 0,
-        f"신규 실업수당 청구 {int(latest):,}건, z={z:+.1f} — 중립 (0)",
-        latest,
+        "ICSA", d, f"신규 실업수당 청구 {int(latest):,}건, z={z:+.1f} — {tag}", latest,
+        short_text=f"실업수당 z{z:+.1f}({_fmt_delta(d)})", asof=_asof(s),
     )
 
 
-_REGIME_EVALUATORS = (
-    _eval_yield_curve,
-    _eval_hy_spread,
-    _eval_jobless_claims,
+# (failures 에 쓰는 이름, FRED series_id, 평가 함수) — 이름은 대시보드 호환상 유지
+_REGIME_INPUTS = (
+    ("yield_curve", "T10Y2Y", _eval_yield_curve),
+    ("hy_spread", "BAMLH0A0HYM2", _eval_hy_spread),
+    ("jobless_claims", "ICSA", _eval_jobless_claims),
 )
+
+
+def _fetch_resilient(series_id: str) -> tuple[pd.Series, str | None]:
+    """fetch_macro + stale-if-error. 반환 (시계열, stale_since | None).
+
+    설정·ID 문제(DataValidationError / ApiAuthError / ApiAuthorizationError / ConfigError)는
+    캐시로 가리지 않고 그대로 raise — 고쳐야 할 문제를 7일간 숨기면 안 됨.
+    그 외 DataFetchError(5xx·429·타임아웃·연결)는 MACRO_STALE_MAX_AGE 이내의 만료
+    캐시로 대체하고 stale_since(캐시 받은 KST 날짜)를 돌려준다. 캐시도 없으면 raise.
+    """
+    try:
+        return fetch_macro(series_id), None
+    except (DataValidationError, ApiAuthError, ApiAuthorizationError):
+        raise
+    except DataFetchError as e:
+        stale_fn = getattr(fetch_macro, "stale", None)
+        hit = stale_fn(series_id, max_age=MACRO_STALE_MAX_AGE) if stale_fn else None
+        if hit is None:
+            raise
+        series, fetched_at = hit
+        since = fetched_at.astimezone(KST).strftime("%Y-%m-%d")
+        logger.warning(
+            "FRED %s 조회 실패 (%s) — %s 에 받은 만료 캐시로 대체 (stale-if-error)",
+            series_id, type(e).__name__, since,
+        )
+        return series, since
 
 
 def classify_regime() -> RegimeReport:
     """3개 거시 지표로 시장 국면을 단순 분류.
 
-    각 평가 헬퍼는 IndicatorOutcome 또는 DataFetchError. 데이터 실패는
-    failures 리스트에 분리해 기록 → 사용자 리포트의 signals 에 에러 메시지
-    섞이지 않음.
+    각 지표는 fetch(_fetch_resilient) → 순수 평가 함수. 실패는 failures 리스트에
+    분리 기록 → 사용자 리포트의 signals 에 에러 메시지 섞이지 않음.
 
-    각 신호별로 -1 / 0 / +1 점을 주고 합산 → 국면 라벨링.
+    각 신호별로 -1 / 0 / +1 점을 주고 합산 → 국면 라벨링. 단 **지표가 하나라도
+    빠지면 라벨은 '⚪ 판정 보류 (지표 n/3)'** — 부분합으로 고정 구간 라벨을 내면
+    실패가 '중립/위험선호' 로 둔갑한다 (score 는 부분합 그대로 보존).
     """
     score = 0
     signals: list[str] = []
     raw: dict[str, float] = {}
     failures: list[str] = []
+    stale: list[str] = []
+    asof: dict[str, str] = {}
+    outcomes: list[IndicatorOutcome] = []
 
-    for evaluator in _REGIME_EVALUATORS:
+    for name, series_id, evaluator in _REGIME_INPUTS:
         try:
-            outcome = evaluator()
-        except (ConfigError, DataFetchError):
+            series, stale_since = _fetch_resilient(series_id)
+            outcome = evaluator(series)
+        except (ConfigError, DataFetchError, AnalysisError):
             # ConfigError 포함 이유: FRED 키 미설정 시 fetch_macro 가
             # MissingApiKeyError(ConfigError 계열) 를 던지는데, 이것도
             # "지표 평가 실패" 로 failures 에 기록돼야 리포트가 안 죽음
-            # series_id 가 헬퍼 이름에 1:1 매핑되지는 않아 evaluator.__name__ 로 식별
-            failed_name = evaluator.__name__.replace("_eval_", "")
             logger.exception(
-                "classify_regime: %s 평가 실패 — failures 에 기록", failed_name
+                "classify_regime: %s 평가 실패 — failures 에 기록", name
             )
-            failures.append(failed_name)
+            failures.append(name)
             continue
+        outcome.stale_since = stale_since
+        if stale_since:
+            stale.append(series_id)
         score += outcome.score_delta
         signals.append(outcome.signal_text)
         raw[outcome.series_id] = outcome.raw_value
+        asof[outcome.series_id] = outcome.asof
+        outcomes.append(outcome)
 
-    # --- 종합 라벨 ---
-    if score >= 2:
-        regime = "🟢 위험선호 (Risk-on)"
-    elif score == 1:
-        regime = "🟡 약한 위험선호"
-    elif score == 0:
-        regime = "⚪ 중립 / 혼조"
-    elif score == -1:
-        regime = "🟠 약한 위험회피"
+    total = len(_REGIME_INPUTS)
+    available = len(outcomes)
+    if available == total:
+        regime = regime_label_for_score(score)
     else:
-        regime = "🔴 위험회피 (Risk-off / 침체 경고)"
+        regime = f"{REGIME_HOLD_LABEL} (지표 {available}/{total})"
 
     return RegimeReport(
-        regime=regime, score=score, signals=signals, raw=raw, failures=failures
+        regime=regime, score=score, signals=signals, raw=raw, failures=failures,
+        available=available, total=total, stale=stale, asof=asof, outcomes=outcomes,
     )
+
+
+def failed_indicator_names(report: RegimeReport) -> list[str]:
+    """failures(evaluator 이름) → 사용자 메시지용 한글 지표명."""
+    by_name = {name: INDICATOR_NAMES_KO.get(sid, sid) for name, sid, _ in _REGIME_INPUTS}
+    return [by_name.get(f, "거시 지표") for f in report.failures]
+
+
+def observation_age_issues(report: RegimeReport, today: date) -> list[str]:
+    """관측 노후 가드 — 마지막 관측이 OBS_MAX_AGE_DAYS 보다 오래된 지표 (판정은 유지).
+
+    예: "T10Y2Y 최신 관측 12일 전". series_id 는 밑줄이 없어 Markdown 안전.
+    """
+    issues: list[str] = []
+    for series_id, asof in report.asof.items():
+        try:
+            age = (today - date.fromisoformat(asof)).days
+        except ValueError:
+            continue
+        if age > OBS_MAX_AGE_DAYS.get(series_id, 10):
+            issues.append(f"{series_id} 최신 관측 {age}일 전")
+    return issues
 
 
 # ----------------------------------------------------------------------
