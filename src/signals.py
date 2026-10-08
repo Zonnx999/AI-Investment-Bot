@@ -7,7 +7,8 @@ Phase 5 — Signal Engine. 친구 C 봇("저평가 종목 알림")의 진화 버
   1. **팩터 점수** — momentum / value / quality 각 0~100 + 종합
   2. **스크리닝 룰** — "ROE > 10%, FCF yield 양수, P/E ≤ 동료 중간값" 필터로 종목 발굴
   3. **알림 룰** — 자산 낙폭(고정 임계표·확대·히스테리시스), 단기 변동성 급등,
-     하이일드 스프레드 급등, 원/달러 급변, 국면 전환('중립 이하' 경계 통과만)
+     하이일드 스프레드 급등, 원/달러 급변, 국면 전환('중립 이하' 경계 통과만),
+     시장 충격 하드캡(하루 등락 |r| ≥ S&P500 3.5 / 코스피 5 / 코스닥 6%, 쿨다운 5영업일)
      (모두 '지난 커밋 상태 대비 변화' — storage 의 state 테이블 signals/global:v2)
 
 설계: 점수/룰/알림 판정은 **순수 함수** (데이터를 인자로 받음 → 오프라인 테스트 가능).
@@ -95,6 +96,12 @@ FX_CHG_CLEAR_PCT = 2.5
 # 국면: 같은 후보가 서로 다른 KST 날짜 2번 관측되면 확정 (전환 21→17회), 🔔 는 '중립 이하'
 # 경계 통과만 (연 1.0회)
 REGIME_CONFIRM_DATES = 2
+
+# 시장 충격 하드캡 (Stage 2 P2): 하루 등락 |r| 가 임계 이상이면 🚨 1회. 2026-07-28 코스피 -10.8% 가
+# 낙폭 규칙(52주 고점 대비)·σ-정규화 어느 쪽에도 걸리지 않았던 사고의 보완. 자산별 쿨다운
+# SHOCK_COOLDOWN_BDAYS 영업일 — 같은 급락 에피소드가 매일 울리지 않게. 상태는 global:v2 의 "shock" 키.
+SHOCK_THRESHOLDS_PCT = {"S&P 500": 3.5, "KOSPI": 5.0, "KOSDAQ": 6.0}
+SHOCK_COOLDOWN_BDAYS = 5
 
 KR_ASSET_LABELS = ("KOSPI", "KOSDAQ")
 NON_DRAWDOWN_LABELS = (FX_LABEL,)   # 낙폭·변동성 규칙을 적용하지 않는 패널 항목
@@ -597,6 +604,43 @@ def fx_transition(
     return alerts, notes, state
 
 
+def shock_transitions(
+    obs: dict[str, AssetObs], prev: dict | None,
+) -> tuple[list[Alert], list[str], dict]:
+    """시장 충격 하드캡 — 하루 등락 |r| ≥ 자산별 임계(S&P500 3.5 / 코스피 5 / 코스닥 6%) 면 🚨.
+
+    자산별 쿨다운 SHOCK_COOLDOWN_BDAYS 영업일(직전 발화 관측일 기준 — 같은 에피소드 재발화 방지).
+    상태 {label: {"last": asof, "chg": r}} 는 이전 상태에 병합(관측 없는 자산은 그대로).
+    해제 개념이 없으므로 notes 는 항상 빈 리스트 (다른 *_transitions 와 반환형 통일).
+    """
+    alerts: list[Alert] = []
+    state = {k: dict(v) for k, v in (prev or {}).items() if isinstance(v, dict)}
+    for label, T in SHOCK_THRESHOLDS_PCT.items():
+        o = obs.get(label)
+        if o is None or o.chg_1d_pct is None:
+            continue
+        chg = float(o.chg_1d_pct)
+        if abs(chg) < T:
+            continue
+        last = (state.get(label) or {}).get("last")
+        if last:
+            try:
+                gap = int(np.busday_count(date.fromisoformat(str(last)[:10]),
+                                          date.fromisoformat(o.asof)))
+            except ValueError:
+                gap = SHOCK_COOLDOWN_BDAYS
+            if gap < SHOCK_COOLDOWN_BDAYS:
+                continue
+        state[label] = {"last": o.asof, "chg": chg}
+        dd = f" · 52주 고점 대비 {o.dd_52w_pct:+.0f}%" if o.dd_52w_pct is not None else ""
+        alerts.append(Alert(
+            "critical", "shock",
+            f"{label} 하루 {chg:+.1f}% (기준 ±{T:g}%){dd}",
+            key=f"shock:{label}:{o.asof}",
+        ))
+    return alerts, [], state
+
+
 def _regime_side(score: int | None) -> str | None:
     """'중립 이하'(score ≤ 0) 경계의 어느 쪽인가. 점수 모르면 None."""
     if score is None:
@@ -625,11 +669,17 @@ def regime_view(
     complete = bool(getattr(report, "complete", False))
 
     if not complete:
-        shown = (f"{confirmed} (직전 판정 유지 · 지표 {available}/{total})" if confirmed
+        # 괄호 연속('… (Risk-on) (직전 판정 유지 …)') 을 피해 '·' 로 잇는다 (Stage 2 §5).
+        shown = (f"{confirmed} · 직전 판정 유지 (지표 {available}/{total})" if confirmed
                  else f"⚪ 판정 보류 (지표 {available}/{total})")
         pending = prev.get("pending")
+        # 유지 뷰의 점수는 부분합이 아니라 직전 확정 점수 — 라벨과 점수가 어긋나지 않게.
+        # 직전 확정 점수가 없으면(첫 실행이 불완전) 부분합을 그대로 둔다 (판정 보류 라벨).
+        held_score = prev.get("confirmed_score") if confirmed else None
         view = RegimeView(
-            shown_label=shown, score=int(report.score), available=available, total=total,
+            shown_label=shown,
+            score=int(held_score) if held_score is not None else int(report.score),
+            available=available, total=total,
             held=True, pending=pending, prev_label=None, reason_line=reason,
             pending_count=len(set(prev.get("pending_dates") or [])) if pending else 0,
         )
@@ -687,9 +737,14 @@ def active_summaries(state: dict, obs: dict[str, AssetObs]) -> list[str]:
         if not isinstance(st, dict) or not st.get("on"):
             continue
         o = obs.get(label)
-        dd = o.dd_52w_pct if (o and o.dd_52w_pct is not None) else st.get("worst")
-        dd_txt = f"{dd:.0f}%" if isinstance(dd, (int, float)) else "?"
-        out.append(f"{label} {dd_txt} ({_since(st.get('entered'))}임계 {float(st.get('T', 0)):.0f}%)")
+        T = float(st.get("T", 0))
+        if o and o.dd_52w_pct is not None:
+            out.append(f"{label} {o.dd_52w_pct:.0f}% ({_since(st.get('entered'))}임계 {T:.0f}%)")
+            continue
+        # 이번 런 가격 조회 실패 — 과거 최저(worst)를 현재값처럼 보이지 않게 구분 표기 (Stage 2 §5)
+        worst = st.get("worst")
+        worst_txt = f"최저 {worst:.0f}%" if isinstance(worst, (int, float)) else "?"
+        out.append(f"{label} {worst_txt} (조회 실패, {_since(st.get('entered'))}임계 {T:.0f}%)")
     for label, st in (state.get("vol") or {}).items():
         if isinstance(st, dict) and st.get("on"):
             o = obs.get(label)
@@ -709,7 +764,9 @@ def active_summaries(state: dict, obs: dict[str, AssetObs]) -> list[str]:
 def _alert_sort_key(a: Alert) -> tuple[int, int]:
     """critical → warning, 같은 등급 안에서는 KR 자산 → 미국 → 신용/환율 → 국면."""
     sev = {"critical": 0, "warning": 1, "info": 2}.get(a.severity, 3)
-    if a.category in ("drawdown", "volatility"):
+    if a.category == "shock":          # 시장 충격은 같은 등급 안에서 맨 앞
+        group = -1
+    elif a.category in ("drawdown", "volatility"):
         asset = a.key.split(":")[1] if a.key.count(":") >= 2 else ""
         group = 0 if asset in KR_ASSET_LABELS else 1
     elif a.category in ("credit", "fx"):
@@ -917,13 +974,14 @@ def generate_signal_report(
     vol_alerts, vol_notes, vol_state = vol_ratio_transitions(obs, base.get("vol"))
     cr_alerts, cr_notes, cr_state = credit_transition(hy, base.get("credit"))
     fx_alerts, fx_notes, fx_state = fx_transition(obs.get(FX_LABEL), base.get("fx"))
+    sh_alerts, _sh_notes, sh_state = shock_transitions(obs, base.get("shock"))
 
     alerts: list[Alert] = []
     cleared: list[str] = []
     if not first_run:
         # 첫 실행(또는 기준 읽기 실패)은 비교 기준이 없으므로 변화 알림 일괄 생략 —
         # 상태만 시딩. '경보 중' 요약(active)이 현재 상황을 보여주므로 정보 손실 없음.
-        alerts = dd_alerts + vol_alerts + cr_alerts + fx_alerts
+        alerts = sh_alerts + dd_alerts + vol_alerts + cr_alerts + fx_alerts
         if regime_alert:
             alerts.append(regime_alert)
         alerts.sort(key=_alert_sort_key)
@@ -938,6 +996,11 @@ def generate_signal_report(
         "vol": vol_state,
         "credit": cr_state,
         "fx": fx_state,
+        "shock": sh_state,
+        # 종목 '선정 후 -10% 최초 하회' 1회 알림 기록 — 값은 다이제스트가 채움(pick_dd10[market][symbol]
+        # = 연속 포함 시작일). 여기서는 이전 값을 그대로 넘겨 커밋 때 지워지지 않게 한다.
+        "pick_dd10": {k: dict(v) for k, v in (base.get("pick_dd10") or {}).items()
+                      if isinstance(v, dict)},
         "ts": datetime.now(timezone.utc).isoformat(),
         "committed_by": market,
     }

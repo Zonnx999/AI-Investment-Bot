@@ -392,9 +392,17 @@ def test_regime_view_incomplete_holds_previous_and_state_unchanged():
     prev = {"confirmed": _RISK_ON, "confirmed_score": 2, "pending": None, "pending_dates": []}
     rep = _regime("⚪ 판정 보류 (지표 2/3)", 1, available=2, failures=["yield_curve"])
     view, alert, state = regime_view(rep, prev, "2026-10-08")
-    assert view.shown_label == f"{_RISK_ON} (직전 판정 유지 · 지표 2/3)"
+    assert view.shown_label == f"{_RISK_ON} · 직전 판정 유지 (지표 2/3)"   # 괄호 연속 없음 (Stage 2 §5)
     assert view.held is True and alert is None
+    assert view.score == 2            # 부분합(1)이 아니라 직전 확정 점수 — 라벨과 일치
     assert state == prev
+
+
+def test_regime_view_incomplete_without_confirmed_score_keeps_partial():
+    prev = {"confirmed": _RISK_ON, "pending": None, "pending_dates": []}      # 구형 상태(점수 없음)
+    rep = _regime("⚪ 판정 보류 (지표 2/3)", 1, available=2, failures=["yield_curve"])
+    view, _alert, _state = regime_view(rep, prev, "2026-10-08")
+    assert view.held and view.score == 1
 
 
 def test_regime_view_incomplete_without_history_is_hold_label():
@@ -743,25 +751,135 @@ def test_generate_signal_report_data_issues_and_alr08(fresh_state_db, monkeypatc
     assert "신용 스프레드 조회 실패" in r.data_issues
     assert r.pending_state["dd"]["비트코인"]["on"] is True       # ALR-08 병합
     assert r.regime.held is True
-    assert r.regime_label == "🟢 위험선호 (Risk-on) (직전 판정 유지 · 지표 2/3)"
+    assert r.regime_label == "🟢 위험선호 (Risk-on) · 직전 판정 유지 (지표 2/3)"
+    # 조회 실패 자산의 '경보 중' 요약은 과거 최저값임을 구분 표기 (Stage 2 §5)
+    btc = [a for a in r.active if a.startswith("비트코인")]
+    assert btc and btc[0].startswith("비트코인 최저 -") and "(조회 실패, " in btc[0]
     # 사용자에게 보이는 동적 문자열은 Markdown 특수문자 없음 (§4.10 #10)
     for text in [*r.data_issues, *r.active, r.regime.reason_line]:
         assert _no_md(text), text
 
 
 def test_build_daily_digest_dry_run_does_not_write_state(fresh_state_db, monkeypatch):
-    """send_digest --dry-run 경로(build_daily_digest)는 상태를 쓰지 않는다."""
+    """send_digest --dry-run 경로(build_daily_digest → assemble)는 상태를 쓰지 않는다."""
     import src.digest as digest
     from src.storage import get_storage
 
     _wire_market(monkeypatch, {"KOSPI": -20.0})
     monkeypatch.setattr(digest, "_collect_predictions", lambda: [])
+    monkeypatch.setattr(digest, "_overnight_us_line", lambda: None)       # yfinance 경계
+    monkeypatch.setattr(digest, "_bench_price_asof", lambda market: None)
     monkeypatch.setattr("src.universe.scan", lambda market="KR", limit=6, **k: [])
     get_storage()
     before = _state_rows(fresh_state_db)
     text = digest.build_daily_digest(market="kr")
     assert isinstance(text, str) and text
     assert _state_rows(fresh_state_db) == before
+
+
+# ---------------- 시장 충격 하드캡 (Stage 2 P2) ----------------
+
+
+def _shock_obs(label, chg, asof, dd=-30.0):
+    return AssetObs(label=label, asof=asof, last=100.0, chg_1d_pct=chg, chg_1d_abs=None,
+                    chg_20d_pct=None, dd_52w_pct=dd, vs_ma200_pct=None, vol_ratio=None, n_52w=250)
+
+
+def test_shock_thresholds_and_message():
+    import src.signals as sig
+
+    obs = {"KOSPI": _shock_obs("KOSPI", -10.8, "2026-07-28", dd=-34.0),
+           "KOSDAQ": _shock_obs("KOSDAQ", -5.9, "2026-07-28"),          # 6% 미만 → 없음
+           "S&P 500": _shock_obs("S&P 500", +3.5, "2026-07-28"),         # 경계 포함 (상승도)
+           "금": _shock_obs("금", -20.0, "2026-07-28")}                   # 대상 아님
+    alerts, notes, state = sig.shock_transitions(obs, None)
+    assert [a.key for a in alerts] == ["shock:S&P 500:2026-07-28", "shock:KOSPI:2026-07-28"]
+    assert alerts[1].severity == "critical" and alerts[1].category == "shock"
+    assert alerts[1].message == "KOSPI 하루 -10.8% (기준 ±5%) · 52주 고점 대비 -34%"
+    assert notes == [] and state["KOSPI"] == {"last": "2026-07-28", "chg": -10.8}
+    assert "KOSDAQ" not in state and "금" not in state
+    assert all(_no_md(a.message) for a in alerts)
+
+
+def test_shock_cooldown_five_business_days_and_state_merge():
+    import src.signals as sig
+
+    prev = {"KOSPI": {"last": "2026-07-28", "chg": -10.8}, "S&P 500": {"last": "2026-01-05", "chg": 4.0}}
+    # 07-29 (1영업일 뒤) 재급락 → 쿨다운, 상태 유지. S&P 는 관측 없음 → 이전 상태 그대로
+    alerts, _, state = sig.shock_transitions({"KOSPI": _shock_obs("KOSPI", -7.0, "2026-07-29")}, prev)
+    assert alerts == [] and state == prev
+    # 08-04 (5영업일 뒤) → 다시 발화
+    alerts, _, state = sig.shock_transitions({"KOSPI": _shock_obs("KOSPI", -6.0, "2026-08-04")}, prev)
+    assert [a.key for a in alerts] == ["shock:KOSPI:2026-08-04"]
+    assert state["KOSPI"]["last"] == "2026-08-04" and state["S&P 500"] == prev["S&P 500"]
+    # 1일 변화 없음(관측 1개) → 평가 생략
+    o = _shock_obs("KOSPI", None, "2026-08-05")
+    assert sig.shock_transitions({"KOSPI": o}, None) == ([], [], {})
+
+
+def test_shock_sorts_first_and_is_in_global_v2_payload(fresh_state_db, monkeypatch):
+    """오케스트레이터: 충격은 알림 맨 앞, 상태는 global:v2 의 'shock' 키, 첫 실행은 알림 없음."""
+    import src.signals as sig
+
+    # 패널: 마지막 날 KOSPI 가 -8% 갭 (하루 등락 ≥ 5%)
+    def panel_with_gap(dd_by_label, end="2026-10-08"):
+        df = _panel(dd_by_label, end=end)
+        df.loc[df.index[-1], "KOSPI"] = df["KOSPI"].iloc[-2] * 0.92
+        return df
+
+    import src.macro_analyzer as ma
+    _wire_market(monkeypatch, {"KOSPI": -1.0, "금": -1.0}, end="2026-10-07")
+    seed = sig.generate_signal_report(tickers=(), market="KR", today_kst="2026-10-07")
+    assert seed.first_run and seed.alerts == [] and seed.pending_state["shock"] == {}
+    assert sig.commit_signal_state(seed)
+
+    _wire_market(monkeypatch, {"KOSPI": -1.0, "금": -12.0}, end="2026-10-08")
+    monkeypatch.setattr(ma, "fetch_panel_with_failures",
+                        lambda tickers, period="2y": (panel_with_gap({"KOSPI": -1.0, "금": -12.0}), []))
+    r = sig.generate_signal_report(tickers=(), market="KR", today_kst="2026-10-08")
+    keys = [a.key for a in r.alerts]
+    assert keys[0] == "shock:KOSPI:2026-10-08" and "dd:금:enter" in keys
+    assert r.pending_state["shock"]["KOSPI"]["last"] == "2026-10-08"
+    assert sig.commit_signal_state(r)
+    # 같은 날 US 런 — 충격은 쿨다운, 금 낙폭은 이미 상태에 → 알림 0
+    us = sig.generate_signal_report(tickers=(), market="US", today_kst="2026-10-08")
+    assert us.alerts == []
+
+
+def test_pick_dd10_state_passes_through_commit(fresh_state_db, monkeypatch):
+    """다이제스트가 채우는 pick_dd10 키는 다음 런의 next_state 에 보존된다."""
+    import src.signals as sig
+    from src.storage import get_storage
+
+    _wire_market(monkeypatch, {"금": -1.0})
+    r = sig.generate_signal_report(tickers=(), today_kst="2026-10-07")
+    r.pending_state["pick_dd10"] = {"KR": {"003090": "2026-07-13"}}
+    assert sig.commit_signal_state(r)
+    r2 = sig.generate_signal_report(tickers=(), today_kst="2026-10-08")
+    assert r2.pending_state["pick_dd10"] == {"KR": {"003090": "2026-07-13"}}
+    assert get_storage().get_state("signals", "global:v2")["pick_dd10"]["KR"]["003090"] == "2026-07-13"
+
+
+def test_regime_transition_alert_comes_last_after_two_kst_dates(fresh_state_db, monkeypatch):
+    """서로 다른 KST 날짜 2회 커밋 후 '중립 이하' 전환이 alerts 끝에 오고, 첫 실행에는 없음."""
+    import src.signals as sig
+
+    risk_on = RegimeReport(regime="🟢 위험선호 (Risk-on)", score=2, available=3, total=3)
+    neutral = RegimeReport(regime="⚪ 중립 / 혼조", score=0, available=3, total=3)
+    _wire_market(monkeypatch, {"금": -1.0}, regime=risk_on, end="2026-10-06")
+    first = sig.generate_signal_report(tickers=(), today_kst="2026-10-06")
+    assert first.first_run and first.alerts == []
+    assert sig.commit_signal_state(first)
+
+    _wire_market(monkeypatch, {"금": -1.0}, regime=neutral, end="2026-10-07")
+    d1 = sig.generate_signal_report(tickers=(), today_kst="2026-10-07")
+    assert d1.alerts == [] and d1.regime.pending == "⚪ 중립 / 혼조" and d1.regime.pending_count == 1
+    assert sig.commit_signal_state(d1)
+
+    _wire_market(monkeypatch, {"금": -12.0}, regime=neutral, end="2026-10-08")   # 같은 날 금 낙폭 진입
+    d2 = sig.generate_signal_report(tickers=(), today_kst="2026-10-08")
+    assert [a.key for a in d2.alerts] == ["dd:금:enter", "regime:⚪ 중립 / 혼조"]   # 국면은 마지막
+    assert d2.regime.prev_label == "🟢 위험선호 (Risk-on)"
 
 
 def test_alerts_sorted_critical_first_then_kr_assets():

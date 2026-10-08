@@ -1067,3 +1067,62 @@ def test_fetch_close_panel_not_cached():
     # @cached 래퍼는 __wrapped__ 를 남긴다 — 캐시 없음 확인 (§4.10 #2)
     assert not hasattr(data_fetcher.fetch_close_panel, "__wrapped__")
     assert hasattr(data_fetcher.fetch_wikipedia_pageviews, "__wrapped__")
+
+
+# ----------------------------------------------------------------------
+# 다이제스트용 읽기 헬퍼 (Stage 2 WP-DIGEST) — 쓰기 0, 스키마 생성 없음
+# ----------------------------------------------------------------------
+
+
+def test_digest_read_helpers_empty_and_no_schema_side_effect(fresh_db):
+    assert ledger.last_sent_list("US") == (None, [])
+    assert ledger.inclusion_start("US") == {}
+    assert ledger.entry_prices("US") == {}
+    assert not _table_exists("signal_ledger") and not _table_exists("pick_outcomes")
+
+
+def test_last_sent_list_and_inclusion_start_with_reentry(fresh_db):
+    assert ledger.record_send("US", "2026-07-13", [Row("CALM"), Row("HG"), Row("MGR")],
+                              rule_version="v1", sent=1)
+    assert ledger.record_send("US", "2026-08-01", [Row("CALM"), Row("HG"), Row("UVE")],
+                              rule_version="v1", sent=1)
+    assert ledger.record_send("US", "2026-08-05", [Row("CALM"), Row("MGR"), Row("UVE")],
+                              rule_version="v1", sent=1)
+    sent_date, picks = ledger.last_sent_list("US")
+    assert sent_date == "2026-08-05" and [p.symbol for p in picks] == ["CALM", "MGR", "UVE"]
+    assert picks[0].total_score == 80 and picks[0].rank == 1
+    # 연속 포함 시작일: CALM 07-13 부터, UVE 08-01, MGR 은 빠졌다 재진입(08-05)
+    assert ledger.inclusion_start("US") == {"CALM": "2026-07-13", "MGR": "2026-08-05",
+                                            "UVE": "2026-08-01"}
+    # symbols 필터 — 현재 리스트에 없는 HG 는 결과에 없음(호출부가 '신규' 취급)
+    assert ledger.inclusion_start("US", ["CALM", "HG"]) == {"CALM": "2026-07-13"}
+    assert ledger.last_sent_list("KR") == (None, [])
+
+
+def test_entry_prices_takes_latest_entry_per_symbol(fresh_db):
+    conn = ledger._conn()
+    base = {c: None for c in ledger._OUTCOME_COLS}
+    rows = [
+        {**base, "market": "US", "symbol": "CALM", "first_sent_date": "2026-07-13", "yf_symbol": "CALM",
+         "bench_symbol": "SPY", "rule_version": "v1", "source": "live", "entry_date": "2026-07-14",
+         "entry_px": 78.1, "bench_entry_px": 620.0, "last_px": 62.7, "last_px_date": "2026-10-07",
+         "status": "open", "updated_at": "2026-10-07T23:00:00+00:00"},
+        {**base, "market": "US", "symbol": "MGR", "first_sent_date": "2026-07-13", "yf_symbol": "MGR",
+         "bench_symbol": "SPY", "rule_version": "v1", "source": "live", "entry_px": 19.9,
+         "status": "done", "updated_at": "2026-10-07T23:00:00+00:00"},
+        {**base, "market": "US", "symbol": "MGR", "first_sent_date": "2026-08-05", "yf_symbol": "MGR",
+         "bench_symbol": "SPY", "rule_version": "v1", "source": "live", "entry_px": 21.5,
+         "status": "open", "updated_at": "2026-10-07T23:00:00+00:00"},
+        {**base, "market": "US", "symbol": "NOPX", "first_sent_date": "2026-08-05", "yf_symbol": "NOPX",
+         "bench_symbol": "SPY", "rule_version": "v1", "source": "live", "status": "no_price",
+         "updated_at": "2026-10-07T23:00:00+00:00"},
+    ]
+    ledger._upsert_outcomes(conn, rows)
+    conn.commit()
+    ep = ledger.entry_prices("US")
+    assert ep["CALM"] == {"entry_px": 78.1, "entry_date": "2026-07-14", "first_sent_date": "2026-07-13",
+                          "bench_entry_px": 620.0, "last_px": 62.7, "last_px_date": "2026-10-07",
+                          "status": "open"}
+    assert ep["MGR"]["entry_px"] == 21.5 and ep["MGR"]["first_sent_date"] == "2026-08-05"   # 재진입
+    assert ep["NOPX"]["entry_px"] is None and ep["NOPX"]["status"] == "no_price"
+    assert ledger.entry_prices("KR") == {}
