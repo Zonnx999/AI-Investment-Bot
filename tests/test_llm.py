@@ -19,6 +19,7 @@ from src.exceptions import (
     ApiTimeoutError,
     DataValidationError,
     MissingApiKeyError,
+    ModelRetiredError,
     RateLimitError,
 )
 from src.http import REDACTED, mask_secrets
@@ -41,6 +42,13 @@ def minimax_key():
     _set_key(backup)
 
 
+@pytest.fixture(autouse=True)
+def llm_on(monkeypatch):
+    """LLM 은 기본 OFF (2026-10) — 이 파일의 summarize_safe 경로 테스트는 명시적으로 켬.
+    기본값 자체는 test_llm_disabled_by_default 가 별도로 검증."""
+    monkeypatch.setenv("QUANT_BOT_LLM", "1")
+
+
 @pytest.fixture
 def no_minimax_key():
     backup = settings.minimax_api_key
@@ -56,7 +64,7 @@ class _NimHandler(BaseHTTPRequestHandler):
     """OpenAI-chat 호환 응답 모사 (NVIDIA NIM)."""
 
     mode = "ok"       # ok | auth | forbidden | ratelimit | server_error | not_json
-                      # | no_choices | empty_content
+                      # | no_choices | empty_content | not_found | gone | length
     content = DEFAULT_CONTENT
     calls = 0
     last_payload: dict = {}
@@ -78,6 +86,13 @@ class _NimHandler(BaseHTTPRequestHandler):
             code, body = 429, {"error": "rate limited"}
         elif cls.mode == "server_error":
             code, body = 500, {"error": "boom"}
+        elif cls.mode == "not_found":
+            code, body = 404, {"error": "model not found"}
+        elif cls.mode == "gone":
+            code, body = 410, {"error": "model retired"}
+        elif cls.mode == "length":
+            body = {"choices": [{"message": {"role": "assistant", "content": cls.content},
+                                 "finish_reason": "length"}]}
         elif cls.mode == "not_json":
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
@@ -89,7 +104,8 @@ class _NimHandler(BaseHTTPRequestHandler):
         elif cls.mode == "empty_content":
             body = {"choices": [{"message": {"role": "assistant", "content": "   "}}]}
         else:
-            body = {"choices": [{"message": {"role": "assistant", "content": cls.content}}]}
+            body = {"choices": [{"message": {"role": "assistant", "content": cls.content},
+                                 "finish_reason": "stop"}]}
 
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
@@ -175,9 +191,29 @@ def test_kill_switch_disables_llm(monkeypatch, minimax_key, llm_server, value):
     assert llm_server.calls == 0
 
 
-def test_llm_enabled_by_default(monkeypatch):
+def test_llm_disabled_by_default(monkeypatch, minimax_key, llm_server):
+    """2026-10 결정: 기본 OFF — 키가 있어도 QUANT_BOT_LLM 미설정이면 HTTP 호출 없음."""
     monkeypatch.delenv("QUANT_BOT_LLM", raising=False)
+    assert llm_enabled() is False
+    assert summarize_safe(DIGEST) is None
+    assert llm_server.calls == 0
+
+
+@pytest.mark.parametrize("value", ["1", "on", "true", " YES "])
+def test_llm_opt_in_values(monkeypatch, value):
+    monkeypatch.setenv("QUANT_BOT_LLM", value)
     assert llm_enabled() is True
+
+
+def test_default_model_and_max_tokens():
+    from src.config import Settings
+
+    field = Settings.__dataclass_fields__["minimax_model"]
+    # .env 의 MINIMAX_MODEL 이 덮어쓸 수 있으므로 env 가 없을 때의 코드 기본값만 확인
+    import os
+    if "MINIMAX_MODEL" not in os.environ:
+        assert field.default == "deepseek-ai/deepseek-v4.1-flash"
+    assert llm_mod.LLM_MAX_TOKENS == 800
 
 
 # ---------------- HTTP 에러 → 도메인 예외 ----------------
@@ -193,6 +229,26 @@ def test_summarize_http_errors_raise_domain_exceptions(minimax_key, llm_server, 
     llm_server.mode = mode
     with pytest.raises(exc):
         summarize(DIGEST)
+
+
+@pytest.mark.parametrize("mode,status", [("not_found", 404), ("gone", 410)])
+def test_summarize_retired_model_raises_model_retired(minimax_key, llm_server, mode, status):
+    """퇴역 모델(실사고: m2.7 → HTTP 410) 은 일시 장애와 구분 — 교체가 필요하다는 신호."""
+    llm_server.mode = mode
+    with pytest.raises(ModelRetiredError) as exc:
+        summarize(DIGEST)
+    assert exc.value.status_code == status
+    assert isinstance(exc.value, ApiHttpError)                 # 기존 catch 호환
+    assert summarize_safe(DIGEST) is None
+
+
+def test_summarize_length_finish_reason_is_failure(minimax_key, llm_server):
+    """max_tokens 에서 잘린 응답(실측: glm '...비' 에서 끊김)은 내보내지 않음."""
+    llm_server.mode = "length"
+    llm_server.content = "오늘 시장은 위험선호 국면이 이어졌고 비"
+    with pytest.raises(DataValidationError, match="잘림"):
+        summarize(DIGEST)
+    assert summarize_safe(DIGEST) is None
 
 
 def test_summarize_http_error_keeps_status_code(minimax_key, llm_server):

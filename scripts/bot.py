@@ -37,6 +37,10 @@ LONG_POLL_SEC = 20          # http 세션 read timeout(25s)보다 작게
 ERROR_BACKOFF_SEC = 3       # getUpdates 실패 시 잠깐 쉬고 재시도
 RATE_MAX_CALLS = 8          # 유저별
 RATE_WINDOW_SEC = 60.0
+# 초기 pull 타임아웃(오프라인 파일 강등)으로 떴을 때 자진 종료까지 대기 — systemd 가
+# 재시작하면서 Turso 를 다시 프로브. 강등 상태론 구독자 목록·offset 이 원격과 갈라짐.
+DEGRADED_RESTART_SEC = 600
+DEGRADED_EXIT_CODE = 3
 
 
 _GATE_MSG = "🔒 구독자 전용입니다. /start 로 가입 요청 후 소유자 승인을 받으면 이용할 수 있어요."
@@ -84,16 +88,33 @@ def _sd_notify(state: str) -> None:
 
 
 def run() -> NoReturn:
-    """폴링 루프 — 정상 흐름에선 반환하지 않음 (종료는 예외로만: Ctrl+C 등)."""
+    """폴링 루프 — 정상 흐름에선 반환하지 않음 (종료는 예외로만: Ctrl+C 등).
+
+    READY=1 은 스키마 초기화(ensure_owner)·offset 읽기가 **끝난 뒤** 보낸다 — 그 전에
+    보내면 초기화 크래시 루프가 systemd 에 '기동 성공' 으로 기록됨 (Type=notify).
+    """
     store = get_storage()
-    _sd_notify("READY=1")
-    subscribers.ensure_owner()                       # 소유자 항상 active
+    subscribers.ensure_owner()                       # 소유자 항상 active (스키마 초기화 포함)
     owner = str(settings.telegram_chat_id) if settings.telegram_chat_id else None
     limiter = bot_commands.RateLimiter(max_calls=RATE_MAX_CALLS, window_sec=RATE_WINDOW_SEC)
     offset = subscribers.get_updates_offset()
-    logger.info("봇 시작 (offset=%s, long-poll=%ds)", offset, LONG_POLL_SEC)
+    _sd_notify("READY=1")
+    logger.info("봇 시작 (offset=%s, long-poll=%ds, 저장소=%s)",
+                offset, LONG_POLL_SEC, getattr(store, "init_sync", "?"))
+
+    # 초기 pull 타임아웃으로 오프라인 파일에 강등돼 떴다면 일정 시간 응답만 하다가
+    # 자진 종료 → systemd Restart 가 Turso 를 다시 프로브 (장기 강등 고착 방지)
+    restart_at: float | None = None
+    if getattr(store, "init_sync", None) == "timeout":
+        restart_at = time.monotonic() + DEGRADED_RESTART_SEC
+        logger.warning("Turso 초기 pull 타임아웃 — 오프라인 강등 상태로 시작, %ds 뒤 재시작해 재프로브",
+                       DEGRADED_RESTART_SEC)
 
     while True:
+        if restart_at is not None and time.monotonic() >= restart_at:
+            logger.warning("강등 상태 %ds 경과 — 재프로브를 위해 종료 (exit %d)",
+                           DEGRADED_RESTART_SEC, DEGRADED_EXIT_CODE)
+            raise SystemExit(DEGRADED_EXIT_CODE)
         # 하트비트 — 루프가 어딘가(특히 libsql 원격 쓰기)에서 멈추면 핑이 끊겨
         # systemd WatchdogSec 이 프로세스를 재시작 (설정은 DEPLOYMENT.md §5)
         _sd_notify("WATCHDOG=1")

@@ -264,6 +264,7 @@ def test_send_daily_digest_prepends_summary_on_success(monkeypatch):
     import src.llm as llm_mod
 
     sent = _broadcast_env(monkeypatch)
+    monkeypatch.setenv("QUANT_BOT_LLM", "1")          # LLM 기본 OFF (2026-10) — opt-in 경로 검증
     monkeypatch.setattr(llm_mod, "summarize", lambda text: "조용한 하루였습니다.")
     digest_mod.send_daily_digest(use_llm=True)
     assert sent == ["🧠 조용한 하루였습니다.\n\n본문 다이제스트"]

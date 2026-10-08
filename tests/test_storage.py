@@ -420,3 +420,158 @@ def test_get_payload_and_get_state_swallow_libsql_valueerror(store):
 
     result_state = store.get_state("ns", "k")
     assert result_state is None
+
+
+# ---------------- 연결 상태 API (WP-OPS-CORE): init_sync / degraded / require_remote ----------------
+# 호출부(다이제스트 강등 보류·export 가드·build_universe)가 '원격과 맞춰진 연결인가' 를
+# 구분하는 계약. 실 libsql 동작은 서버 스모크로 확인 (여기선 경로별 값만).
+
+
+def _fake_libsql(monkeypatch):
+    import sys
+    import types
+
+    class _Conn:
+        def sync(self):
+            return None
+
+        def executescript(self, *_a):
+            return None
+
+        def commit(self):
+            return None
+
+        def close(self):
+            return None
+
+    mod = types.ModuleType("libsql_experimental")
+    mod.connect = lambda *a, **k: _Conn()
+    monkeypatch.setitem(sys.modules, "libsql_experimental", mod)
+
+
+def test_init_sync_local_when_turso_unset(tmp_path, monkeypatch):
+    monkeypatch.setenv("QUANT_BOT_DB_PATH", str(tmp_path / "plain.db"))
+    s = Storage()
+    try:
+        assert s.init_sync == "local" and s.degraded is False
+        s.require_remote("t")                            # Turso 미설정 → 통과
+    finally:
+        s.close()
+
+
+def test_init_sync_local_when_path_injected_even_with_url(tmp_path, monkeypatch):
+    prev = _turso_env(tmp_path, monkeypatch)
+    try:
+        s = Storage(db_path=tmp_path / "injected.db")     # 테스트 주입 경로는 항상 로컬
+        try:
+            assert s.init_sync == "local"
+            s.require_remote("t")                        # 주입 경로 → 원격 요구 안 함
+        finally:
+            s.close()
+    finally:
+        object.__setattr__(storage_mod.settings, "turso_database_url", prev)
+
+
+def test_init_sync_offline_killswitch(tmp_path, monkeypatch):
+    monkeypatch.setenv("QUANT_BOT_OFFLINE", "1")
+    prev = _turso_env(tmp_path, monkeypatch)
+    try:
+        s = Storage()
+        try:
+            assert s.init_sync == "offline"
+            assert s.degraded is False                   # 의도된 우회 — 강등 아님
+            with pytest.raises(storage_mod.StorageError):
+                s.require_remote("build_universe")
+        finally:
+            s.close()
+    finally:
+        object.__setattr__(storage_mod.settings, "turso_database_url", prev)
+
+
+def test_init_sync_timeout_is_degraded_and_requires_remote_fails(tmp_path, monkeypatch):
+    _fake_libsql(monkeypatch)                            # import 확인만 통과 (프로브가 타임아웃)
+    monkeypatch.setattr(Storage, "_probe_initial_sync", staticmethod(lambda *a, **k: "timeout"))
+    prev = _turso_env(tmp_path, monkeypatch)
+    try:
+        s = Storage()
+        try:
+            assert s.init_sync == "timeout"
+            assert s.degraded is True
+            assert s.db_path.name == "replica.offline.db"
+            with pytest.raises(storage_mod.StorageError, match="timeout"):
+                s.require_remote("export_dashboard")
+        finally:
+            s.close()
+    finally:
+        object.__setattr__(storage_mod.settings, "turso_database_url", prev)
+
+
+@pytest.mark.parametrize("probe,ok", [("ok", True), ("error", False)])
+def test_init_sync_ok_or_error_with_libsql(tmp_path, monkeypatch, probe, ok):
+    _fake_libsql(monkeypatch)
+    monkeypatch.setattr(Storage, "_probe_initial_sync", staticmethod(lambda *a, **k: probe))
+    prev = _turso_env(tmp_path, monkeypatch)
+    try:
+        s = Storage()
+        assert s.is_turso is True
+        assert s.init_sync == probe
+        assert s.degraded is False                       # error = stale 레플리카, 강등 아님
+        if ok:
+            s.require_remote("t")
+        else:
+            with pytest.raises(storage_mod.StorageError, match="error"):
+                s.require_remote("t")
+    finally:
+        object.__setattr__(storage_mod.settings, "turso_database_url", prev)
+
+
+def test_put_state_returns_bool(store):
+    import sqlite3
+
+    assert store.put_state("ns", "k", {"v": 1}) is True
+
+    class _Broken:
+        def execute(self, *_a, **_k):
+            raise sqlite3.OperationalError("disk I/O error")
+
+        def commit(self):
+            return None
+
+        def close(self):
+            return None
+
+    store._conn = _Broken()
+    assert store.put_state("ns", "k", {"v": 2}) is False      # 예외 대신 False
+
+
+@pytest.mark.skipif(
+    ValueError not in storage_mod._DB_ERRORS,
+    reason="libsql_experimental 없는 환경 — ValueError 가 _DB_ERRORS 에 없어 스킵",
+)
+def test_put_state_returns_false_on_libsql_valueerror(store):
+    store._conn = _StubConnRaisesValueError()
+    assert store.put_state("ns", "k", {"v": 1}) is False
+
+
+def test_sync_returns_status_strings(store, monkeypatch):
+    assert store.sync() == "local"                        # 로컬 sqlite3 → no-op
+
+    store.is_turso = True
+    object.__setattr__(storage_mod.settings, "turso_database_url", "libsql://x.turso.io")
+    monkeypatch.setattr(storage_mod, "_remote_reachable", lambda url, timeout=5.0: False)
+    assert store.sync() == "unreachable"
+
+    monkeypatch.setattr(storage_mod, "_remote_reachable", lambda url, timeout=5.0: True)
+    monkeypatch.setattr(store, "_safe_sync", lambda conn, what: "ok")
+    assert store.sync() == "ok"
+    monkeypatch.setattr(store, "_safe_sync", lambda conn, what: "error")
+    assert store.sync() == "error"
+    monkeypatch.setattr(store, "_safe_sync", lambda conn, what: "timeout")
+    assert store.sync() == "timeout"
+    assert store.sync() == "skipped-degraded"             # 타임아웃 뒤엔 push 스킵
+
+
+def test_sync_timeout_default_stays_20(monkeypatch):
+    """기본 SYNC_TIMEOUT 20s 는 유지 — 유닛별 값은 systemd/CI env 로 명시."""
+    monkeypatch.delenv("QUANT_BOT_SYNC_TIMEOUT", raising=False)
+    assert storage_mod._sync_timeout() == 20.0

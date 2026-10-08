@@ -297,3 +297,114 @@ def test_finding_to_json_cleans_nan_score():
     d = finding_to_json(fd)
     assert d["score"] is None            # NaN → JSON null (json.dumps 'NaN' 방지)
     assert d["evidence"] == ["e"]
+
+
+# ----------------------------------------------------------------------
+# main() 가드 — 강등/빈 DB 로 공개 파일을 덮어쓰지 않음 + data_as_of (WP-OPS-CORE)
+# tmp DB + tmp DASHBOARD_DIR, 국면·예측은 --skip (네트워크 없음)
+# ----------------------------------------------------------------------
+
+import json  # noqa: E402
+
+import scripts.export_dashboard as ed  # noqa: E402
+import src.storage as storage_mod  # noqa: E402
+
+_SCREENED_MIN = """
+CREATE TABLE IF NOT EXISTS screened (
+    symbol TEXT NOT NULL, market TEXT NOT NULL, name TEXT, sector TEXT,
+    price REAL, market_cap REAL, dividend_yield REAL, roe REAL,
+    health_score INTEGER, value_score INTEGER, total_score INTEGER,
+    per REAL, pbr REAL, enriched INTEGER NOT NULL DEFAULT 0, updated_at TEXT,
+    PRIMARY KEY (symbol, market)
+);
+"""
+
+
+@pytest.fixture
+def export_env(tmp_path, monkeypatch):
+    """격리 DB(env 경로) + 싱글톤 리셋 + tmp 대시보드 폴더 + 오프라인 인자."""
+    monkeypatch.setenv("QUANT_BOT_DB_PATH", str(tmp_path / "export.db"))
+    monkeypatch.setattr(storage_mod, "_storage", None)
+    out = tmp_path / "dashboard"
+    monkeypatch.setattr(ed, "DASHBOARD_DIR", out)
+    monkeypatch.setattr("sys.argv", ["export_dashboard.py", "--skip-regime", "--skip-predictions"])
+    yield out
+    if storage_mod._storage is not None:
+        storage_mod._storage.close()
+    monkeypatch.setattr(storage_mod, "_storage", None)
+
+
+def _seed(rows):
+    """rows: (symbol, market, enriched, updated_at)."""
+    conn = storage_mod.get_storage().conn
+    conn.executescript(_SCREENED_MIN)
+    for sym, market, enriched, updated in rows:
+        conn.execute(
+            "INSERT INTO screened (symbol, market, name, sector, price, market_cap, "
+            "dividend_yield, roe, health_score, value_score, total_score, per, pbr, "
+            "enriched, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (sym, market, sym, "Tech", 10.0, 1e9, 0.01, 0.1, 50, 50, 50, 8.0, 1.0,
+             enriched, updated),
+        )
+    conn.commit()
+
+
+def test_main_writes_data_as_of(export_env):
+    _seed([
+        ("AAA", "US", 1, "2026-07-10T05:00:00+00:00"),
+        ("BBB", "US", 1, "2026-07-09T05:00:00+00:00"),
+        ("ZZZ", "US", 0, "2026-10-01T05:00:00+00:00"),   # 미보강 — 기준 시각에 안 들어감
+        ("005930", "KR", 1, "2026-07-08T01:00:00+00:00"),
+        ("BTC", "CRYPTO", 1, "2026-07-11T00:00:00+00:00"),
+    ])
+    assert ed.main() == 0
+    us = json.loads((export_env / "us_data.json").read_text(encoding="utf-8"))
+    kr = json.loads((export_env / "kr_data.json").read_text(encoding="utf-8"))
+    assert us["data_as_of"] == "2026-07-10T05:00:00+00:00"
+    assert us["count"] == 2
+    assert kr["data_as_of"] == "2026-07-08T01:00:00+00:00"
+    assert (export_env / "crypto_data.json").exists()
+
+
+@pytest.mark.parametrize("missing", ["US", "KR"])
+def test_main_returns_3_and_keeps_files_when_market_empty(export_env, missing):
+    export_env.mkdir(parents=True)
+    old = '{"old": true}'
+    for f in ("us_data.json", "kr_data.json", "crypto_data.json"):
+        (export_env / f).write_text(old, encoding="utf-8")
+    rows = [("AAA", "US", 1, "2026-07-10"), ("005930", "KR", 1, "2026-07-08"),
+            ("BTC", "CRYPTO", 1, "2026-07-11")]
+    _seed([r for r in rows if r[1] != missing])
+    assert ed.main() == 3
+    for f in ("us_data.json", "kr_data.json", "crypto_data.json"):
+        assert (export_env / f).read_text(encoding="utf-8") == old   # 하나도 안 덮어씀
+
+
+def test_main_returns_3_when_screened_table_missing(export_env):
+    storage_mod.get_storage()                       # 빈 DB (screened 없음)
+    assert ed.main() == 3
+    assert not (export_env / "us_data.json").exists()
+
+
+def test_main_keeps_crypto_file_when_crypto_empty(export_env):
+    export_env.mkdir(parents=True)
+    (export_env / "crypto_data.json").write_text('{"old": true}', encoding="utf-8")
+    _seed([("AAA", "US", 1, "2026-07-10"), ("005930", "KR", 1, "2026-07-08")])
+    assert ed.main() == 0
+    assert (export_env / "crypto_data.json").read_text(encoding="utf-8") == '{"old": true}'
+    assert (export_env / "us_data.json").exists()
+
+
+def test_main_returns_2_without_writing_when_turso_degraded(export_env, monkeypatch, capsys):
+    """Turso 설정 + 초기 pull 타임아웃(오프라인 파일 강등) → exit 2, 파일 미생성."""
+    import sys
+    import types
+
+    monkeypatch.setitem(sys.modules, "libsql_experimental",
+                        types.ModuleType("libsql_experimental"))   # import 확인만 통과
+    monkeypatch.setattr(storage_mod.Storage, "_probe_initial_sync",
+                        staticmethod(lambda *a, **k: "timeout"))
+    object.__setattr__(storage_mod.settings, "turso_database_url", "libsql://x.turso.io")
+    assert ed.main() == 2
+    assert "::error::" in capsys.readouterr().out
+    assert list(export_env.glob("*.json")) == []
