@@ -1,0 +1,10 @@
+[Unit]
+Description=KR price refresh — weekdays 08:10 Asia/Seoul (before 08:30 KR digest)
+
+[Timer]
+OnCalendar=Mon..Fri 08:10 Asia/Seoul
+Persistent=false
+Unit=quant-kr-refresh.service
+
+[Install]
+WantedBy=timers.target

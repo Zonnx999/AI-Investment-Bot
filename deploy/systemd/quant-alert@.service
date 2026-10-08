@@ -1,0 +1,11 @@
+# OnFailure 대상 — 소유자에게 평문 DM (실패 유닛·종료코드·journal 꼬리). DB/레플리카 미사용.
+# %i = bot | digest-kr | digest-us | universe | kr-refresh | autopull
+[Unit]
+Description=AI-Investment-Bot owner alert for %i
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/AI-Investment-Bot
+ExecStart=/home/ubuntu/AI-Investment-Bot/.venv/bin/python scripts/notify_owner.py --failed-unit %i
+TimeoutStartSec=60

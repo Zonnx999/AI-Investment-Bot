@@ -1,0 +1,10 @@
+[Unit]
+Description=US digest — weekdays 09:00 America/New_York
+
+[Timer]
+OnCalendar=Mon..Fri 09:00 America/New_York
+Persistent=true
+Unit=quant-digest@us.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,10 @@
+[Unit]
+Description=Run quant-bot auto-pull every 15 min
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

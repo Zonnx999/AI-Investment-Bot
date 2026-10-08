@@ -1,0 +1,10 @@
+[Unit]
+Description=KR digest — weekdays 08:30 Asia/Seoul
+
+[Timer]
+OnCalendar=Mon..Fri 08:30 Asia/Seoul
+Persistent=true
+Unit=quant-digest@kr.service
+
+[Install]
+WantedBy=timers.target

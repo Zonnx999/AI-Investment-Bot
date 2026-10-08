@@ -1,0 +1,22 @@
+# 유니버스 주간 재점수 (discover + enrich). 캐시 off(원격 캐시쓰기 0), 전용 레플리카 data/universe_replica.db.
+# quant-kr-refresh 와 같은 레플리카 → flock 직렬화. 봇보다 먼저 OOM 대상이 되도록 우선순위 낮춤.
+[Unit]
+Description=AI-Investment-Bot weekly universe rescore
+After=network-online.target
+Wants=network-online.target
+OnFailure=quant-alert@universe.service
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/AI-Investment-Bot
+Environment=PYTHONUNBUFFERED=1
+Environment=QUANT_BOT_DB_PATH=/home/ubuntu/AI-Investment-Bot/data/universe_replica.db
+Environment=QUANT_BOT_CACHE=off
+Environment=QUANT_BOT_SYNC_TIMEOUT=300
+ExecStart=/usr/bin/flock -w 1800 /home/ubuntu/AI-Investment-Bot/data/.universe.lock /home/ubuntu/AI-Investment-Bot/.venv/bin/python scripts/build_universe.py --max-age 6
+TimeoutStartSec=4h
+Nice=10
+IOSchedulingClass=idle
+MemoryMax=600M
+OOMScoreAdjust=300

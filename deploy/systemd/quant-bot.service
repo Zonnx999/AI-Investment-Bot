@@ -1,0 +1,26 @@
+# 상시 텔레그램 봇 — getUpdates 폴링 단독 소유 (DEPLOYMENT.md §7). 레플리카: data/quant_bot.db (전용)
+[Unit]
+Description=AI-Investment-Bot interactive Telegram bot
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=ubuntu
+WorkingDirectory=/home/ubuntu/AI-Investment-Bot
+Environment=PYTHONUNBUFFERED=1
+Environment=QUANT_BOT_DB_PATH=/home/ubuntu/AI-Investment-Bot/data/quant_bot.db
+Environment=QUANT_BOT_SYNC_TIMEOUT=60
+ExecStart=/home/ubuntu/AI-Investment-Bot/.venv/bin/python scripts/bot.py
+TimeoutStartSec=180
+WatchdogSec=300
+Restart=always
+RestartSec=10
+RestartSteps=5
+RestartMaxDelaySec=300
+OOMScoreAdjust=-200
+
+[Install]
+WantedBy=multi-user.target
