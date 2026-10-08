@@ -591,6 +591,7 @@ def test_stock_crypto_labels_are_corrected(fresh_db):
     _seed_full(conn, "BTC", "CRYPTO", name="Bitcoin", total=76, value=53, health=99, sector="")
     out = bc.handle_stock("BTC")
     assert "변동성 53" in out and "순위 99" in out
+    assert "점수 계산 2026-10-08" in out and "재무" not in out
     assert "밸류" not in out and "건전성" not in out
     assert "비교할 수 없" in out
 

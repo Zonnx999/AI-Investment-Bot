@@ -320,13 +320,13 @@ def _age_days(*dates: str | None, today: date | None = None) -> int | None:
 
 
 def _asof_lines(fund_asof: str | None, price_asof: str | None, *,
-                today: date | None = None) -> list[str]:
+                today: date | None = None, fund_label: str = "재무") -> list[str]:
     """기준일 줄 + (UNIVERSE_STALE_DAYS 이상 경과 시) 경고 줄 (순수)."""
     if not fund_asof and not price_asof:
         return ["기준일 정보 없음"]
     bits = []
     if fund_asof:
-        bits.append(f"재무 {str(fund_asof)[:10]}")
+        bits.append(f"{fund_label} {str(fund_asof)[:10]}")
     if price_asof:
         bits.append(f"가격 {str(price_asof)[:10]}")
     lines = ["🗓 점수 기준일: " + " · ".join(bits)]
@@ -376,7 +376,8 @@ def format_stock(row, detail: dict | None, *, today: date | None = None) -> str:
                 lines.append(f"  • {_safe(label)} {pts}/{mx}{tail}")
     lines.append("")
     lines.extend(_asof_lines(getattr(row, "fund_asof", None), getattr(row, "price_asof", None),
-                             today=today))
+                             today=today,
+                             fund_label="점수 계산" if row.market == "CRYPTO" else "재무"))
     lines.append(f"시장 내 상대 점수입니다. {DISCLAIMER}")
     return "\n".join(lines)
 
