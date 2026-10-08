@@ -338,6 +338,25 @@ def _mmdd(iso: str | None) -> str:
     return iso[5:10] if iso and len(iso) >= 10 else (iso or "?")
 
 
+def _since(entered: str | None) -> str:
+    """'경보 중' 시작일 표기 — 시딩(첫 실행)으로 켜진 항목은 진입일을 모르므로 생략."""
+    return f"{_mmdd(entered)}~, " if entered else ""
+
+
+def _mark_seeded(*states: dict) -> None:
+    """첫 실행(시딩) 상태의 on 항목은 진입일 미상 — entered=None 으로 (제자리 수정).
+
+    시딩 런의 asof 를 진입일로 적으면 '경보 중: KOSPI -27% (10-08~ …)' 처럼 오늘 막
+    진입한 것으로 오해된다 (실제로는 수개월째일 수 있음).
+    """
+    for st in states:
+        if st.get("on") and "entered" in st:          # credit·fx (평면 상태)
+            st["entered"] = None
+        for v in st.values():                          # dd·vol (자산별 상태)
+            if isinstance(v, dict) and v.get("on"):
+                v["entered"] = None
+
+
 def _count_ok(st: dict, asof: str) -> None:
     """해제 조건을 만족한 관측 1건 — 같은 asof 는 한 번만 센다."""
     if st.get("ok_asof") != asof:
@@ -459,7 +478,8 @@ def drawdown_transitions(
         if dd >= DD_CLEAR_FRACTION * T:
             _count_ok(st, o.asof)
             if st["ok"] >= CLEAR_CONFIRM_DATES:
-                notes.append(f"해제: {label} {dd:+.1f}% ({_mmdd(st.get('entered'))}~{_mmdd(o.asof)})")
+                start = _mmdd(st["entered"]) if st.get("entered") else ""
+                notes.append(f"해제: {label} {dd:+.1f}% ({start}~{_mmdd(o.asof)})")
                 state[label] = {"on": False, "cleared": o.asof}
         else:
             _reset_ok(st)
@@ -669,14 +689,16 @@ def active_summaries(state: dict, obs: dict[str, AssetObs]) -> list[str]:
         o = obs.get(label)
         dd = o.dd_52w_pct if (o and o.dd_52w_pct is not None) else st.get("worst")
         dd_txt = f"{dd:.0f}%" if isinstance(dd, (int, float)) else "?"
-        out.append(f"{label} {dd_txt} ({_mmdd(st.get('entered'))}~, 임계 {float(st.get('T', 0)):.0f}%)")
+        out.append(f"{label} {dd_txt} ({_since(st.get('entered'))}임계 {float(st.get('T', 0)):.0f}%)")
     for label, st in (state.get("vol") or {}).items():
         if isinstance(st, dict) and st.get("on"):
             o = obs.get(label)
             ratio = f" ({o.vol_ratio:.1f}배)" if (o and o.vol_ratio is not None) else ""
             out.append(f"{label} 변동성 급등{ratio}")
     if (state.get("credit") or {}).get("on"):
-        out.append(f"하이일드 스프레드 급등 ({_mmdd(state['credit'].get('entered'))}~)")
+        since = state["credit"].get("entered")
+        out.append(f"하이일드 스프레드 급등 ({_mmdd(since)}~)" if since
+                   else "하이일드 스프레드 급등")
     if (state.get("fx") or {}).get("on"):
         o = obs.get(FX_LABEL)
         chg = f" (20일 {o.chg_20d_pct:+.1f}%)" if (o and o.chg_20d_pct is not None) else ""
@@ -877,6 +899,8 @@ def generate_signal_report(
             alerts.append(regime_alert)
         alerts.sort(key=_alert_sort_key)
         cleared = dd_notes + vol_notes + cr_notes + fx_notes
+    else:
+        _mark_seeded(dd_state, vol_state, cr_state, fx_state)
 
     next_state = {
         "v": STATE_VERSION,

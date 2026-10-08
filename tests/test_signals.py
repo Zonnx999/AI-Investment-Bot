@@ -611,6 +611,24 @@ def test_generate_signal_report_us_after_kr_commit_reports_only_new(fresh_state_
     assert any(a.startswith("KOSPI") for a in us.active)
 
 
+def test_seeded_entries_have_unknown_entry_date(fresh_state_db, monkeypatch):
+    """첫 실행 시딩으로 켜진 경보는 진입일 미상 — '오늘 진입' 처럼 보이지 않게 날짜 생략."""
+    import src.signals as sig
+
+    _wire_market(monkeypatch, {"KOSPI": -27.0, "금": -1.0})
+    seed = sig.generate_signal_report(tickers=(), market="KR", today_kst="2026-10-08")
+    assert seed.pending_state["dd"]["KOSPI"]["entered"] is None
+    kospi = [a for a in seed.active if a.startswith("KOSPI")]
+    assert kospi and kospi[0].endswith("(임계 -12%)") and "~" not in kospi[0]
+    assert sig.commit_signal_state(seed)
+
+    # 이후 런에서 새로 진입한 경보는 진입일 표기
+    _wire_market(monkeypatch, {"KOSPI": -27.0, "금": -12.0}, end="2026-10-08")
+    r = sig.generate_signal_report(tickers=(), market="KR", today_kst="2026-10-09")
+    gold = [a for a in r.active if a.startswith("금")]
+    assert gold and "(10-08~, 임계 -10%)" in gold[0]
+
+
 def test_generate_signal_report_not_committed_means_alert_repeats(fresh_state_db, monkeypatch):
     """발송 실패(커밋 안 함)면 다음 런에서 같은 전환이 다시 나온다."""
     import src.signals as sig
