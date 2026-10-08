@@ -10,12 +10,13 @@ scripts/build_universe.py
   --reclassify  : DB 의 US 행을 현재 분류 규칙으로 재분류만 (오프라인, API 0콜)
   --kr-refresh  : KRX 일별(2콜)로 KR 가격·시총 갱신 + DART 호출 없이 오프라인 재점수
 
-  --markets US,KR,CRYPTO : 발굴 대상 시장 (기본 전부)
+  --markets US,KR,CRYPTO : 발굴·보강 대상 시장 (기본 전부. 보강은 US/KR 만 해당 — CRYPTO 는 발굴 때 점수까지)
   --limit N     : 이번 실행에서 보강할 종목 수 상한 (쿼터/시간 조절)
   --max-age D   : 며칠 지난 보강을 다시 할지 (기본 7)
   --force       : 신선도 무시하고 전 종목 재점수
 
-종료코드: 0 정상 / 2 원격 DB(Turso) 필요한데 연결 불가 / 5 보강 중단(aborted) 또는 실패율 > 20%.
+종료코드: 0 정상 / 2 원격 DB(Turso) 필요한데 연결 불가 / 5 보강 중단(aborted)·실패율 > 20%·
+          --kr-refresh 발굴 0건(KRX 조회 실패).
 
 예:
     python scripts/build_universe.py                        # 발굴 + 전체 보강
@@ -135,7 +136,7 @@ def main() -> int:
                         help="DB 의 US 행을 현재 보통주 규칙으로 재분류만 (API 0콜)")
     parser.add_argument("--kr-refresh", action="store_true",
                         help="KRX 일별로 KR 가격·시총 갱신 + 오프라인 재점수 (DART 0콜)")
-    parser.add_argument("--markets", default=None, help="발굴 시장 (예: US,KR). 기본 전부")
+    parser.add_argument("--markets", default=None, help="발굴·보강 시장 (예: US,KR). 기본 전부. --markets US 면 KR DART 보강은 건너뜀")
     parser.add_argument("--limit", type=int, default=None, help="이번에 보강할 종목 수 상한")
     parser.add_argument("--max-age", type=int, default=7, help="재보강 주기(일, 기본 7)")
     parser.add_argument("--force", action="store_true",
@@ -156,6 +157,7 @@ def main() -> int:
 
     # 단독 모드: --reclassify / --kr-refresh (다른 단계 실행 안 함)
     if args.reclassify or args.kr_refresh:
+        kr_refresh_empty = False
         if args.reclassify:
             print("\n[재분류] US 보통주 규칙 재적용 (오프라인)...")
             out = universe.reclassify_us()
@@ -165,10 +167,17 @@ def main() -> int:
             out = universe.refresh_kr_prices()
             print(f"    발굴 {out.get('discovered', 0)} / 재점수 {out.get('rescored', 0)} "
                   f"/ 건너뜀 {out.get('skipped', 0)}")
+            if not out.get("discovered"):
+                # KRX 조회 실패 등으로 발굴 0건이면 가격·시총이 갱신되지 않은 것 —
+                # 타이머로 돌릴 때 조용히 성공으로 보이지 않게 경고 + 부분완료 코드.
+                kr_refresh_empty = True
+                logger.warning("KR 갱신: 발굴 0건 (KRX 조회 실패 가능) — 가격·시총이 갱신되지 않았습니다. "
+                               "종료코드 %d", EXIT_PARTIAL)
+                print("    !! 발굴 0건 — KRX 조회에 실패했을 수 있습니다 (가격·시총 미갱신)")
         get_storage().sync()
         _print_exclusions()
         print("=" * 70)
-        return EXIT_OK
+        return EXIT_PARTIAL if kr_refresh_empty else EXIT_OK
 
     do_discover = args.discover or not args.enrich
     do_enrich = args.enrich or not args.discover
@@ -195,25 +204,33 @@ def main() -> int:
     if do_enrich:
         if args.force:
             print("\n(--force) 신선도 무시 — 전 종목 재점수 (캐시 데이터로 빠름)")
-        print("\n[2] 미국 보강 (FMP key-metrics/ratios TTM → 점수)...")
-        pending = len(universe.symbols_needing_enrichment(max_age))
-        print(f"    보강 대상: {pending}종목" + (f" (이번 {args.limit}개)" if args.limit else ""))
-        stats = universe.enrich(
-            max_age=max_age, limit=args.limit,
-            on_progress=_make_progress_bar(),
-        )
-        _print_enrich_result(stats)
-        abnormal |= _enrich_outcome(stats)
+        # --markets 는 보강에도 적용 (US 만 지정했는데 KR DART ~540콜이 도는 사고 방지).
+        # CRYPTO 는 발굴 단계에서 점수까지 끝나므로 별도 보강 없음.
+        if "US" in markets:
+            print("\n[2] 미국 보강 (FMP key-metrics/ratios TTM → 점수)...")
+            pending = len(universe.symbols_needing_enrichment(max_age))
+            print(f"    보강 대상: {pending}종목" + (f" (이번 {args.limit}개)" if args.limit else ""))
+            stats = universe.enrich(
+                max_age=max_age, limit=args.limit,
+                on_progress=_make_progress_bar(),
+            )
+            _print_enrich_result(stats)
+            abnormal |= _enrich_outcome(stats)
+        else:
+            print("\n[2] 미국 보강 건너뜀 (--markets 에 US 없음)")
 
-        print("\n[3] 한국 보강 (DART 지배주주 귀속 → ROE/PER/PBR)...")
-        kr_pending = len(universe._kr_symbols_needing_enrichment(max_age))
-        print(f"    보강 대상: {kr_pending}종목" + (f" (이번 {args.limit}개)" if args.limit else ""))
-        kr_stats = universe.enrich_kr(
-            max_age=max_age, limit=args.limit,
-            on_progress=_make_progress_bar(),
-        )
-        _print_enrich_result(kr_stats)
-        abnormal |= _enrich_outcome(kr_stats)
+        if "KR" in markets:
+            print("\n[3] 한국 보강 (DART 지배주주 귀속 → ROE/PER/PBR)...")
+            kr_pending = len(universe._kr_symbols_needing_enrichment(max_age))
+            print(f"    보강 대상: {kr_pending}종목" + (f" (이번 {args.limit}개)" if args.limit else ""))
+            kr_stats = universe.enrich_kr(
+                max_age=max_age, limit=args.limit,
+                on_progress=_make_progress_bar(),
+            )
+            _print_enrich_result(kr_stats)
+            abnormal |= _enrich_outcome(kr_stats)
+        else:
+            print("\n[3] 한국 보강 건너뜀 (--markets 에 KR 없음)")
 
     # 재점수 결과 단면 저장 (규칙 버전과 함께) — 원장 판정·IC 의 재료. best-effort.
     snap = ledger.snapshot_universe("rescore", rule_version=universe.RULE_VERSION)

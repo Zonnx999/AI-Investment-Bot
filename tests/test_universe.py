@@ -1413,3 +1413,110 @@ def test_build_universe_calls_snapshot_hooks():
     src = (Path(__file__).resolve().parent.parent / "scripts" / "build_universe.py").read_text()
     assert "ledger.ensure_pre_snapshot()" in src
     assert 'ledger.snapshot_universe("rescore", rule_version=universe.RULE_VERSION)' in src
+
+
+# ---------------- WP-POLISH: Stage 1 리뷰 low 정리 ----------------
+
+
+def test_rescore_kr_offline_preserves_detail_basis(fresh_db, monkeypatch):
+    """오프라인 재점수가 enrich_kr 가 저장한 detail.basis('FY2025') 를 지우지 않는다."""
+    import json
+
+    import src.data_fetcher as df
+
+    conn = universe._conn()
+    fin = df._parse_dart_all(_dart_fixture()["FNF_holdings"]["list"], "CFS")
+    universe._upsert_universe_row(conn, symbol="007700", market="KR", name="F&F홀딩스", sector="",
+                                  industry="", price=1.0, market_cap=644_995_911_830, dividend_yield=0.0)
+    sc = universe.calculate_kr_scores(fin, 644_995_911_830, name="F&F홀딩스")
+    universe._flush_updates(conn, [
+        universe._build_update(universe._kr_update_cols(sc, fin, 2025), "007700", "KR")])
+    universe.rescore_kr_offline({"007700": 644_995_911_830 * 2})
+    detail = json.loads(conn.execute(
+        "SELECT detail FROM screened WHERE symbol='007700' AND market='KR'").fetchone()[0])
+    assert detail["basis"] == "FY2025"
+    assert detail["raw"]                                              # raw 도 유지
+
+
+def test_kr_update_cols_basis_fallback():
+    import json
+
+    sc = {"detail": {"health": {}, "value": {}}, "roe": 1, "per": 2, "pbr": 3,
+          "health_score": 1, "value_score": 1, "total_score": 1}
+    assert json.loads(universe._kr_update_cols(sc, {}, None)["detail"]).get("basis") is None
+    assert json.loads(universe._kr_update_cols(sc, {}, None, "FY2024")["detail"])["basis"] == "FY2024"
+    assert json.loads(universe._kr_update_cols(sc, {}, 2025, "FY2024")["detail"])["basis"] == "FY2025"
+
+
+def test_kr_scores_one_off_none_labels_suspect_not_loss():
+    """op ≤ 0 이고 3개년 이력 없으면 ni=None(0점) — 표기는 '적자' 가 아니라 '일회성 의심'."""
+    fin = {"net_income": 500.0, "op_income": -10.0, "equity": 1000.0, "equity_total": 1000.0,
+           "debt": 100.0, "assets": 1100.0, "revenue": 1000.0}
+    comp = _kr_comp(universe.calculate_kr_scores(fin, 5000.0, name="테스트"), "health", "흑자")
+    assert comp[1] == 0 and comp[3] == "일회성 의심"
+    # 실제 적자는 그대로 '적자'
+    comp2 = _kr_comp(universe.calculate_kr_scores(dict(fin, net_income=-50.0), 5000.0, name="테스트"),
+                     "health", "흑자")
+    assert comp2[3] == "적자"
+    # 정상 흑자
+    comp3 = _kr_comp(universe.calculate_kr_scores(dict(fin, op_income=400.0), 5000.0, name="테스트"),
+                     "health", "흑자")
+    assert comp3[3] == "흑자"
+
+
+def test_discover_crypto_batches_single_flush(fresh_db, monkeypatch):
+    """CRYPTO 발굴은 행마다 execute 하지 않고 배치(executescript)로 쓴다."""
+    import src.data_fetcher as df
+
+    coins = [{"symbol": f"c{i}", "name": f"Coin{i}", "current_price": 1.0 + i,
+              "market_cap": 5e9 + i, "market_cap_rank": i + 1,
+              "price_change_percentage_24h": 1.0} for i in range(5)]
+    coins.append({"symbol": "tiny", "name": "Tiny", "current_price": 1.0, "market_cap": 1.0})
+    monkeypatch.setattr(df, "fetch_crypto_top", lambda top_n=50: coins)
+    flushes = []
+    real = universe._flush_updates
+
+    def spy(conn, stmts):
+        flushes.append(len(stmts))
+        real(conn, stmts)
+
+    monkeypatch.setattr(universe, "_flush_updates", spy)
+    counts = universe.discover(markets=("CRYPTO",))
+    assert counts["CRYPTO"] == 5
+    assert flushes == [5]                                              # 한 번에 flush
+    assert universe.lookup("C3").market == "CRYPTO"
+    universe.discover(markets=("CRYPTO",))                             # 재실행(upsert) 멱등
+    n = universe._conn().execute("SELECT COUNT(*) FROM screened WHERE market='CRYPTO'").fetchone()[0]
+    assert n == 5
+
+
+def test_build_universe_markets_applies_to_enrich(fresh_db, monkeypatch):
+    from scripts import build_universe as bu
+
+    monkeypatch.delattr(type(storage_mod.get_storage()), "require_remote", raising=False)
+    calls = _patch_build_universe_pipeline(monkeypatch)
+    monkeypatch.setattr("sys.argv", ["build_universe.py", "--enrich", "--markets", "US"])
+    assert bu.main() == bu.EXIT_OK
+    assert calls == ["enrich"]                                         # KR DART 보강 안 함
+
+    calls = _patch_build_universe_pipeline(monkeypatch)
+    monkeypatch.setattr("sys.argv", ["build_universe.py", "--markets", "KR"])
+    assert bu.main() == bu.EXIT_OK
+    assert calls == ["discover", "enrich_kr"]
+
+    calls = _patch_build_universe_pipeline(monkeypatch)
+    monkeypatch.setattr("sys.argv", ["build_universe.py", "--enrich", "--markets", "CRYPTO"])
+    assert bu.main() == bu.EXIT_OK
+    assert calls == []
+
+
+def test_build_universe_kr_refresh_zero_discovered_is_partial(fresh_db, monkeypatch, capsys):
+    from scripts import build_universe as bu
+
+    monkeypatch.delattr(type(storage_mod.get_storage()), "require_remote", raising=False)
+    _patch_build_universe_pipeline(monkeypatch)
+    monkeypatch.setattr(universe, "refresh_kr_prices",
+                        lambda: {"discovered": 0, "rescored": 0, "skipped": 0})
+    monkeypatch.setattr("sys.argv", ["build_universe.py", "--kr-refresh"])
+    assert bu.main() == bu.EXIT_PARTIAL
+    assert "발굴 0건" in capsys.readouterr().out
