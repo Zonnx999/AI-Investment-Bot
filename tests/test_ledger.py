@@ -317,6 +317,74 @@ def test_roll_forward_resume_from_cursor_equals_full_run():
     assert cur2["w"] == pytest.approx(cur_full["w"])
 
 
+def _rescale_case():
+    """1차 실행 후 yfinance 가 이력을 재조정한 패널 (분할·배당락) — 실제 가치 경로는 같음."""
+    dates = pd.bdate_range("2026-07-13", periods=10).strftime("%Y-%m-%d").tolist()
+    rng = np.random.default_rng(7)
+    a = 100 * np.cumprod(1 + rng.normal(0, 0.02, 10))
+    b = 50 * np.cumprod(1 + rng.normal(0, 0.02, 10))
+    s = 400 * np.cumprod(1 + rng.normal(0, 0.01, 10))
+    orig = _panel(dates, A=a, B=b, SPY=s)
+    adj = orig.copy()
+    adj["A"] *= 0.5                                              # 2:1 분할 → 이력 전체 ×0.5
+    adj.loc[adj.index < pd.Timestamp(dates[6]), "B"] *= 0.98     # B 배당락(2%) → 이전 이력 ×0.98
+    adj.loc[adj.index < pd.Timestamp(dates[7]), "SPY"] *= 0.995  # 벤치 배당락
+    sends = [_pick(dates[0], "A", 1), _pick(dates[0], "B", 2),
+             _pick(dates[5], "A", 1), _pick(dates[5], "B", 2), _pick(dates[5], "SPY", 3)]
+    return dates, orig, adj, sends
+
+
+def test_roll_forward_resume_after_history_rescale_equals_full_run():
+    """리뷰 high: 커서 절대 가격 ÷ 재조정된 새 가격 → 가짜 수익·배당 누락 동결 방지."""
+    dates, orig, adj, sends = _rescale_case()
+    part1, cur1, _ = ledger.roll_forward(None, sends, orig, market="US", asof=dates[3])
+    cur1 = json.loads(json.dumps(cur1))
+    window = adj.loc[adj.index >= pd.Timestamp(dates[1])]       # _score_market 의 last-10일 창 모사
+    part2, cur2, _ = ledger.roll_forward(cur1, sends, window, market="US")
+    full, cur_full, _ = ledger.roll_forward(None, sends, adj, market="US")
+    assert [r["date"] for r in part1 + part2] == dates
+    for x, y in zip(full, part1 + part2):
+        assert y["port_ret"] == pytest.approx(x["port_ret"], abs=1e-12)
+        assert y["bench_ret"] == pytest.approx(x["bench_ret"], abs=1e-12)
+    # 분할일에 가짜 -50% 없음, 배당락일 B 수익에 배당 포함 (같은 다운로드 안의 두 가격)
+    assert min(r["port_ret"] for r in part2) > -0.1
+    i6 = dates.index(dates[6])
+    assert full[i6]["port_ret"] != pytest.approx(
+        ledger.roll_forward(None, sends, orig, market="US")[0][i6]["port_ret"])
+    assert cur2["w"] == pytest.approx(cur_full["w"])
+    assert cur2["wb"] == pytest.approx(cur_full["wb"])
+
+
+def test_roll_forward_falls_back_to_cursor_px_when_panel_lacks_prior_price(caplog):
+    dates, orig, _, sends = _rescale_case()
+    full, _, _ = ledger.roll_forward(None, sends, orig, market="US")
+    part1, cur1, _ = ledger.roll_forward(None, sends, orig, market="US", asof=dates[3])
+    window = orig.loc[orig.index >= pd.Timestamp(dates[4])]     # 직전 가격 없는 창 → 커서 폴백
+    with caplog.at_level("WARNING", logger="src.ledger"):
+        part2, _, _ = ledger.roll_forward(json.loads(json.dumps(cur1)), sends, window, market="US")
+    for x, y in zip(full, part1 + part2):
+        assert y["port_ret"] == pytest.approx(x["port_ret"])
+    assert any("폴백" in r.getMessage() for r in caplog.records)
+
+
+def test_summarize_picks_since_entry_robust_to_rescale():
+    dates, orig, adj, sends = _rescale_case()
+    # 1차 실행 = 진입일(dates[5]) 까지, 배당락(dates[6]·[7])은 그 뒤 → 2차 다운로드에서 재조정
+    _, cur1, _ = ledger.roll_forward(None, sends, orig, market="US", asof=dates[5])
+    rows2, cur2, _ = ledger.roll_forward(json.loads(json.dumps(cur1)), sends, adj, market="US")
+    _, cur_full, _ = ledger.roll_forward(None, sends, adj, market="US")
+    s_resume = ledger.summarize("US", rows2, cur2, {}, sends)
+    s_full = ledger.summarize("US", rows2, cur_full, {}, sends)
+    got = {p["symbol"]: (p["ret"], p["xs"]) for p in s_resume["picks"]}
+    want = {p["symbol"]: (p["ret"], p["xs"]) for p in s_full["picks"]}
+    assert got.keys() == want.keys() == {"A", "B", "SPY"}
+    for k in want:
+        assert got[k] == pytest.approx(want[k])
+    # 진입(dates[5]) 이후 A 의 실제 누적 수익과 일치
+    a = orig["A"]
+    assert got["A"][0] == pytest.approx((a.iloc[-1] / a.iloc[5] - 1) * 100)
+
+
 def test_roll_forward_missing_latest_price_stops_without_row():
     closes = _panel(D, A=[100, 110, 120], B=[100, 90, None], SPY=[100, 105, 106])
     sends = [_pick("2026-07-13", "A", 1), _pick("2026-07-13", "B", 2)]
@@ -454,6 +522,26 @@ def test_outcomes_upsert_coalesce_keeps_first_values(fresh_db):
     assert ledger.load_outcomes("US")[("A", "2026-07-13")]["status"] == "done"   # done 동결
     # done 은 다음 계산에서 건너뜀
     assert ledger.update_outcomes(ev, ledger.load_outcomes("US"), closes, market="US") == []
+
+
+def test_update_outcomes_after_history_rescale_uses_same_download_prices():
+    """리뷰 high: 동결된 entry_px ÷ 재조정된 지평 가격 → ret_21 -50% 같은 가짜 값 방지."""
+    closes, dates = _outcome_panel(70)
+    ev = [_pick("2026-07-13", "A")]
+    first = ledger.update_outcomes(ev, {}, closes.iloc[:15], market="US", now_iso="t1")
+    assert first[0]["entry_px"] == 100.0 and first[0]["ret_21"] is None
+    existing = {("A", "2026-07-13"): dict(first[0])}
+    adj = closes.copy()
+    adj["A"] *= 0.5                                               # 2:1 분할 (이력 전체 재조정)
+    adj.loc[adj.index < dates[10], "SPY"] *= 0.99                 # 벤치 배당락
+    rows = ledger.update_outcomes(ev, existing, adj, market="US", now_iso="t2")
+    want = ledger.update_outcomes(ev, {}, adj, market="US", now_iso="t2")[0]
+    r = rows[0]
+    assert r["entry_px"] == 100.0                                 # 저장값 자체는 불변(COALESCE)
+    assert r["ret_21"] == pytest.approx((1.01 ** 21 - 1) * 100)   # 분할 영향 없음
+    assert r["ret_21"] == pytest.approx(want["ret_21"])
+    assert r["xs_21"] == pytest.approx(want["xs_21"])
+    assert r["ret_63"] == pytest.approx(want["ret_63"])
 
 
 def test_update_outcomes_delisted_uses_last_price():
@@ -690,6 +778,48 @@ def test_snapshot_dry_run_writes_nothing(fresh_db):
     res = ledger.snapshot_universe("rescore", rule_version="v1", markets=("US",), dry_run=True)
     assert res["US"]["n_rows"] == len(_US_ROWS) and not res["US"]["written"]
     assert not _table_exists("universe_snapshots")
+
+
+def test_snapshot_hooks_swallow_db_errors(fresh_db, monkeypatch):
+    """리뷰 medium: 스냅샷 훅의 DB 오류가 재점수 유닛을 죽이지 않음 (best-effort)."""
+    _make_screened()
+    real_conn_fn = ledger._conn
+
+    def boom():
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(ledger, "_conn", boom)
+    for fn in (lambda: ledger.snapshot_universe("rescore", markets=("US", "KR")),
+               lambda: ledger.ensure_pre_snapshot(markets=("US", "KR")),
+               lambda: ledger.snapshot_reconstructed()):
+        res = fn()
+        assert all(v["db_error"] and not v["written"] for v in res.values())
+    # 시장 루프 안의 쿼리 실패 (INSERT 타임아웃 등)
+    real_conn = real_conn_fn()
+
+    class Flaky:
+        def __getattr__(self, n):
+            return getattr(real_conn, n)
+
+        def execute(self, sql, params=()):
+            if sql.lstrip().upper().startswith("INSERT"):
+                raise sqlite3.OperationalError("stream timeout")
+            return real_conn.execute(sql, params)
+
+    monkeypatch.setattr(ledger, "_conn", lambda: Flaky())
+    res = ledger.snapshot_universe("rescore", rule_version="v1", markets=("US", "KR"))
+    assert res["US"]["db_error"] and res["KR"]["db_error"]
+    res = ledger.ensure_pre_snapshot(markets=("US",))
+    assert res["US"]["db_error"]
+
+
+def test_cli_snapshot_db_error_exit_2(fresh_db, monkeypatch, capsys):
+    import scripts.ledger as cli
+
+    monkeypatch.setattr(ledger, "snapshot_universe",
+                        lambda *a, **k: {"US": dict(ledger._DB_FAIL)})
+    assert cli.main(["snapshot", "--markets", "US", "--dry-run"]) == 2
+    assert "실패 — DB 오류" in capsys.readouterr().out
 
 
 def test_snapshot_reconstructed_guard(fresh_db):

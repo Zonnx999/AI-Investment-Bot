@@ -655,6 +655,42 @@ def _px(closes: pd.DataFrame, d: pd.Timestamp, sym: str) -> float | None:
     return v if v is not None and v > 0 else None
 
 
+def _prev_valid_frame(closes: pd.DataFrame) -> pd.DataFrame:
+    """각 행(날짜) 기준 **그 이전** 마지막 유효(>0) 가격 — 같은 다운로드 안의 기준가."""
+    num = closes.apply(pd.to_numeric, errors="coerce")
+    return num.where(num > 0).ffill().shift(1)
+
+
+def _base_px(prev_px: pd.DataFrame, d: pd.Timestamp, sym: str,
+             fallback: Any, market: str) -> float | None:
+    """d 일 수익의 기준가 = 패널 안 d 이전 마지막 유효 가격.
+
+    패널에 d 이전 유효 가격이 전혀 없을 때만(장기 정지 등 다운로드 창 밖) 커서에 저장된
+    직전 실행의 가격으로 폴백한다 — 그 사이 배당·분할 재조정이 있었다면 왜곡될 수 있어 WARNING.
+    """
+    if sym in prev_px.columns:
+        v = _num(prev_px.at[d, sym])
+        if v is not None and v > 0:
+            return v
+    fb = _num(fallback)
+    if fb is not None and fb > 0:
+        logger.warning("원장 %s %s %s: 패널에 직전 가격 없음 — 커서 가격으로 폴백 "
+                       "(배당·분할 재조정 시 왜곡 가능)", market, sym, d.strftime("%Y-%m-%d"))
+        return fb
+    logger.warning("원장 %s %s %s: 기준 가격 없음 — 그날 수익 0 처리",
+                   market, sym, d.strftime("%Y-%m-%d"))
+    return None
+
+
+def _ret(p: float | None, prev_px: pd.DataFrame, d: pd.Timestamp, sym: str,
+         fallback: Any, market: str) -> float:
+    """d 일 수익 (가격 없으면 0 — 결측일은 다음 유효일에 누적 반영)."""
+    if p is None:
+        return 0.0
+    base = _base_px(prev_px, d, sym, fallback, market)
+    return p / base - 1.0 if base else 0.0
+
+
 def roll_forward(
     cursor: dict | None,
     sends: Sequence[LedgerPick],
@@ -679,6 +715,10 @@ def roll_forward(
       이후에 가격이 다시 있으면(구멍) 그날 수익 0 → 재등장일에 누적 반영.
     - 새 리스트 종목의 진입가가 없으면 같은 규칙으로 대기 또는 제외(가격 미확보 집계).
 
+    - 수익률은 항상 **같은 다운로드(closes) 안의 두 가격**으로 계산한다(d 가격 / d 이전
+      마지막 유효 가격). yfinance Adj Close 는 배당락·분할 때 과거 이력 전체가 재조정되므로
+      커서의 px/bpx 는 패널에 직전 가격이 없을 때의 폴백으로만 쓴다.
+
     반환: (perf_rows, new_cursor, flags). perf_rows 는 ledger_perf 행 dict 리스트.
     """
     m = market.upper()
@@ -690,6 +730,7 @@ def roll_forward(
         flags["stop_reason"] = "no_bench"
         return [], cur, flags
     closes = closes.sort_index()
+    prev_px = _prev_valid_frame(closes)
     lists = _lists_by_date(sends)
     sent_dates = sorted(lists)
     last = cur["last_date"]
@@ -773,7 +814,9 @@ def roll_forward(
         n_priced = len(stock_px)
         port = bret = 0.0
         if held:
-            r = {y: (stock_px[y] / cur["px"][y] - 1.0) if y in stock_px else 0.0 for y in held}
+            # 수익 = 같은 다운로드 안의 (d 가격 / d 이전 마지막 유효 가격). 커서의 절대 가격과
+            # 나누면 배당·분할로 이력이 재조정될 때 배당 누락·가짜 수익이 동결된다 (리뷰 high).
+            r = {y: _ret(stock_px.get(y), prev_px, d, y, cur["px"].get(y), m) for y in held}
             tot = sum(held.values())
             port = sum(held[y] * r[y] for y in held) / tot if tot > 0 else 0.0
             cur["w"] = {y: held[y] * (1.0 + r[y]) for y in held}
@@ -784,7 +827,7 @@ def roll_forward(
                 cur["miss"][y] = int(cur["miss"].get(y, 0)) + 1
                 if k == "gap":
                     flags["gaps"].append((cur["sym_of"].get(y, y), ds))
-            rb = {b: (bench_px[b] / cur["bpx"][b] - 1.0) if b in bench_px else 0.0
+            rb = {b: _ret(bench_px.get(b), prev_px, d, b, cur["bpx"].get(b), m)
                   for b in set(cur["bench_of"].values())}
             for b in rb:
                 if b in bench_px:
@@ -905,15 +948,20 @@ def update_outcomes(
             out.append(row)               # 패널이 진입일을 덮지 못함 — 다음 실행
             continue
         i0 = cal.get_loc(e)
+        pe, pbe = _px(closes, e, ys), _px(closes, e, bs)
         if row["entry_px"] is None:
-            row["entry_px"] = _px(closes, e, ys)
+            row["entry_px"] = pe
         if row["bench_entry_px"] is None:
-            row["bench_entry_px"] = _px(closes, e, bs)
+            row["bench_entry_px"] = pbe
         if row["entry_px"] is None or row["bench_entry_px"] is None:
             row["status"] = "no_price" if len(cal) - i0 >= SUSPEND_DAYS else "open"
             out.append(row)
             continue
 
+        # 수익 기준가 = 이번 다운로드의 진입일 가격 (배당·분할 재조정과 같은 기준).
+        # 저장된 entry_px 는 패널에서 진입일 가격이 사라진 경우의 폴백.
+        base = pe if pe is not None else _num(row["entry_px"])
+        bbase = pbe if pbe is not None else _num(row["bench_entry_px"])
         last_cal = cal[-1]
         lp, lpd = _ffill_px(closes, ys, last_cal)
         if lp is not None and (row["last_px_date"] is None or lpd >= row["last_px_date"]):
@@ -936,8 +984,8 @@ def update_outcomes(
             b = _px(closes, dh, bs)
             if p is None or b is None:
                 continue
-            ret = (p / row["entry_px"] - 1.0) * 100.0
-            bret = (b / row["bench_entry_px"] - 1.0) * 100.0
+            ret = (p / base - 1.0) * 100.0
+            bret = (b / bbase - 1.0) * 100.0
             row[f"ret_{h}"], row[f"xs_{h}"] = ret, ret - bret
 
         if all(row[f"ret_{h}"] is not None for h in HORIZONS):
@@ -1090,14 +1138,16 @@ def summarize(
         }
 
     v_outs = [o for o in outcomes.values() if o.get("rule_version") == rv]
+    # '진입 후' = 현재 리스트 진입 이후 누적. 커서 절대 가격(px/entry_px) 비교는 배당·분할
+    # 재조정에 취약 → 일별 수익으로 굴린 비중으로 계산. 진입 시 동일가중이므로 w0 = 1/len(w),
+    # w[y]/w0 = 종목 누적 성장, wb[y]/w0 = 같은 비중 벤치 누적 성장.
     picks_now = []
+    w0 = 1.0 / len(cur["w"]) if cur["w"] else None
     for y, sym in cur["sym_of"].items():
-        e, p = _num(cur["entry_px"].get(y)), _num(cur["px"].get(y))
-        b = cur["bench_of"].get(y)
-        be, bp = _num(cur["bench_entry_px"].get(y)), _num(cur["bpx"].get(b)) if b else None
-        if e and p and be and bp:
-            ret = (p / e - 1.0) * 100.0
-            picks_now.append({"symbol": sym, "ret": ret, "xs": ret - (bp / be - 1.0) * 100.0})
+        w, wb = _num(cur["w"].get(y)), _num(cur["wb"].get(y))
+        if w0 and w is not None and wb is not None:
+            ret = (w / w0 - 1.0) * 100.0
+            picks_now.append({"symbol": sym, "ret": ret, "xs": ret - (wb / w0 - 1.0) * 100.0})
 
     cum_p, cum_b = _compound_pct(pr), _compound_pct(br)
     return {
@@ -1404,7 +1454,12 @@ def _score_market(market: str, *, now: datetime, dry_run: bool,
         tickers |= {e.yf_symbol, e.bench_symbol}
     starts = [last or min(s.sent_date for s in sends)]
     starts += [e.sent_date for e in open_events]
-    start = (date.fromisoformat(min(starts)) - timedelta(days=10)).isoformat()
+    # 수익 기준가는 패널 안 직전 유효 가격 → 결측(정지) 중인 종목의 마지막 가격까지 덮도록
+    # 결측 거래일 수만큼 창을 넓힌다 (못 덮으면 커서 가격 폴백 + WARNING).
+    max_miss = max([int(v) for v in list(cur["miss"].values()) + list(cur["bmiss"].values())]
+                   or [0])
+    lookback = 10 + 2 * max_miss
+    start = (date.fromisoformat(min(starts)) - timedelta(days=lookback)).isoformat()
     end = (asof + timedelta(days=1)).isoformat()        # yfinance end 는 배타
     tick = tuple(sorted(tickers))
     logger.info("원장 채점 %s: 티커 %d개, %s~%s", m, len(tick), start, asof)
@@ -1555,39 +1610,64 @@ def snapshot_universe(
 
     as_of 기본 = 그 시장 MAX(updated_at) 날짜. rule_version 기본 = 로드된
     universe.RULE_VERSION, 없으면 'unknown'. dry_run 이면 쓰기 0 (계획만 반환).
+
+    **best-effort — 재점수를 막지 않음**: 재점수(build_universe) 훅에서 불리므로 DB 오류는
+    올리지 않고 시장별 ``{"written": False, "db_error": True, "reason": "DB 오류"}`` 로 돌려준다.
     """
     rv = rule_version or _current_rule_version() or "unknown"
-    conn = _rconn() if dry_run else _conn()
+    conn = _snapshot_conn(dry_run, "스냅샷")
+    if conn is None:
+        return {mk.upper(): dict(_DB_FAIL) for mk in markets}
     now = _utcnow_iso()
     out: dict[str, dict] = {}
     for mk in markets:
         m = mk.upper()
-        rows = _read_screened(conn, m)
-        if not rows:
-            out[m] = {"written": False, "reason": "screened 행 없음"}
-            continue
-        upd = [r[-1] for r in rows if r[-1]]
-        snap_asof = as_of or (max(upd)[:10] if upd else None)
-        if not snap_asof:
-            out[m] = {"written": False, "reason": "updated_at 없음"}
-            continue
-        payload = json.dumps({"cols": list(SNAPSHOT_COLS), "rows": rows},
-                             ensure_ascii=False, separators=(",", ":"))
-        info = {"as_of": snap_asof, "source": source, "rule_version": rv, "n_rows": len(rows),
-                "bytes": len(payload.encode("utf-8")), "written": False}
-        if not dry_run:
-            cur = conn.execute(
-                "INSERT OR IGNORE INTO universe_snapshots "
-                "(as_of, market, source, rule_version, n_rows, payload, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (snap_asof, m, source, rv, len(rows), payload, now),
-            )
-            conn.commit()
-            info["written"] = bool(getattr(cur, "rowcount", 1))
-            logger.info("유니버스 스냅샷 %s %s (%s, %s): %d행 %.0fKB", m, snap_asof, source, rv,
-                        len(rows), info["bytes"] / 1024)
-        out[m] = info
+        try:
+            out[m] = _snapshot_one(conn, m, source, rv, as_of, now, dry_run)
+        except (StorageError, *DB_ERRORS):
+            logger.warning("유니버스 스냅샷 %s: DB 오류 — 건너뜀 (재점수는 계속)", m, exc_info=True)
+            out[m] = dict(_DB_FAIL)
     return out
+
+
+_DB_FAIL = {"written": False, "db_error": True, "reason": "DB 오류"}
+
+
+def _snapshot_conn(dry_run: bool, what: str):
+    """스냅샷 계열 connection — 스키마 초기화·sync 실패도 best-effort (None 반환)."""
+    try:
+        return _rconn() if dry_run else _conn()
+    except (StorageError, *DB_ERRORS):
+        logger.warning("%s: DB 연결/스키마 오류 — 건너뜀 (재점수는 계속)", what, exc_info=True)
+        return None
+
+
+def _snapshot_one(conn, m: str, source: str, rv: str, as_of: str | None, now: str,
+                  dry_run: bool) -> dict:
+    """한 시장 스냅샷 (DB 오류는 호출부가 처리)."""
+    rows = _read_screened(conn, m)
+    if not rows:
+        return {"written": False, "reason": "screened 행 없음"}
+    upd = [r[-1] for r in rows if r[-1]]
+    snap_asof = as_of or (max(upd)[:10] if upd else None)
+    if not snap_asof:
+        return {"written": False, "reason": "updated_at 없음"}
+    payload = json.dumps({"cols": list(SNAPSHOT_COLS), "rows": rows},
+                         ensure_ascii=False, separators=(",", ":"))
+    info = {"as_of": snap_asof, "source": source, "rule_version": rv, "n_rows": len(rows),
+            "bytes": len(payload.encode("utf-8")), "written": False}
+    if not dry_run:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO universe_snapshots "
+            "(as_of, market, source, rule_version, n_rows, payload, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (snap_asof, m, source, rv, len(rows), payload, now),
+        )
+        conn.commit()
+        info["written"] = bool(getattr(cur, "rowcount", 1))
+        logger.info("유니버스 스냅샷 %s %s (%s, %s): %d행 %.0fKB", m, snap_asof, source, rv,
+                    len(rows), info["bytes"] / 1024)
+    return info
 
 
 def ensure_pre_snapshot(*, markets: Sequence[str] = ("US", "KR", "CRYPTO"),
@@ -1596,22 +1676,29 @@ def ensure_pre_snapshot(*, markets: Sequence[str] = ("US", "KR", "CRYPTO"),
     덮어쓰기 전 상태를 source='pre_rescore' 로 저장 (멱등: 같으면 아무것도 안 함).
 
     규칙 버전은 직전 스냅샷의 것(없으면 'v0' — 원장 이전 데이터는 v0 규칙 산출물).
+    **best-effort — 재점수를 막지 않음**: DB 오류는 시장별 ``db_error`` 결과로 돌려준다.
     """
-    conn = _rconn() if dry_run else _conn()
+    conn = _snapshot_conn(dry_run, "재점수 전 스냅샷")
+    if conn is None:
+        return {mk.upper(): dict(_DB_FAIL) for mk in markets}
     out: dict[str, dict] = {}
     for mk in markets:
         m = mk.upper()
-        mx = _screened_max_updated(conn, m)
-        if not mx:
-            out[m] = {"written": False, "reason": "screened 행 없음"}
-            continue
-        latest = latest_snapshot(m, conn)
-        if latest and latest["as_of"] == mx[:10]:
-            out[m] = {"written": False, "reason": f"이미 있음 ({latest['as_of']}, {latest['source']})"}
-            continue
-        rv = (latest or {}).get("rule_version") or BACKFILL_RULE_VERSION
-        out[m] = snapshot_universe("pre_rescore", rule_version=rv, as_of=mx[:10], markets=(m,),
-                                   dry_run=dry_run)[m]
+        try:
+            mx = _screened_max_updated(conn, m)
+            if not mx:
+                out[m] = {"written": False, "reason": "screened 행 없음"}
+                continue
+            latest = latest_snapshot(m, conn)
+            if latest and latest["as_of"] == mx[:10]:
+                out[m] = {"written": False,
+                          "reason": f"이미 있음 ({latest['as_of']}, {latest['source']})"}
+                continue
+            rv = (latest or {}).get("rule_version") or BACKFILL_RULE_VERSION
+            out[m] = _snapshot_one(conn, m, "pre_rescore", rv, mx[:10], _utcnow_iso(), dry_run)
+        except (StorageError, *DB_ERRORS):
+            logger.warning("재점수 전 스냅샷 %s: DB 오류 — 건너뜀 (재점수는 계속)", m, exc_info=True)
+            out[m] = dict(_DB_FAIL)
     return out
 
 
@@ -1619,22 +1706,30 @@ def snapshot_reconstructed(*, as_of: str = BACKFILL_ASOF, markets: Sequence[str]
                            dry_run: bool = False) -> dict[str, dict]:
     """07-10 동결 DB 를 'reconstructed' 스냅샷으로 저장. 가드:
     screened MAX(updated_at) ≤ 2026-07-11T00:00Z 이거나, 이미 as_of 스냅샷(pre_rescore 등)이 있어야 함.
+    DB 오류는 올리지 않고 시장별 ``db_error`` 결과로 돌려준다 (best-effort).
     """
-    conn = _rconn() if dry_run else _conn()
+    conn = _snapshot_conn(dry_run, "복원 스냅샷")
+    if conn is None:
+        return {mk.upper(): dict(_DB_FAIL) for mk in markets}
     out: dict[str, dict] = {}
     for mk in markets:
         m = mk.upper()
-        existing = load_snapshot(m, as_of, conn)
-        if existing:
-            out[m] = {"written": False, "reason": f"{as_of} 스냅샷 이미 있음 ({existing['source']})"}
-            continue
-        mx = _parse_iso(_screened_max_updated(conn, m))
-        if mx is None or mx > BACKFILL_MAX_UPDATED:
-            out[m] = {"written": False, "refused": True,
-                      "reason": f"재점수됨 (MAX(updated_at)={mx}) — {as_of} 복원 불가"}
-            continue
-        out[m] = snapshot_universe("reconstructed", rule_version=BACKFILL_RULE_VERSION,
-                                   as_of=as_of, markets=(m,), dry_run=dry_run)[m]
+        try:
+            existing = load_snapshot(m, as_of, conn)
+            if existing:
+                out[m] = {"written": False,
+                          "reason": f"{as_of} 스냅샷 이미 있음 ({existing['source']})"}
+                continue
+            mx = _parse_iso(_screened_max_updated(conn, m))
+            if mx is None or mx > BACKFILL_MAX_UPDATED:
+                out[m] = {"written": False, "refused": True,
+                          "reason": f"재점수됨 (MAX(updated_at)={mx}) — {as_of} 복원 불가"}
+                continue
+            out[m] = _snapshot_one(conn, m, "reconstructed", BACKFILL_RULE_VERSION, as_of,
+                                   _utcnow_iso(), dry_run)
+        except (StorageError, *DB_ERRORS):
+            logger.warning("복원 스냅샷 %s: DB 오류 — 건너뜀", m, exc_info=True)
+            out[m] = dict(_DB_FAIL)
     return out
 
 

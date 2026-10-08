@@ -45,7 +45,8 @@ def _print_snapshot_result(res: dict) -> None:
             print(f"{m}: 쓰기 없음 {info['as_of']} ({info['source']}) {info['n_rows']}행 "
                   f"— dry-run 이거나 같은 as_of 가 이미 있음")
         else:
-            mark = "거부" if info.get("refused") else "생략"
+            mark = ("거부" if info.get("refused")
+                    else "실패" if info.get("db_error") else "생략")
             print(f"{m}: {mark} — {info.get('reason')}")
 
 
@@ -63,7 +64,7 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
     _print_snapshot_result(res)
     if not args.dry_run:
         ledger.get_storage().sync()
-    return 2 if any(v.get("refused") for v in res.values()) else 0
+    return 2 if any(v.get("refused") or v.get("db_error") for v in res.values()) else 0
 
 
 def cmd_backfill(args: argparse.Namespace) -> int:
