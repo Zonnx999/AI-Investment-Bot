@@ -199,8 +199,16 @@ class Storage:
         Turso 설정(db_path 명시 테스트 제외)일 때만 활성 → 테스트는 항상 로컬.
         """
         url = settings.turso_database_url
+        # init_sync — 이 연결이 '원격과 맞춰진 상태인가' 를 호출부에 알림 (health/export/
+        # build_universe 가 강등 런을 구분하는 데 사용). 모든 return 경로에서 설정.
+        #   local   Turso 미설정 또는 경로 주입(테스트) — 원래부터 로컬 전용
+        #   offline QUANT_BOT_OFFLINE 킬스위치 (의도된 우회)
+        #   timeout 초기 pull 프로브 타임아웃 → 별도 오프라인 파일로 강등 (degraded)
+        #   error   프로브 빠른 실패 → stale 레플리카로 진행 (쓰기는 원격 시도)
+        #   ok      프로브가 방금 pull 완료
         # db_path 를 명시 주입한 경우(테스트)는 항상 로컬 — 원격 동기화 안 함
         if not url or self._db_path_was_injected:
+            self.init_sync = "local"
             return sqlite3.connect(self.db_path)
         if _offline_mode():
             # 킬스위치: Turso 완전 우회. 레플리카 파일을 sqlite3 로 직접 열면
@@ -208,6 +216,7 @@ class Storage:
             offline = self._offline_path()
             logger.warning("QUANT_BOT_OFFLINE — Turso 우회, 로컬 전용 캐시: %s", offline)
             self.db_path = offline
+            self.init_sync = "offline"
             return sqlite3.connect(offline)
 
         try:
@@ -233,6 +242,7 @@ class Storage:
                 "명시 우회 가능, 레플리카 복구는 data/*.db* 삭제 후 재싱크)", offline,
             )
             self.db_path = offline
+            self.init_sync = "timeout"
             return sqlite3.connect(offline)
         # "error" 는 빠른 실패 (인증·거부 등) — 종전 동작대로 stale 레플리카로 진행.
         # "ok" 면 자식이 방금 sync 했으므로 부모는 초기 sync 생략 (이중 pull 방지).
@@ -245,6 +255,7 @@ class Storage:
             raise StorageError(f"Turso 연결 실패: {self.db_path}") from e
 
         self.is_turso = True
+        self.init_sync = "error" if status == "error" else "ok"
         logger.info("Turso 임베디드 레플리카 연결: %s (초기 pull=%s)", self.db_path, status)
         return conn
 
@@ -289,8 +300,14 @@ class Storage:
         logger.debug("Turso sync(%s) OK", what)
         return "ok"
 
-    def sync(self) -> None:
+    def sync(self) -> str:
         """클라우드와 동기화. 쓰기 배치 후 호출. 로컬 sqlite3 면 no-op.
+
+        반환 (호출부가 무시해도 됨 — 하위호환):
+          "local"            Turso 아님 (미설정·오프라인·강등 파일) → no-op
+          "skipped-degraded" 이전 push 타임아웃으로 이 프로세스의 push 를 끈 상태
+          "unreachable"      소켓 사전점검 실패 → 이번 push 건너뜀
+          "ok" / "error" / "timeout"  _safe_sync 결과
 
         주의: 임베디드 레플리카에서 **쓰기(execute/commit)는 이미 원격 왕복**이고
         (§4.10 #4 실측), sync() 는 레플리카 프레임 동기화다. push 전에
@@ -300,19 +317,45 @@ class Storage:
         이후 push 는 스킵 (systemd 재시작이 복구 수단).
         """
         if not self.is_turso:
-            return
+            return "local"
         if getattr(self, "_sync_degraded", False):
             logger.debug("Turso push 스킵 — 이전 sync 타임아웃으로 강등 상태")
-            return
+            return "skipped-degraded"
         url = settings.turso_database_url
         if url and not _remote_reachable(url):
             logger.warning("Turso 도달 불가 (소켓 사전점검 실패) — push 건너뜀, "
                            "다음 호출에서 재시도")
-            return
-        if self._safe_sync(self._conn, "push") == "timeout":
+            return "unreachable"
+        result = self._safe_sync(self._conn, "push")
+        if result == "timeout":
             self._sync_degraded = True
             logger.warning("Turso push 타임아웃 — 이 프로세스의 이후 push 는 스킵 "
                            "(재시작 시 재동기화)")
+        return result
+
+    @property
+    def degraded(self) -> bool:
+        """초기 pull 타임아웃으로 오프라인 파일에 강등됐는가 (발굴 종목·구독자 등 원격
+        데이터가 없는 cold 파일). 다이제스트는 이 경우 브로드캐스트를 보류해야 함.
+        "error"(stale 레플리카)·"offline"(의도된 킬스위치)은 강등이 아님."""
+        return getattr(self, "init_sync", "local") == "timeout"
+
+    def require_remote(self, what: str) -> None:
+        """원격(Turso)과 맞춰진 연결이 필수인 작업의 가드.
+
+        Turso 가 설정됐는데(url 있음 + 경로 미주입) 초기 pull 이 "ok" 가 아니면
+        StorageError — 오프라인/stale 파일에 조용히 쓰거나(재점수) 낡은 데이터로
+        공개 파일을 덮어쓰는(export) 사고를 막음. Turso 미설정(로컬 전용)이면 통과.
+        """
+        remote_configured = bool(settings.turso_database_url) and not self._db_path_was_injected
+        if not remote_configured:
+            return
+        state = getattr(self, "init_sync", "local")
+        if state != "ok":
+            raise StorageError(
+                f"{what}: Turso 원격 연결 필요 — 초기 동기화 상태 {state!r} "
+                "(timeout=오프라인 파일 강등, error=stale 레플리카, offline=QUANT_BOT_OFFLINE)"
+            )
 
     def _resolve_path(self, db_path: Path | None) -> Path:
         self._db_path_was_injected = db_path is not None
@@ -417,8 +460,11 @@ class Storage:
 
     # ---------------- 영속 상태 (TTL 없음 — 신호 엔진의 실행 간 비교용) ----------------
 
-    def put_state(self, namespace: str, key: str, obj: Any) -> None:
-        """상태 저장. 캐시와 달리 만료 없음 — 다음 실행에서 '이전 값' 으로 사용."""
+    def put_state(self, namespace: str, key: str, obj: Any) -> bool:
+        """상태 저장. 캐시와 달리 만료 없음 — 다음 실행에서 '이전 값' 으로 사용.
+
+        반환: 성공 True / DB 오류로 실패 False (best-effort — 예외는 삼킴).
+        호출부는 무시해도 되고(하위호환), 헬스 리포트는 state_write_ok 로 씀."""
         try:
             self._conn.execute(
                 "INSERT OR REPLACE INTO state (namespace, key, payload, updated_at) "
@@ -429,6 +475,8 @@ class Storage:
         except _DB_ERRORS:
             # best-effort (§4.4) — libsql ValueError 포착 (§4.10 #9, get_state 와 대칭)
             logger.warning("상태 쓰기 실패 (%s/%s) — 무시", namespace, key, exc_info=True)
+            return False
+        return True
 
     def get_state(self, namespace: str, key: str) -> Any | None:
         """상태 조회. 없거나 손상 시 None (= 첫 실행 취급)."""
