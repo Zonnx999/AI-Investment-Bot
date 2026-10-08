@@ -169,3 +169,75 @@ def test_fmp_get_rejects_error_shaped_200(monkeypatch):
             df._fmp_get("quote", {"symbol": "AAPL"})
     finally:
         object.__setattr__(df.settings, "fmp_api_key", prev)
+
+
+# ---------------- FMP TTM (WP-SCORE) ----------------
+
+
+def _ttm_fixture():
+    import json
+    from pathlib import Path
+
+    return json.loads((Path(__file__).parent / "fixtures" / "fmp_ttm_responses.json").read_text(encoding="utf-8"))
+
+
+def test_fetch_key_metrics_ttm_returns_first_row_and_hits_ttm_endpoint(monkeypatch):
+    import src.data_fetcher as df
+
+    rows = _ttm_fixture()["EOG"]["key-metrics-ttm"]
+    calls = []
+
+    def fake_get(endpoint, params=None):
+        calls.append((endpoint, params))
+        return rows
+
+    monkeypatch.setattr(df, "_fmp_get", fake_get)
+    out = df.fetch_key_metrics_ttm("EOG")
+    assert calls == [("key-metrics-ttm", {"symbol": "EOG"})]
+    assert out["evToEBITDATTM"] == pytest.approx(5.78, abs=0.01)
+    assert out["marketCap"] == 76810428090
+
+
+def test_fetch_ratios_ttm_returns_first_row_and_hits_ttm_endpoint(monkeypatch):
+    import src.data_fetcher as df
+
+    rows = _ttm_fixture()["EOG"]["ratios-ttm"]
+    calls = []
+    monkeypatch.setattr(df, "_fmp_get", lambda e, p=None: calls.append((e, p)) or rows)
+    out = df.fetch_ratios_ttm("EOG")
+    assert calls == [("ratios-ttm", {"symbol": "EOG"})]
+    assert "priceToBookRatioTTM" in out and "grossProfitMarginTTM" in out
+
+
+@pytest.mark.parametrize("payload", [[], None, {}, [None], ["x"], {"Error Message": "x"}])
+def test_fetch_ttm_unsupported_or_malformed_returns_empty_dict(monkeypatch, payload):
+    import src.data_fetcher as df
+
+    monkeypatch.setattr(df, "_fmp_get", lambda *a, **k: payload)
+    assert df.fetch_key_metrics_ttm("ZZZ") == {}
+    assert df.fetch_ratios_ttm("ZZZ") == {}
+
+
+def test_fetch_ttm_requires_key_before_any_network(no_api_keys):
+    from src.data_fetcher import fetch_key_metrics_ttm, fetch_ratios_ttm
+
+    with pytest.raises(MissingApiKeyError):
+        fetch_key_metrics_ttm("EOG")
+    with pytest.raises(MissingApiKeyError):
+        fetch_ratios_ttm("EOG")
+
+
+def test_ttm_fetchers_use_distinct_cache_namespaces():
+    """@cached 네임스페이스가 함수에 올바르게 붙었는지 (§4.10 #2) — 소스 정적 확인."""
+    import inspect
+    import re
+
+    import src.data_fetcher as df
+
+    src_text = inspect.getsource(df)
+    pairs = {ns: fn for ns, fn in re.findall(r'@cached\("(\w+)",[^\n]*\)\ndef (\w+)\(', src_text)}
+    assert pairs["fmp_key_metrics_ttm"] == "fetch_key_metrics_ttm"
+    assert pairs["fmp_ratios_ttm"] == "fetch_ratios_ttm"
+    assert pairs["fmp_key_metrics"] == "fetch_key_metrics"
+    assert pairs["fmp_ratios"] == "fetch_ratios"
+    assert pairs["fmp_quote"] == "fetch_quote"

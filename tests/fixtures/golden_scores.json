@@ -1,0 +1,71 @@
+{
+ "inputs": {
+  "EOG": {
+   "price": 144.21,
+   "lastAnnualDividend": 4.08,
+   "sector": "Energy",
+   "industry": "Oil & Gas Exploration & Production"
+  },
+  "HG": {
+   "price": 31.9,
+   "lastAnnualDividend": 2,
+   "sector": "Financial Services",
+   "industry": "Insurance - Reinsurance"
+  },
+  "CALM": {
+   "price": 62.7,
+   "lastAnnualDividend": 4.812,
+   "sector": "Consumer Defensive",
+   "industry": "Agricultural Farm Products"
+  },
+  "JPM": {
+   "price": 329.58,
+   "lastAnnualDividend": 6.15,
+   "sector": "Financial Services",
+   "industry": "Banks - Diversified"
+  },
+  "MGR": {
+   "price": 18.73,
+   "lastAnnualDividend": 1.46879,
+   "sector": "Financial Services",
+   "industry": "Asset Management"
+  }
+ },
+ "golden": {
+  "EOG": {
+   "is_fin": false,
+   "ttm_usable": true,
+   "health": 88,
+   "value": 79,
+   "total": 84
+  },
+  "HG": {
+   "is_fin": true,
+   "ttm_usable": true,
+   "health": 60,
+   "value": 73,
+   "total": 66
+  },
+  "CALM": {
+   "is_fin": false,
+   "ttm_usable": true,
+   "health": 42,
+   "value": 47,
+   "total": 44
+  },
+  "JPM": {
+   "is_fin": true,
+   "ttm_usable": true,
+   "health": 60,
+   "value": 65,
+   "total": 62
+  },
+  "MGR": {
+   "is_fin": true,
+   "ttm_usable": true,
+   "health": 60,
+   "value": 70,
+   "total": 65
+  }
+ }
+}

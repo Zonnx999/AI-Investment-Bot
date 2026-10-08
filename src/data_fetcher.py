@@ -690,6 +690,37 @@ def fetch_ratios(
 
 
 # ----------------------------------------------------------------------
+# FMP TTM (최근 4분기 합산) — 스크리너 점수의 기준 데이터
+# ----------------------------------------------------------------------
+# 연간 key-metrics 는 회계연도말 시총·이익 기준이라 현재 주가와 어긋난다
+# (예: EOG 시총 연간 56.6B vs TTM 76.8B, CALM 이익수익률 8.9% -> 2.0%).
+# 응답은 list[dict] 1행, 모든 지표 키에 'TTM' 접미사(marketCap/symbol 제외),
+# date/fiscalYear 필드 없음. priceToBookRatioTTM·grossProfitMarginTTM·배당은
+# ratios-ttm 에만 있다 (screener.merge_ttm 이 병합).
+# 빈 {} 는 @cached 규약상 캐시되지 않음 (의도).
+TTL_TTM = timedelta(hours=12)   # 시총 기반 비율이라 일 단위로 변함
+
+
+def _first_row(data) -> dict:
+    """FMP TTM 응답(list[dict] 1행) -> dict. 빈/비정상 모양은 {} (미지원 종목)."""
+    if isinstance(data, list) and data and isinstance(data[0], dict):
+        return data[0]
+    return {}
+
+
+@cached("fmp_key_metrics_ttm", TTL_TTM, "json")
+def fetch_key_metrics_ttm(ticker: str) -> dict:
+    """key-metrics-ttm 1행 (evToEBITDATTM, earningsYieldTTM, ROE/ROIC 등). 없으면 {}."""
+    return _first_row(_fmp_get("key-metrics-ttm", {"symbol": ticker}))
+
+
+@cached("fmp_ratios_ttm", TTL_TTM, "json")
+def fetch_ratios_ttm(ticker: str) -> dict:
+    """ratios-ttm 1행 (priceToBookRatioTTM, grossProfitMarginTTM, dividendPerShareTTM 등). 없으면 {}."""
+    return _first_row(_fmp_get("ratios-ttm", {"symbol": ticker}))
+
+
+# ----------------------------------------------------------------------
 # KRX (한국거래소 정보데이터시스템 OpenAPI) — 한국 전 종목 (Phase 9)
 # ----------------------------------------------------------------------
 #

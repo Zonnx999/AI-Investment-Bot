@@ -37,8 +37,10 @@ from typing import Iterable, TypedDict
 from src.data_fetcher import (
     fetch_crypto_top,
     fetch_key_metrics,
+    fetch_key_metrics_ttm,
     fetch_quote,
     fetch_ratios,
+    fetch_ratios_ttm,
 )
 from src.exceptions import DataFetchError
 from src.logger import get_logger
@@ -75,12 +77,46 @@ class ScoreCard:
         return {"total": self.total, "components": [c.as_tuple() for c in self.components]}
 
 
-def latest_fundamentals(ticker: str) -> dict:
-    """key-metrics + ratios 최신 행 병합 — 점수 계산용 통합 dict.
+# ----------------------------------------------------------------------
+# TTM 어댑터 — FMP key-metrics-ttm / ratios-ttm 을 기존 점수 함수가 읽는 키 이름으로 변환.
+# 실응답: 모든 지표 키가 'TTM' 접미사 (marketCap·symbol 만 무접미사). 접미사를 떼면
+# 연간 key-metrics/ratios 와 같은 키 이름이 된다 (evToEBITDATTM -> evToEBITDA).
+# ----------------------------------------------------------------------
 
-    grossProfitMargin·priceToBookRatio 는 ratios 에만, 나머지는 key-metrics 에 있어
-    둘 다 받아 병합 (충돌 시 key-metrics 우선). 둘 다 비면 {} 반환.
-    """
+# 점수에 직접 쓰이는 핵심 키 — 이 중 TTM_MIN_CORE 개 이상이 유한 숫자여야 TTM 사용 가능.
+# has_fundamentals 보다 엄격: marketCap 만 있는 신규상장 행이 '조용한 0점'이 되는 것을 막는다.
+TTM_CORE_KEYS: tuple[str, ...] = (
+    "evToEBITDA", "evToSales", "earningsYield", "freeCashFlowYield",
+    "returnOnEquity", "priceToBookRatio", "grossProfitMargin", "netDebtToEBITDA",
+)
+TTM_MIN_CORE = 3
+
+
+def strip_ttm(row: dict) -> dict:
+    """키 끝의 'TTM' 접미사 제거 (evToEBITDATTM -> evToEBITDA). 접미사 없는 키는 그대로."""
+    return {(k[:-3] if k.endswith("TTM") and len(k) > 3 else k): v for k, v in row.items()}
+
+
+def merge_ttm(km_row: dict | None, rt_row: dict | None) -> dict:
+    """key-metrics-ttm + ratios-ttm 병합 (충돌 시 key-metrics 우선 — 연간 병합과 동일)."""
+    merged = strip_ttm(km_row or {})
+    for k, v in strip_ttm(rt_row or {}).items():
+        merged.setdefault(k, v)
+    return merged
+
+
+def ttm_usable(metrics: dict, min_core: int = TTM_MIN_CORE) -> bool:
+    """TTM 병합 결과가 점수 계산에 쓸 만한지 (핵심 키 중 유한 숫자가 min_core 개 이상)."""
+    n = 0
+    for k in TTM_CORE_KEYS:
+        v = metrics.get(k)
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v):
+            n += 1
+    return n >= min_core
+
+
+def _annual_fundamentals(ticker: str) -> dict:
+    """연간 key-metrics + ratios 최신 행 병합 (TTM 폴백 경로)."""
     merged: dict = {}
     km = fetch_key_metrics(ticker, limit=1)
     if not km.empty:
@@ -89,6 +125,29 @@ def latest_fundamentals(ticker: str) -> dict:
     if not rt.empty:
         for k, v in rt.iloc[-1].to_dict().items():
             merged.setdefault(k, v)
+    return merged
+
+
+def latest_fundamentals(ticker: str, *, basis: str = "ttm") -> dict:
+    """점수 계산용 통합 fundamentals dict.
+
+    basis="ttm" (기본): key-metrics-ttm + ratios-ttm 병합 (현재 시총·최근 4분기 기준).
+      TTM 이 비었거나 핵심 키가 부족하면(미지원·신규상장) 연간으로 폴백.
+    basis="annual": 연간 key-metrics + ratios 최신 행 병합 (회계연도말 기준).
+
+    반환 dict 의 ``_basis`` 는 "ttm" | "annual" — 어느 기준으로 계산됐는지 기록용
+    (문자열이라 has_fundamentals/_safe 에 영향 없음). 둘 다 비면 {} (``_basis`` 없음).
+    grossProfitMargin·priceToBookRatio·배당은 ratios 에만 있어 둘 다 받아 병합.
+    """
+    if basis == "ttm":
+        m = merge_ttm(fetch_key_metrics_ttm(ticker), fetch_ratios_ttm(ticker))
+        if ttm_usable(m):
+            m["_basis"] = "ttm"
+            return m
+        logger.info("TTM 사용 불가 — %s: 연간 데이터로 폴백", ticker)
+    merged = _annual_fundamentals(ticker)
+    if merged:
+        merged["_basis"] = "annual"
     return merged
 
 
@@ -183,22 +242,66 @@ def _safe(d: dict, key: str, default: float = 0.0) -> float:
     return f
 
 
-def health_scorecard(metrics: dict) -> ScoreCard:
-    """재무 건전성 (0~100) — 학술 근거 기반 Quality 팩터 (병합 metrics 필요).
+# ----------------------------------------------------------------------
+# 금융업 중립화 · 이상치 격리
+# ----------------------------------------------------------------------
+# 은행·보험·자산운용은 총이익률·ROIC·순부채/EBITDA·이익의 질·EV 배수·FCF 가 업종 특성상
+# 의미가 없거나 뒤집힌다 (예: HG ROIC 92.8%, JPM FCF수익률 -18%). 제외 후 100점 환산(재환산)은
+# 남은 항목이 포화되기 쉬워 금융 비중이 오히려 98% 로 악화(실측) -> '만점의 50% 중립 대치'.
+# 점수 구조·Component 형식은 그대로라 /stock·scan·대시보드 소비처가 무변경.
+FIN_EXEMPT_INDUSTRIES = frozenset({
+    "Financial - Data & Stock Exchanges",   # SPGI·CME 류 — 자산경량, 정상 지표 적용
+    "Insurance - Brokers",                  # AON 류
+})
+# FMP 가 'Financial - Credit Services' 로 묶는 자산경량 지급결제망 + FMP 오분류 종목.
+# 이 종목들의 총이익률·ROIC·순부채/EBITDA·EV 배수·FCF 는 의미 있는 지표라 중립화하지 않는다.
+# (대출 금융사 COF·SYF·ALLY 는 그대로 중립 대상)
+FIN_EXEMPT_SYMBOLS = frozenset({
+    "V", "MA", "PYPL", "GPN", "FI", "FISV", "FIS",
+    "SUNB",                                 # Sunbelt Rentals — 장비 임대업, FMP 오분류
+})
+FIN_NEUTRAL_LABEL = "금융중립"
+NEUTRAL_FRAC = 0.5      # 중립 = 만점의 50%
+EY_OUTLIER = 0.35       # 이익수익률 35% 초과 = 파생증권/분모 오류 -> 중립 (전 업종)
+FCF_OUTLIER = 0.40      # FCF수익률 40% 초과 = 이상치 -> 중립 (전 업종)
 
-    1. 총이익률 (Gross Profitability, Novy-Marx 2013) 25 — 가장 강력한 Quality 신호
-    2. ROIC (투하자본수익률) 20 — 자본비용 초과 여부 = 진짜 가치창출
+
+def is_balance_sheet_financial(
+    sector: str | None, industry: str | None, symbol: str | None = None,
+) -> bool:
+    """대차대조표형 금융업(은행·보험·자산운용 등) 여부 — 점수 중립화 대상.
+
+    symbol 은 선택값 (기본 None -> 기존 2인자 호출과 호환). 지급결제망 등
+    FIN_EXEMPT_SYMBOLS 는 industry 가 Credit Services 여도 비금융으로 취급.
+    """
+    if symbol and symbol.upper() in FIN_EXEMPT_SYMBOLS:
+        return False
+    return (sector or "") == "Financial Services" and (industry or "") not in FIN_EXEMPT_INDUSTRIES
+
+
+def _neutral(label: str, max_points: float, why: str) -> Component:
+    return Component(label, max_points * NEUTRAL_FRAC, max_points, why)
+
+
+def health_scorecard(metrics: dict, *, is_fin: bool = False) -> ScoreCard:
+    """재무 건전성 (0~100) — 퀄리티 팩터 (병합 metrics 필요).
+
+    1. 매출총이익률 25 — grossProfitMargin(매출총이익/매출). 학술 Gross Profitability
+       (매출총이익/총자산, Novy-Marx) 와는 다른 지표라 라벨을 정정 (SCORE-11)
+    2. ROIC (투하자본수익률) 20
     3. ROE 20
     4. 순부채/EBITDA 20 (낮을수록↑)
     5. 이익의 질 (incomeQuality, CFO/순이익) 10
-    6. 유동비율 5
+    6. 유동비율 5 — 결측/0(FMP 가 결측을 0 으로 줌)은 0점 처벌 대신 중립
+
+    is_fin=True (은행·보험·운용): ROE 만 실측하고 나머지 5개는 50% 중립 -> 건전성 최대 60.
     """
     gp = _safe(metrics, "grossProfitMargin") * 100        # ratios
     roic = _safe(metrics, "returnOnInvestedCapital") * 100  # key-metrics
     roe = _safe(metrics, "returnOnEquity") * 100
     nde = _safe(metrics, "netDebtToEBITDA", 10.0)
     iq = _safe(metrics, "incomeQuality")
-    cr = _safe(metrics, "currentRatio", 1.0)
+    cr = _safe(metrics, "currentRatio", 0.0)   # 결측/NaN/비숫자 -> 0 (아래에서 중립 처리)
 
     # 순부채/EBITDA: '낮을수록 좋음' 공식은 EBITDA>0 일 때만 성립. 음수 비율은 두 갈래 —
     # 순현금(EBITDA>0, 우량) vs 적자 EBITDA(부실). 후자에 만점을 주는 역설(§4.10 #5)을
@@ -216,35 +319,48 @@ def health_scorecard(metrics: dict) -> ScoreCard:
         nde_pts = _clip(20.0 - nde * 2.5, 0, 20)
 
     comps = [
-        Component("총이익률(GP)", _clip(gp * 0.625, 0, 25), 25, f"{gp:.0f}%"),
-        Component("ROIC", _clip(roic * 1.0, 0, 20), 20, f"{roic:.1f}%"),
+        _neutral("매출총이익률", 25, FIN_NEUTRAL_LABEL) if is_fin
+        else Component("매출총이익률", _clip(gp * 0.625, 0, 25), 25, f"{gp:.0f}%"),
+        _neutral("ROIC", 20, FIN_NEUTRAL_LABEL) if is_fin
+        else Component("ROIC", _clip(roic * 1.0, 0, 20), 20, f"{roic:.1f}%"),
         Component("ROE", _clip(roe * 1.67, 0, 20), 20, f"{roe:.1f}%"),
-        Component("순부채/EBITDA", nde_pts, 20, nde_detail),
-        Component("이익의 질", _clip(iq * 2.0, 0, 10), 10, f"{iq:.2f}"),
-        Component("유동비율", _clip(min(cr, 3.0) * 1.67, 0, 5), 5, f"{cr:.2f}"),
+        _neutral("순부채/EBITDA", 20, FIN_NEUTRAL_LABEL) if is_fin
+        else Component("순부채/EBITDA", nde_pts, 20, nde_detail),
+        _neutral("이익의 질", 10, FIN_NEUTRAL_LABEL) if is_fin
+        else Component("이익의 질", _clip(iq * 2.0, 0, 10), 10, f"{iq:.2f}"),
     ]
+    if is_fin:
+        comps.append(_neutral("유동비율", 5, FIN_NEUTRAL_LABEL))
+    elif cr <= 0:                         # 결측/0 = 데이터 없음 (자산운용 등) — 0점 대신 중립
+        comps.append(_neutral("유동비율", 5, "결측→중립"))
+    else:
+        comps.append(Component("유동비율", _clip(min(cr, 3.0) * 1.67, 0, 5), 5, f"{cr:.2f}"))
     return ScoreCard(round(min(100.0, sum(c.points for c in comps))), comps)
 
 
-def value_scorecard(quote: dict, metrics: dict) -> ScoreCard:
+def value_scorecard(quote: dict, metrics: dict, *, is_fin: bool | None = None) -> ScoreCard:
     """저평가도 (0~100) — 무배당 성장주 페널티 제거 + EV/EBITDA·PBR 추가.
 
-    1. EV/EBITDA 25 (자본구조 중립) 2. EV/Sales 15(금융 중립) 3. PBR 15
-    4. 이익수익률(=1/PER) 25  5. 배당수익률 10(과거 35→축소)  6. FCF수익률 10
+    1. EV/EBITDA 25 (자본구조 중립) 2. EV/Sales 15 3. PBR 15
+    4. 이익수익률(=1/PER) 25  5. 배당수익률 10  6. FCF수익률 10
+
+    is_fin=None 이면 quote 의 sector/industry 로 판정 (sector 가 없는 quote 면 비금융 취급).
+    is_fin=True: EV/EBITDA·EV/Sales·FCF수익률 50% 중립, PBR·이익수익률·배당만 실측 -> 최대 75.
+    이상치 격리 (전 업종): 이익수익률 >35%, FCF수익률 >40% 는 파생증권/분모 오류라 중립.
     """
+    if is_fin is None:
+        is_fin = is_balance_sheet_financial(
+            quote.get("sector"), quote.get("industry"), quote.get("symbol"),
+        )
     ev_ebitda = _safe(metrics, "evToEBITDA", 20.0)
     ev_sales = _safe(metrics, "evToSales", 10.0)
     pbr = _safe(metrics, "priceToBookRatio", 5.0)            # ratios
-    ey = _safe(metrics, "earningsYield") * 100
-    fcf = _safe(metrics, "freeCashFlowYield") * 100
+    ey = _safe(metrics, "earningsYield")                      # 분수 (0.07 = 7%)
+    fcf = _safe(metrics, "freeCashFlowYield")
 
     price = _safe(quote, "price", 1.0)
     last_div = _safe(quote, "lastDividend") or _safe(quote, "lastAnnualDividend")
     dy = (last_div / max(price, 0.01)) * 100 if price else 0.0
-
-    industry = (quote.get("industry") or "") + (quote.get("sector") or "")
-    is_fin = any(x in industry for x in ("Bank", "Financial", "Insurance"))
-    ev_sales_pts = 7.5 if is_fin else _clip(15.0 - ev_sales * 2.0, 0, 15)
 
     # 음수 배수(적자 EBITDA / 자본잠식 음수 PBR)는 '저평가' 아님 → 0점.
     # 안 그러면 "25 − (음수)×1.25 > 25" 로 적자기업이 만점 받는 역설.
@@ -252,25 +368,33 @@ def value_scorecard(quote: dict, metrics: dict) -> ScoreCard:
     pbr_pts = _clip(15.0 - pbr * 1.5, 0, 15) if pbr > 0 else 0.0
 
     comps = [
-        Component("EV/EBITDA", ev_ebitda_pts, 25,
-                  f"{ev_ebitda:.1f}x" + ("" if ev_ebitda > 0 else " (적자)")),
-        Component("EV/Sales", ev_sales_pts, 15, ("금융중립" if is_fin else f"{ev_sales:.1f}x")),
+        _neutral("EV/EBITDA", 25, FIN_NEUTRAL_LABEL) if is_fin
+        else Component("EV/EBITDA", ev_ebitda_pts, 25,
+                       f"{ev_ebitda:.1f}x" + ("" if ev_ebitda > 0 else " (적자)")),
+        _neutral("EV/Sales", 15, FIN_NEUTRAL_LABEL) if is_fin
+        else Component("EV/Sales", _clip(15.0 - ev_sales * 2.0, 0, 15), 15, f"{ev_sales:.1f}x"),
         Component("PBR", pbr_pts, 15, f"{pbr:.2f}" + ("" if pbr > 0 else " (자본잠식)")),
-        Component("이익수익률", _clip(ey * 5.0, 0, 25), 25, f"{ey:.1f}%"),
+        _neutral("이익수익률", 25, f"이상치 {ey * 100:.0f}%→중립") if ey > EY_OUTLIER
+        else Component("이익수익률", _clip(ey * 100 * 5.0, 0, 25), 25, f"{ey * 100:.1f}%"),
         Component("배당수익률", _clip(dy * 2.0, 0, 10), 10, f"{dy:.1f}%"),
-        Component("FCF수익률", _clip(fcf * 1.5, 0, 10), 10, f"{fcf:.1f}%"),
     ]
+    if is_fin:
+        comps.append(_neutral("FCF수익률", 10, FIN_NEUTRAL_LABEL))
+    elif fcf > FCF_OUTLIER:
+        comps.append(_neutral("FCF수익률", 10, f"이상치 {fcf * 100:.0f}%→중립"))
+    else:
+        comps.append(Component("FCF수익률", _clip(fcf * 100 * 1.5, 0, 10), 10, f"{fcf * 100:.1f}%"))
     return ScoreCard(round(min(100.0, sum(c.points for c in comps))), comps)
 
 
-def calculate_health_score(metrics: dict) -> int:
+def calculate_health_score(metrics: dict, *, is_fin: bool = False) -> int:
     """건전성 점수 int (하위호환 wrapper)."""
-    return health_scorecard(metrics).total
+    return health_scorecard(metrics, is_fin=is_fin).total
 
 
-def calculate_value_score(quote: dict, metrics: dict) -> int:
+def calculate_value_score(quote: dict, metrics: dict, *, is_fin: bool | None = None) -> int:
     """저평가도 점수 int (하위호환 wrapper)."""
-    return value_scorecard(quote, metrics).total
+    return value_scorecard(quote, metrics, is_fin=is_fin).total
 
 
 def calculate_crypto_scores(coin: dict) -> dict:
