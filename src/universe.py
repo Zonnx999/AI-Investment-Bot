@@ -55,6 +55,12 @@ KR_MARKET_CAP_FLOOR = 500_000_000_000     # 5천억 KRW (한국 중대형, MKTCA
 CRYPTO_MCAP_FLOOR = 1_000_000_000         # $1B
 CRYPTO_TOP_N = 100
 ENRICH_MAX_AGE = timedelta(days=7)        # 펀더멘털 재보강 주기
+
+# 점수 공식·필터·정렬 규칙 버전. 이 규칙들을 바꾸면 올린다 — 신호 원장(src/ledger.py)의
+# 성과 판정은 이 버전 단위로 끊어서 본다(옛 규칙 성과와 섞지 않기 위해).
+# v0 = 2026-07-10 동결 규칙(상장채 혼입·회계연도 말 배수·연결 총계 KR 점수)
+# v1 = 2026-10 수정 라운드(보통주 필터·TTM 배수·금융 중립·KR 지배주주 귀속·섹터/지주사 상한)
+RULE_VERSION = "v1"
 DISCOVER_CHUNK = 200                      # 발굴 upsert 배치 크기 (executescript 1회)
 ABORT_AFTER_RATE_LIMITS = 5               # 연속 429 N회면 보강 루프 중단
 KR_MIN_LIST_SIZE = 1500                   # KRX 일별 목록이 이보다 작으면 'not_listed' 판정 보류
@@ -660,58 +666,31 @@ def symbols_needing_enrichment(
     return [(r[0], r[1]) for r in rows]
 
 
-_FIN_EXEMPT_INDUSTRIES = ("Financial - Data & Stock Exchanges", "Insurance - Brokers")
-# 지급결제망·FMP 오분류 종목 — industry 가 Credit Services 여도 비금융 (WP-SCORE FIN_EXEMPT_SYMBOLS 와 동일)
-_FIN_EXEMPT_SYMBOLS = frozenset({"V", "MA", "PYPL", "GPN", "FI", "FISV", "FIS", "SUNB"})
-
-
 def _is_balance_sheet_financial(
     sector: str | None, industry: str | None, symbol: str | None = None,
 ) -> bool:
-    """WP-SCORE 계약 `screener.is_balance_sheet_financial(sector, industry, symbol=None)` 소비.
+    """`screener.is_balance_sheet_financial` 단일 출처 — symbol 을 반드시 넘긴다.
 
-    symbol 을 반드시 넘긴다 — screener 의 FIN_EXEMPT_SYMBOLS(V·MA·PYPL 등) 판정은 symbol 로만
-    가능해서, 빠뜨리면 유니버스 점수만 '금융중립' 으로 어긋난다(리뷰 지적).
-    병합 전(함수 없음)엔 같은 규칙으로 폴백.
+    지급결제망(V·MA·PYPL 등) 예외는 symbol 로만 판정 가능해서, 빠뜨리면 유니버스 점수만
+    '금융중립' 으로 어긋난다. 예외 목록은 screener.FIN_EXEMPT_SYMBOLS 한 곳에서 관리.
     """
-    from src import screener
+    from src.screener import is_balance_sheet_financial
 
-    fn = getattr(screener, "is_balance_sheet_financial", None)
-    if fn is not None:
-        return bool(fn(sector or "", industry or "", symbol))
-    if symbol and symbol.upper() in _FIN_EXEMPT_SYMBOLS:
-        return False
-    return (sector or "") == "Financial Services" and (industry or "") not in _FIN_EXEMPT_INDUSTRIES
+    return bool(is_balance_sheet_financial(sector or "", industry or "", symbol))
 
 
 def _fetch_fundamentals(symbol: str) -> dict:
-    """WP-SCORE 계약 latest_fundamentals(ticker, *, basis="ttm") 호출.
-
-    전환기 호환: 병합 전 구 시그니처(basis 없음)면 연간 경로로 폴백 — WP-SCORE 병합 후
-    이 폴백은 죽은 코드가 되므로 제거 가능.
-    """
+    """현재 시총 기준 TTM 배수 (불가하면 screener 가 연간으로 폴백하고 `_basis` 에 기록)."""
     from src.screener import latest_fundamentals
 
-    try:
-        return latest_fundamentals(symbol, basis="ttm")
-    except TypeError as e:
-        if "basis" not in str(e):
-            raise
-        logger.debug("latest_fundamentals 가 basis 를 모름 — 연간 경로 (전환기)")
-        return latest_fundamentals(symbol)
+    return latest_fundamentals(symbol, basis="ttm")
 
 
 def _scorecards(quote_like: dict, m: dict, is_fin: bool):
-    """WP-SCORE 계약 health_scorecard(m, is_fin=)·value_scorecard(q, m, is_fin=) 호출 (전환기 폴백 포함)."""
+    """건전성·밸류 스코어카드 — 금융업 중립 여부(is_fin)를 두 카드에 똑같이 전달."""
     from src.screener import health_scorecard, value_scorecard
 
-    try:
-        return health_scorecard(m, is_fin=is_fin), value_scorecard(quote_like, m, is_fin=is_fin)
-    except TypeError as e:
-        if "is_fin" not in str(e):
-            raise
-        logger.debug("scorecard 가 is_fin 을 모름 — 구 공식 (전환기)")
-        return health_scorecard(m), value_scorecard(quote_like, m)
+    return health_scorecard(m, is_fin=is_fin), value_scorecard(quote_like, m, is_fin=is_fin)
 
 
 def _finite(v) -> float | None:
@@ -767,9 +746,9 @@ def _compute_enrich(conn, symbol: str, market: str) -> dict | None:
     if is_fin:
         flags.append("fin_neutral")
     ey, fcf, cr = _finite(m.get("earningsYield")), _finite(m.get("freeCashFlowYield")), _finite(m.get("currentRatio"))
-    if ey is not None and ey > getattr(screener, "EY_OUTLIER", 0.35):
+    if ey is not None and ey > screener.EY_OUTLIER:
         flags.append("ey_outlier")
-    if fcf is not None and fcf > getattr(screener, "FCF_OUTLIER", 0.40):
+    if fcf is not None and fcf > screener.FCF_OUTLIER:
         flags.append("fcf_outlier")
     if cr is None or cr <= 0:
         flags.append("cr_missing")

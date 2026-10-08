@@ -178,6 +178,14 @@ def main() -> int:
     max_age = timedelta(0) if args.force else timedelta(days=args.max_age)
     abnormal = False
 
+    # 덮어쓰기 전 유니버스 단면 보존 (신호 원장 소급·다음 라운드 백테스트용). 최신 스냅샷이
+    # 이미 지금 DB 와 같은 날짜면 생략(멱등). DB 오류는 내부에서 삼켜 재점수를 막지 않음.
+    from src import ledger
+
+    pre = ledger.ensure_pre_snapshot()
+    if any(r.get("written") for r in pre.values() if isinstance(r, dict)):
+        print("\n[0] 재점수 전 유니버스 스냅샷 저장 (pre_rescore)")
+
     if do_discover:
         print(f"\n[1] 발굴 ({', '.join(markets)}: company-screener / KRX / CoinGecko)...")
         counts = universe.discover(markets=markets)
@@ -206,6 +214,11 @@ def main() -> int:
         )
         _print_enrich_result(kr_stats)
         abnormal |= _enrich_outcome(kr_stats)
+
+    # 재점수 결과 단면 저장 (규칙 버전과 함께) — 원장 판정·IC 의 재료. best-effort.
+    snap = ledger.snapshot_universe("rescore", rule_version=universe.RULE_VERSION)
+    if any(r.get("written") for r in snap.values() if isinstance(r, dict)):
+        print(f"\n[4] 재점수 후 유니버스 스냅샷 저장 (규칙 {universe.RULE_VERSION})")
 
     # 호스팅 DB(Turso)면 클라우드로 push (로컬 sqlite3 면 no-op)
     get_storage().sync()

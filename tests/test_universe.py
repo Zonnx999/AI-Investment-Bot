@@ -129,7 +129,7 @@ def test_enrich_calls_progress_and_enriches(fresh_db, monkeypatch):
         "freeCashFlowYield": 0.05, "netDebtToEBITDA": 1.0, "earningsYield": 0.08,
         "currentRatio": 2.0, "incomeQuality": 1.0,
     }
-    monkeypatch.setattr("src.screener.latest_fundamentals", lambda ticker: fake)
+    monkeypatch.setattr("src.screener.latest_fundamentals", lambda ticker, **_k: fake)
 
     seen: list[tuple[int, int]] = []
     stats = universe.enrich(
@@ -241,7 +241,7 @@ def test_enrich_empty_metrics_counts_no_data(fresh_db, monkeypatch):
         price=10.0, market_cap=2e9, dividend_yield=0.0,
     )
     conn.commit()
-    monkeypatch.setattr("src.screener.latest_fundamentals", lambda ticker: {})
+    monkeypatch.setattr("src.screener.latest_fundamentals", lambda ticker, **_k: {})
     stats = universe.enrich()
     assert stats["no_data"] == 1 and stats["enriched"] == 0
 
@@ -256,8 +256,8 @@ def test_enrich_all_none_metrics_counts_no_data_not_zero_score(fresh_db, monkeyp
     conn.commit()
     monkeypatch.setattr(
         "src.screener.latest_fundamentals",
-        lambda ticker: {"returnOnEquity": None, "evToSales": None,
-                        "earningsYield": float("nan")},
+        lambda ticker, **_k: {"returnOnEquity": None, "evToSales": None,
+                              "earningsYield": float("nan")},
     )
     stats = universe.enrich()
     assert stats["no_data"] == 1 and stats["enriched"] == 0
@@ -782,16 +782,21 @@ def test_compute_enrich_roe_missing_is_none_and_outlier_flags(fresh_db, monkeypa
     assert {"ey_outlier", "fcf_outlier", "cr_missing", "fin_neutral"} <= set(flags)
 
 
-def test_compute_enrich_falls_back_to_annual_signature(fresh_db, monkeypatch):
-    """WP-SCORE 병합 전(구 시그니처 basis 없음)에도 동작 — 전환기 호환."""
+def test_compute_enrich_records_annual_basis_when_ttm_unavailable(fresh_db, monkeypatch):
+    """screener 가 TTM 불가로 연간 폴백하면(_basis='annual') detail 에 그대로 기록."""
     conn = universe._conn()
     universe._upsert_universe_row(conn, symbol="OLD", market="US", name="Old", sector="Tech",
                                   industry="x", price=10.0, market_cap=2e9, dividend_yield=0.0)
     conn.commit()
-    annual = {k: v for k, v in _TTM_FAKE.items() if k != "_basis"}
-    monkeypatch.setattr("src.screener.latest_fundamentals", lambda ticker: annual)
+    annual = {**{k: v for k, v in _TTM_FAKE.items() if k != "_basis"}, "_basis": "annual"}
+    monkeypatch.setattr("src.screener.latest_fundamentals", lambda ticker, *, basis="ttm": annual)
     cols = universe._compute_enrich(conn, "OLD", "US")
     assert _json.loads(cols["detail"])["basis"] == "annual"
+
+
+def test_rule_version_is_set_for_ledger():
+    """원장 성과 판정은 규칙 버전 단위 — 점수·필터 규칙을 바꾸면 이 값을 올려야 한다."""
+    assert universe.RULE_VERSION == "v1"
 
 
 # ---------------- enrich 중단 규칙 ----------------
@@ -1396,3 +1401,15 @@ def test_enrich_kr_corp_code_failure_sets_aborted(fresh_db, monkeypatch, exc):
 
     from scripts import build_universe as bu
     assert bu._enrich_outcome(stats) is True                          # → 종료코드 5
+
+
+def test_build_universe_calls_snapshot_hooks():
+    """재점수는 시작 시 pre_rescore, 끝에서 rescore 스냅샷을 남긴다 (원장 소급·백테스트 재료).
+
+    훅이 빠지면 07-10 동결 DB 같은 '덮어쓰기 전 상태'를 영구히 잃는다(RPP-06).
+    """
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parent.parent / "scripts" / "build_universe.py").read_text()
+    assert "ledger.ensure_pre_snapshot()" in src
+    assert 'ledger.snapshot_universe("rescore", rule_version=universe.RULE_VERSION)' in src

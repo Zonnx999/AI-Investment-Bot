@@ -514,13 +514,13 @@ def test_check_backtest_main_infra_failure_returns_one(cb_env, capsys):
 
 
 def test_check_backtest_ledger_wiring(cb_env, monkeypatch, capsys):
-    """원장 모듈이 있으면 format_report 출력, 함수 이름 불일치는 '연동 오류' (원장 없음과 구분)."""
+    """원장 모듈이 있으면 report_text 출력, 함수 이름 불일치는 '연동 오류' (원장 없음과 구분)."""
     import sys
     import types
 
     cb, _ = cb_env
     good = types.ModuleType("src.ledger")
-    good.format_report = lambda market: f"LEDGER-{market}"
+    good.report_text = lambda market: f"LEDGER-{market}"
     monkeypatch.setitem(sys.modules, "src.ledger", good)
     cb._section_ledger()
     out = capsys.readouterr().out

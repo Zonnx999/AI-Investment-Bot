@@ -62,6 +62,9 @@ try:
 except ImportError:
     _DB_ERRORS = (sqlite3.Error,)
 
+# 공개 별칭 — 다른 모듈(ledger·export_dashboard·check_backtest)은 이 이름을 쓴다(비공개 이름 의존 제거).
+DB_ERRORS = _DB_ERRORS
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS cache (
     namespace  TEXT NOT NULL,

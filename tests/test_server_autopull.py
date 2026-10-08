@@ -501,8 +501,8 @@ def test_units_respect_one_replica_one_process():
         assert "flock" in text, name                   # 같은 레플리카를 쓰는 유닛끼리 직렬화
 
 
-# WP-UNIVERSE 가 병합되기 전까지 build_universe.py 에 아직 없는 '예정' 플래그 (병합 후엔 일반 검사가 그대로 고정).
-_PENDING_BUILD_UNIVERSE_FLAGS = {"--kr-refresh"}
+# 예정 플래그 없음 — WP-UNIVERSE 병합으로 --kr-refresh 가 실제 정의됨 (일반 검사로 고정).
+_PENDING_BUILD_UNIVERSE_FLAGS: set[str] = set()
 
 
 def test_build_universe_flags_in_units_are_defined():

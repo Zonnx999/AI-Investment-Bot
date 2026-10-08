@@ -30,7 +30,7 @@ import sys
 from src import ledger
 from src.exceptions import QuantBotError
 from src.logger import get_logger
-from src.storage import _DB_ERRORS as DB_ERRORS
+from src.storage import DB_ERRORS
 from src.storage import StorageError
 
 logger = get_logger(__name__)
@@ -99,24 +99,12 @@ def cmd_score(args: argparse.Namespace) -> int:
 
 
 def cmd_report(args: argparse.Namespace) -> int:
-    m = args.market.upper()
-    summary = ledger.load_summary(m)
-    print(ledger.format_report(summary, ledger.load_outcomes(m), runs=ledger.load_runs(m),
-                               snapshot=ledger.latest_snapshot(m)))
+    print(ledger.report_text(args.market))   # check_backtest [1] 과 같은 진입점
     return 0
 
 
 def cmd_ic(args: argparse.Namespace) -> int:
-    for m in args.markets:
-        r = ledger.universe_ic(m, score_key=args.score)
-        if r["status"] == "waiting":
-            print(f"{m}: 관측 대기 (스냅샷 {r.get('n_snapshots', 0)}개 < 2)")
-        elif r["status"] != "ok" or r.get("ic") is None:
-            print(f"{m}: 계산 불가 ({r.get('status')}, n={r.get('n')})")
-        else:
-            print(f"{m}: {r['from']}→{r['to']} {args.score} 순위상관 {r['ic']:+.3f} (n={r['n']}) "
-                  f"· 5분위 하위 {r['q1']:+.1f}% / 상위 {r['q5']:+.1f}% (차 {r['spread']:+.1f}%p)")
-    print("주의: 스냅샷 가격은 discover(가격 갱신)가 돈 재점수에서만 바뀝니다 — 정보용, 판정 근거 아님.")
+    print(ledger.ic_text(args.markets, score_key=args.score))   # check_backtest [2] 와 같은 진입점
     return 0
 
 

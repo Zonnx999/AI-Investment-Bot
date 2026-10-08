@@ -36,7 +36,7 @@ from zoneinfo import ZoneInfo
 from src.exceptions import InsufficientDataError, QuantBotError
 from src.findings import Finding, from_prediction, from_regime
 from src.logger import get_logger
-from src.storage import _DB_ERRORS, StorageError, get_storage
+from src.storage import DB_ERRORS, StorageError, get_storage
 
 logger = get_logger(__name__)
 
@@ -364,7 +364,7 @@ def main() -> int:
     # --- 스크리너: 세 시장을 **먼저 전부 읽고** 검증한 뒤에만 쓴다 ---
     try:
         data = {m: (_fetch_market_rows(conn, m), _data_as_of(conn, m)) for m in _MARKETS}
-    except _DB_ERRORS as e:
+    except DB_ERRORS as e:
         logger.error("screened 읽기 실패 — 내보내기 중단 (파일 미기록): %s", e)
         print("::error::screened 테이블 읽기 실패 — 내보내기 중단")
         return 3

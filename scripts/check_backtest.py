@@ -24,6 +24,7 @@ scripts/check_backtest.py
 from __future__ import annotations
 
 import argparse
+import importlib
 import unicodedata
 from datetime import datetime, timezone
 
@@ -99,11 +100,11 @@ def _db_errors() -> tuple[type[BaseException], ...]:
     return tuple(getattr(storage, "DB_ERRORS", None) or getattr(storage, "_DB_ERRORS", ()))
 
 
-# 원장 모듈 연동 계약 (WP-LEDGER 와 합의 필요 — 병합 시 리드가 실제 이름 확인):
-#   [1] src.ledger.format_report(market: "us" | "kr") -> str
-#   [2] src.ledger.format_ic() -> str   (유니버스 순위 IC 평문)
-_LEDGER_REPORT_FUNCS = ("format_report", "report_text", "report")
-_LEDGER_IC_FUNCS = ("format_ic", "format_ic_report", "ic_text", "ic_report")
+# 원장 모듈 연동 계약 (병합 시 확정 — scripts/ledger.py 의 report/ic 명령과 같은 진입점):
+#   [1] src.ledger.report_text(market: "us" | "kr") -> str
+#   [2] src.ledger.ic_text() -> str   (유니버스 순위 IC 평문)
+_LEDGER_REPORT_FUNCS = ("report_text",)
+_LEDGER_IC_FUNCS = ("ic_text",)
 
 _LOGGED_ONCE: set[str] = set()   # 같은 로그가 섹션마다 중복 출력되지 않게
 
@@ -124,7 +125,9 @@ def _ledger_call(candidates: tuple[str, ...], *args) -> tuple[str | None, bool]:
     원장은 검증의 '보조 정보' 라 실패가 리포트 전체를 막지 않는다 (종료코드에도 영향 없음).
     """
     try:
-        from src import ledger  # 지연 import — 원장 모듈이 없는 환경에서도 리포트가 돈다
+        # 지연 import — 원장 모듈이 없는 환경에서도 리포트가 돈다. `from src import ledger` 는
+        # 이미 import 된 패키지 속성을 그대로 가져와 sys.modules 차단을 무시하므로 importlib 사용.
+        ledger = importlib.import_module("src.ledger")
     except ImportError as e:
         _log_once("info", "원장 모듈 없음 — %s", e)
         return None, False
@@ -134,7 +137,7 @@ def _ledger_call(candidates: tuple[str, ...], *args) -> tuple[str | None, bool]:
         return None, True
     try:
         out = fn(*args)
-    except TypeError as e:
+    except (TypeError, AttributeError) as e:
         _log_once("warning", "원장 연동 오류 — %s 시그니처 불일치: %s", fn.__name__, e)
         return None, True
     except (QuantBotError, ValueError, *_db_errors()) as e:

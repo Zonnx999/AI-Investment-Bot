@@ -56,7 +56,7 @@ import pandas as pd
 
 from src.exceptions import DataFetchError
 from src.logger import get_logger
-from src.storage import _DB_ERRORS as DB_ERRORS
+from src.storage import DB_ERRORS
 from src.storage import StorageError, get_storage
 
 logger = get_logger(__name__)
@@ -1781,6 +1781,37 @@ def universe_ic(market: str, *, score_key: str = "total") -> dict:
         return {"status": "error", "market": m}
     res = rank_ic(a["rows"], b["rows"], score_key=score_key)
     return {"status": "ok", "market": m, "from": a["as_of"], "to": b["as_of"], **res}
+
+
+# ---- 시장 단위 평문 진입점 (scripts/ledger.py · scripts/check_backtest.py 공용 계약) ----
+
+IC_NOTE = "주의: 스냅샷 가격은 discover(가격 갱신)가 돈 재점수에서만 바뀝니다 — 정보용, 판정 근거 아님."
+
+
+def report_text(market: str) -> str:
+    """시장 하나의 평문 성적표. `ledger.py report` 와 check_backtest [1] 이 같은 출력을 쓴다."""
+    m = market.upper()
+    return format_report(load_summary(m), load_outcomes(m), runs=load_runs(m),
+                         snapshot=latest_snapshot(m))
+
+
+def ic_text(markets: Sequence[str] = ("US", "KR"), *, score_key: str = "total") -> str:
+    """유니버스 순위 IC 평문 (정보용). `ledger.py ic` 와 check_backtest [2] 공용."""
+    lines = []
+    for market in markets:
+        r = universe_ic(market, score_key=score_key)
+        m = r.get("market", market.upper())
+        if r["status"] == "waiting":
+            lines.append(f"{m}: 관측 대기 (스냅샷 {r.get('n_snapshots', 0)}개 < 2)")
+        elif r["status"] != "ok" or r.get("ic") is None:
+            lines.append(f"{m}: 계산 불가 ({r.get('status')}, n={r.get('n')})")
+        else:
+            lines.append(
+                f"{m}: {r['from']}→{r['to']} {score_key} 순위상관 {r['ic']:+.3f} (n={r['n']}) "
+                f"· 5분위 하위 {r['q1']:+.1f}% / 상위 {r['q5']:+.1f}% (차 {r['spread']:+.1f}%p)"
+            )
+    lines.append(IC_NOTE)
+    return "\n".join(lines)
 
 
 # ----------------------------------------------------------------------
