@@ -99,47 +99,77 @@ def _db_errors() -> tuple[type[BaseException], ...]:
     return tuple(getattr(storage, "DB_ERRORS", None) or getattr(storage, "_DB_ERRORS", ()))
 
 
-def _ledger_call(candidates: tuple[str, ...], *args) -> str | None:
-    """src.ledger 의 첫 번째로 존재하는 함수를 호출해 평문을 받는다. 없거나 실패하면 None.
+# 원장 모듈 연동 계약 (WP-LEDGER 와 합의 필요 — 병합 시 리드가 실제 이름 확인):
+#   [1] src.ledger.format_report(market: "us" | "kr") -> str
+#   [2] src.ledger.format_ic() -> str   (유니버스 순위 IC 평문)
+_LEDGER_REPORT_FUNCS = ("format_report", "report_text", "report")
+_LEDGER_IC_FUNCS = ("format_ic", "format_ic_report", "ic_text", "ic_report")
 
+_LOGGED_ONCE: set[str] = set()   # 같은 로그가 섹션마다 중복 출력되지 않게
+
+
+def _log_once(level: str, msg: str, *args) -> None:
+    key = msg % args if args else msg
+    if key in _LOGGED_ONCE:
+        return
+    _LOGGED_ONCE.add(key)
+    getattr(logger, level)(msg, *args)
+
+
+def _ledger_call(candidates: tuple[str, ...], *args) -> tuple[str | None, bool]:
+    """src.ledger 의 첫 번째로 존재하는 함수를 호출해 평문을 받는다. (text, integration_error) 반환.
+
+    - 원장 모듈 없음 / DB 오류 / 빈 결과 -> (None, False): '원장 없음' 으로 취급 (정상 폴백).
+    - 모듈은 있는데 함수 이름이 없거나 시그니처 불일치(TypeError) -> (None, True): '연동 오류' (WARNING).
     원장은 검증의 '보조 정보' 라 실패가 리포트 전체를 막지 않는다 (종료코드에도 영향 없음).
     """
     try:
         from src import ledger  # 지연 import — 원장 모듈이 없는 환경에서도 리포트가 돈다
     except ImportError as e:
-        logger.info("원장 모듈 없음 — %s", e)
-        return None
-    db_errors = _db_errors()
+        _log_once("info", "원장 모듈 없음 — %s", e)
+        return None, False
     fn = next((getattr(ledger, n) for n in candidates if callable(getattr(ledger, n, None))), None)
     if fn is None:
-        logger.info("원장 모듈에 %s 함수 없음", "/".join(candidates))
-        return None
+        _log_once("warning", "원장 연동 오류 — src.ledger 에 %s 함수 없음", "/".join(candidates))
+        return None, True
     try:
         out = fn(*args)
-    except (QuantBotError, TypeError, ValueError, *db_errors) as e:
-        logger.warning("원장 조회 실패 (%s) — %s", candidates[0], e)
-        return None
-    return str(out).rstrip() if out else None
+    except TypeError as e:
+        _log_once("warning", "원장 연동 오류 — %s 시그니처 불일치: %s", fn.__name__, e)
+        return None, True
+    except (QuantBotError, ValueError, *_db_errors()) as e:
+        logger.warning("원장 조회 실패 (%s) — %s", fn.__name__, e)
+        return None, False
+    return (str(out).rstrip() if out else None), False
+
+
+_LEDGER_INTEGRATION_MSG = "  ⚠️ 원장 연동 오류 — src.ledger 함수 이름/시그니처가 맞지 않습니다 (로그 확인)."
 
 
 def _section_ledger() -> None:
     """[1] 발송 원장 성과."""
     printed = False
+    integration_error = False
     for market in ("us", "kr"):
-        text = _ledger_call(("report_text", "report"), market)
+        text, bad = _ledger_call(_LEDGER_REPORT_FUNCS, market)
+        integration_error = integration_error or bad
         if text:
             print(text)
             print()
             printed = True
-    if not printed:
+    if integration_error:
+        print(_LEDGER_INTEGRATION_MSG)
+    elif not printed:
         print("  원장 없음 — 아직 기록된 발송이 없거나 원장 모듈/DB 를 읽을 수 없습니다.")
 
 
 def _section_universe_ic() -> None:
     """[2] 유니버스 순위 IC."""
-    text = _ledger_call(("ic_text", "ic_report"))
+    text, bad = _ledger_call(_LEDGER_IC_FUNCS)
     if text:
         print(text)
+    elif bad:
+        print(_LEDGER_INTEGRATION_MSG)
     else:
         print("  관측 대기 — 유니버스 스냅샷이 2개 이상 쌓이면 점수 순위 vs 이후 수익률의 순위상관(IC)을 계산합니다.")
 

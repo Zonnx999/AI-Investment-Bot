@@ -310,3 +310,38 @@ def test_drop_incomplete_month_boundary():
     m = pd.Series([1.0, 2.0], index=pd.to_datetime(["2026-08-31", "2026-09-30"]))
     assert len(drop_incomplete_month(m, pd.Timestamp("2026-09-30"))) == 1       # 월말 당일은 아직 미완
     assert len(drop_incomplete_month(m, pd.Timestamp("2026-10-01"))) == 2
+
+
+# ---------------- 한국수출 빌더: 수출 컬럼을 이름으로 선택 ----------------
+
+
+def test_korea_exports_builder_selects_exports_by_name_not_position(monkeypatch):
+    """수출 컬럼이 빠지면 첫 컬럼(수입)을 쓰지 말고 InsufficientDataError (ALR-09 동일 패턴 회귀)."""
+    from src import data_fetcher as dfm
+    from src import predictors as pr
+
+    idx = pd.date_range("2014-01-31", periods=40, freq="ME")
+    imports_only = pd.DataFrame({"수입(금액, USD)": np.linspace(100, 140, 40)}, index=idx)
+    monkeypatch.setattr(dfm, "fetch_korea_trade", lambda start=None: imports_only)
+    with pytest.raises(InsufficientDataError):
+        pr._build_korea_exports_soxx()
+
+    monkeypatch.setattr(dfm, "fetch_korea_trade", lambda start=None: pd.DataFrame())
+    with pytest.raises(InsufficientDataError):
+        pr._build_korea_exports_soxx()
+
+
+def test_korea_exports_builder_uses_exports_column_even_when_not_first(monkeypatch):
+    from src import data_fetcher as dfm
+    from src import predictors as pr
+
+    idx = pd.date_range("2014-01-31", periods=40, freq="ME")
+    exports = pd.Series(np.linspace(100, 200, 40), index=idx)
+    trade = pd.DataFrame({"수입(금액, USD)": np.linspace(1, 2, 40), "수출(금액, USD)": exports}, index=idx)
+    target = pd.Series(np.linspace(50, 80, 40), index=idx)
+    monkeypatch.setattr(dfm, "fetch_korea_trade", lambda start=None: trade)
+    monkeypatch.setattr(pr, "_prices_monthly", lambda ticker: target)
+    lead_yoy, tgt = pr._build_korea_exports_soxx()
+    expected = pr.yoy_growth(pr._complete_monthly(exports))
+    pd.testing.assert_series_equal(lead_yoy, expected, check_names=False)
+    assert tgt is target

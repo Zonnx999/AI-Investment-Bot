@@ -348,12 +348,16 @@ def _build_m2_btc() -> tuple[pd.Series, pd.Series]:
 
 
 def _build_korea_exports_soxx() -> tuple[pd.Series, pd.Series]:
-    from src.data_fetcher import fetch_korea_trade
+    from src import data_fetcher as dfm
 
-    trade = fetch_korea_trade(start="2014-01-01")
-    if trade.empty:
-        raise InsufficientDataError("한국 무역 데이터 비어있음", n_points=0, required=1)
-    return yoy_growth(_complete_monthly(trade.iloc[:, 0])), _prices_monthly("SOXX")   # 첫 컬럼 = 수출(금액)
+    trade = dfm.fetch_korea_trade(start="2014-01-01")
+    # 위치(iloc[:, 0])가 아니라 이름으로 선택 — fetch_korea_trade 는 실패한 시리즈를 건너뛰므로
+    # 수출 조회가 실패하면 첫 컬럼이 '수입' 이 되어 엉뚱한 시리즈를 검증하게 된다 (ALR-09 동일 패턴).
+    label = getattr(dfm, "KOREA_EXPORTS_LABEL", "수출(금액, USD)")
+    exports = trade.get(label) if not trade.empty else None
+    if exports is None or exports.dropna().empty:
+        raise InsufficientDataError("한국 수출 시계열 없음", n_points=0, required=1)
+    return yoy_growth(_complete_monthly(exports.dropna())), _prices_monthly("SOXX")
 
 
 def _build_permits_xhb() -> tuple[pd.Series, pd.Series]:

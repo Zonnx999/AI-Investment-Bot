@@ -435,3 +435,100 @@ def test_check_backtest_table_is_wide_char_aligned():
     assert cb._width("M2 -> BTC") == 9
     assert cb._width("한국수출") == 8
     assert cb._width(cb._pad("한국수출", 12)) == 12
+
+
+# ---------------- check_backtest.main() 계약: 종료코드 / --save / 원장 폴백 ----------------
+
+
+def _ll_case(seed: int = 0, n: int = 200) -> tuple[pd.Series, pd.Series]:
+    """합성 선행지표/목표 쌍 (잡음 — 통과 여부는 무관, 파이프라인만 돌린다)."""
+    rng = np.random.default_rng(seed)
+    idx = pd.date_range("2005-01-31", periods=n, freq="ME")
+    lead = pd.Series(rng.normal(0, 1, n), index=idx)
+    target = pd.Series(100 * np.cumprod(1 + rng.normal(0.01, 0.05, n)), index=idx)
+    return lead, target
+
+
+class _FakeStore:
+    def __init__(self):
+        self.calls: list[tuple[str, str]] = []
+
+    def put_state(self, ns, key, value):
+        self.calls.append((ns, key))
+
+
+class _FakeWF:
+    def to_dict(self):
+        return {"ok": True}
+
+
+@pytest.fixture
+def cb_env(monkeypatch):
+    """check_backtest.main() 을 네트워크·DB 없이 돌리는 환경. (모듈, 가짜 저장소) 반환."""
+    import sys
+
+    import scripts.check_backtest as cb
+    from src import storage
+    from src.predictors import PredictorSpec
+
+    specs = tuple(
+        PredictorSpec(f"S{i}", f"선행{i} 증가율", f"T{i} 수익률", 1, lambda i=i: _ll_case(seed=i))
+        for i in range(2)
+    )
+    store = _FakeStore()
+    monkeypatch.setattr(cb, "PREDICTOR_SPECS", specs)
+    monkeypatch.setattr(cb, "_section_walk_forward", lambda *a, **k: _FakeWF())
+    monkeypatch.setattr(cb, "_section_trend", lambda *a, **k: None)
+    monkeypatch.setattr(storage, "get_storage", lambda: store)
+    monkeypatch.setitem(sys.modules, "src.ledger", None)   # 원장 모듈 없음
+    cb._LOGGED_ONCE.clear()
+    return cb, store
+
+
+def test_check_backtest_main_exit_zero_and_no_save_by_default(cb_env, capsys):
+    cb, store = cb_env
+    assert cb.main([]) == 0                     # '통과 0/N' 은 실패가 아님
+    assert store.calls == []                    # --save 없으면 state 쓰기 0회
+    out = capsys.readouterr().out
+    assert "원장 없음" in out and "관측 대기" in out   # 원장 모듈이 없을 때 폴백
+
+
+def test_check_backtest_main_save_writes_validation_state(cb_env):
+    cb, store = cb_env
+    assert cb.main(["--save"]) == 0
+    assert store.calls == [("validation", "lead_lag"), ("validation", "walk_forward")]
+
+
+def test_check_backtest_main_infra_failure_returns_one(cb_env, capsys):
+    from src.exceptions import DataFetchError
+    from src.predictors import PredictorSpec
+
+    cb, _ = cb_env
+
+    def boom():
+        raise DataFetchError("FRED 장애", source="FRED")
+
+    cb.PREDICTOR_SPECS = cb.PREDICTOR_SPECS + (PredictorSpec("B", "고장 증가율", "X 수익률", 0, boom),)
+    assert cb.main([]) == 1
+    assert "DataFetchError" in capsys.readouterr().out
+
+
+def test_check_backtest_ledger_wiring(cb_env, monkeypatch, capsys):
+    """원장 모듈이 있으면 format_report 출력, 함수 이름 불일치는 '연동 오류' (원장 없음과 구분)."""
+    import sys
+    import types
+
+    cb, _ = cb_env
+    good = types.ModuleType("src.ledger")
+    good.format_report = lambda market: f"LEDGER-{market}"
+    monkeypatch.setitem(sys.modules, "src.ledger", good)
+    cb._section_ledger()
+    out = capsys.readouterr().out
+    assert "LEDGER-us" in out and "LEDGER-kr" in out and "원장 없음" not in out
+
+    bad = types.ModuleType("src.ledger")           # 모듈은 있으나 기대한 함수가 없음
+    monkeypatch.setitem(sys.modules, "src.ledger", bad)
+    cb._section_ledger()
+    cb._section_universe_ic()
+    out = capsys.readouterr().out
+    assert out.count("원장 연동 오류") == 2 and "원장 없음" not in out
