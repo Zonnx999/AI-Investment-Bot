@@ -646,3 +646,17 @@ def test_ledger_truncates_long_report_and_survives_db_error(fresh_db, owner_set,
 
     monkeypatch.setattr(ledger, "report_text", boom)
     assert "읽지 못했습니다" in bc.handle_ledger("us", owner_set)       # 예외가 새지 않음
+
+
+def test_ledger_strips_markdown_specials_from_snake_case_tokens(fresh_db, owner_set, monkeypatch):
+    """no_price 등 snake_case 가 Markdown 이탤릭으로 조용히 깨지지 않도록 밑줄 제거 (§4.10 #10)."""
+    import src.ledger as ledger
+
+    monkeypatch.setattr(
+        ledger, "report_text",
+        lambda m: "A 07-13 no_price · B 07-13 no_price\n채점 중단 (no_bench) pre_rescore *x* `y`",
+    )
+    out = bc.handle_ledger("us", owner_set)
+    for ch in "_*`[":
+        assert ch not in out
+    assert "no price" in out and "no bench" in out and "pre rescore" in out

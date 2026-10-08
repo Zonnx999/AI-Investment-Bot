@@ -540,6 +540,10 @@ def handle_ledger(arg: str | None, chat_id: str) -> str:
         return "원장을 읽지 못했습니다. 잠시 후 다시 시도해 주세요."
     if len(text) > LEDGER_MAX_CHARS:
         text = text[:LEDGER_MAX_CHARS].rstrip() + "\n…(이하 생략)"
+    # scripts/bot.py 가 /ledger 를 legacy Markdown 으로 보내므로(news 만 평문) 원장 본문의
+    # snake_case 토큰(no_price 등)이 짝수 밑줄이면 400 없이 이탤릭으로 조용히 깨진다 (§4.10 #10).
+    # 서식 특수문자를 공백으로 치환해 어느 parse_mode 에서도 안전하게 한다.
+    text = _safe(text.replace("_", " "))
     return f"{text}\n\n{DISCLAIMER}"
 
 
