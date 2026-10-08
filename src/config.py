@@ -21,6 +21,30 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # .env 파일이 있으면 환경변수로 로딩
 load_dotenv(PROJECT_ROOT / ".env")
 
+_TRUTHY = ("1", "on", "true", "yes")
+
+
+def _env_flag(name: str, default: str = "0") -> bool:
+    """환경변수 → bool (1/on/true/yes 만 True). llm.llm_enabled 와 같은 규칙."""
+    return os.getenv(name, default).strip().lower() in _TRUTHY
+
+
+def _env_int(name: str, default: int) -> int:
+    """환경변수 → int. 비어 있거나 숫자가 아니면 기본값 (설정 오타가 발송을 막지 않게)."""
+    raw = os.getenv(name, "").strip()
+    try:
+        return int(raw) if raw else default
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name, "").strip()
+    try:
+        return float(raw) if raw else default
+    except ValueError:
+        return default
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -52,6 +76,21 @@ class Settings:
     # 호스팅 DB (Phase 10) — Turso(libSQL) 임베디드 레플리카. 둘 다 비면 로컬 sqlite3
     turso_database_url: str = os.getenv("TURSO_DATABASE_URL", "")
     turso_auth_token: str = os.getenv("TURSO_AUTH_TOKEN", "")
+
+    # ---- 다이제스트 (Stage 2 WP-DIGEST) — 기본값은 '판정·후보·성과만' 인 조용한 메시지 ----
+    # 선행지표 예측 섹션 / 제안 비중(Kelly) — 검증 전이라 기본 OFF (코드는 보존, 플래그로만 재활성화)
+    digest_predictions: bool = _env_flag("QUANT_BOT_DIGEST_PREDICTIONS")
+    digest_weights: bool = _env_flag("QUANT_BOT_DIGEST_WEIGHTS")
+    # 점수(유니버스 재점수) 기준일 신선도 — warn 일 이상이면 기준 줄 ⚠️ + 소유자 DM,
+    # hold 일 이상이면 후보 섹션을 '후보 보류' 1줄로 대체하고 원장에 기록하지 않음 (>14일 = 15)
+    universe_warn_days: int = _env_int("QUANT_BOT_UNIVERSE_WARN_DAYS", 8)
+    universe_hold_days: int = _env_int("QUANT_BOT_UNIVERSE_HOLD_DAYS", 15)
+    # 원장 성과 줄 표시: on(구독자 메시지) | owner(소유자 DM 에만) | off
+    ledger_line: str = os.getenv("QUANT_BOT_LEDGER_LINE", "on").strip().lower() or "on"
+    # '오늘 할 일: 없음' 이고 경고가 없는 날 무음 도착(disable_notification) — 기본 꺼짐(항상 소리)
+    silent_quiet: bool = _env_flag("QUANT_BOT_DIGEST_SILENT_QUIET")
+    # 후보 선정 후 하락 1회 알림 임계(%) — 0 이면 끔 (사용자 옵션 D: 기본 -10 / -15 / 끄기)
+    pick_dd_alert_pct: float = _env_float("QUANT_BOT_PICK_DD_ALERT_PCT", -10.0)
 
     # 경로
     project_root: Path = PROJECT_ROOT

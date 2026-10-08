@@ -133,11 +133,26 @@ def test_send_safe_swallows_api_error(telegram_creds, telegram_server):
 
 def test_markdown_parse_failure_falls_back_to_plain(telegram_creds, telegram_server):
     telegram_server.mode = "parse_fail"
+    notifier_mod.reset_fallback_count()
     # username 의 '_' 처럼 동적 콘텐츠가 Markdown 을 깨뜨리는 상황
-    result = send_telegram("가입 요청: john_doe", parse_mode="Markdown")
+    result = send_telegram("*가입 요청*: john_doe `x`", parse_mode="Markdown")
     assert result == {"message_id": 1}                       # 평문 재전송 성공
     assert telegram_server.calls == 2                        # md 시도 → 평문 재시도
     assert "parse_mode" not in telegram_server.last_payload  # 재시도는 평문
+    # 재전송 본문은 strip_md — 굵게·코드 기호가 별표째 노출되지 않음, '_' 는 내용이라 유지
+    assert telegram_server.last_payload["text"] == "가입 요청: john_doe x"
+    assert notifier_mod.fallback_count() == 1                # 소유자 DM 용 카운터
+    notifier_mod.reset_fallback_count()
+    assert notifier_mod.fallback_count() == 0
+
+
+def test_disable_notification_only_in_payload_when_true(telegram_creds, telegram_server):
+    send_telegram("조용한 날", disable_notification=True)
+    assert telegram_server.last_payload["disable_notification"] is True
+    send_telegram("보통 날")
+    assert "disable_notification" not in telegram_server.last_payload   # 기존 호출부 payload 불변
+    assert send_safe("x", disable_notification=True) is True             # 반환형 bool 불변
+    assert telegram_server.last_payload["disable_notification"] is True
 
 
 def test_any_400_retries_plain_once_then_raises(telegram_creds, telegram_server):

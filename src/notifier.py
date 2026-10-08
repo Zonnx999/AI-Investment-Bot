@@ -36,6 +36,21 @@ TELEGRAM_API_BASE = "https://api.telegram.org"
 # 텔레그램 메시지 최대 길이 (4096) — 여유 두고 자름
 MAX_MESSAGE_LEN = 3900
 
+# Markdown 파싱 실패(400) → 평문 폴백 횟수 (프로세스 단위). 다이제스트가 브로드캐스트 전에
+# reset_fallback_count() 하고 끝나면 fallback_count() 를 읽어 소유자 DM 에 적는다 —
+# 서식이 조용히 깨진 채 평문으로 나가는 일(MSG-06)을 보이게 하기 위함.
+_fallback_count = 0
+
+
+def fallback_count() -> int:
+    """이 프로세스에서 Markdown → 평문 폴백이 일어난 횟수."""
+    return _fallback_count
+
+
+def reset_fallback_count() -> None:
+    global _fallback_count
+    _fallback_count = 0
+
 
 def _telegram_post(method: str, payload: dict) -> dict:
     """Telegram Bot API POST 공통. 토큰 검증 + 도메인 예외 변환.
@@ -88,28 +103,33 @@ def send_telegram(
     parse_mode: str = "Markdown",
     disable_preview: bool = True,
     reply_markup: dict | None = None,
+    disable_notification: bool = False,
 ) -> dict:
     """설정된 채팅으로 메시지 전송.
 
     chat_id 미지정 시 settings.telegram_chat_id 사용.
     4096자 초과 시 안전 길이로 자름 (텔레그램 제한).
     reply_markup: 버튼(ReplyKeyboardMarkup/InlineKeyboardMarkup) dict — 있으면 그대로 전송.
+    disable_notification: True 면 무음 도착 (조용한 날 다이제스트 옵션). 기본 False —
+    payload 에는 True 일 때만 실어 기존 호출부의 전송 내용이 바뀌지 않게 한다.
     """
     cid = chat_id or settings.require("telegram_chat_id")
     if len(text) > MAX_MESSAGE_LEN:
         text = text[:MAX_MESSAGE_LEN] + "\n…(생략)"
 
-    def _post(pm: str | None) -> dict:
-        payload: dict = {"chat_id": cid, "text": text,
+    def _post(pm: str | None, body: str) -> dict:
+        payload: dict = {"chat_id": cid, "text": body,
                          "disable_web_page_preview": disable_preview}
         if pm:
             payload["parse_mode"] = pm
         if reply_markup is not None:
             payload["reply_markup"] = reply_markup
+        if disable_notification:
+            payload["disable_notification"] = True
         return _telegram_post("sendMessage", payload)
 
     try:
-        result = _post(parse_mode)
+        result = _post(parse_mode, text)
     except ApiHttpError as e:
         # Markdown 파싱 실패(불균형 엔티티 등) → 평문으로 재전송해 메시지 유실 방지.
         # legacy Markdown 은 백슬래시 이스케이프를 제대로 지원하지 않으므로, 동적 콘텐츠가
@@ -118,10 +138,17 @@ def send_telegram(
         # 문구를 바꾸면 조용히 깨지는 취약한 방식이라 제거. parse_mode 가 있는 메시지의
         # 400 은 대부분 파싱 실패이고, 아니어도(chat not found 등) 평문 1회 재시도 후
         # 같은 예외로 실패하므로 동작 변화 없음. 400 외(403/429/5xx)는 재시도 없이 전파.
+        # 재전송 본문은 strip_md 로 서식 문자를 걷어낸 평문 — `*굵게*` 가 별표째 보이지 않게.
         if parse_mode and e.status_code == 400:
+            # 지연 import: src.utils 는 pandas 를 끌어오므로 모듈 상단에서 import 하면
+            # scripts/notify_owner.py(레플리카·pandas 미로딩 제약)가 깨짐 — 폴백 경로에서만 로딩.
+            from src.utils import strip_md
+
+            global _fallback_count
+            _fallback_count += 1
             logger.warning("sendMessage 400 (Markdown 파싱 실패 추정) — 평문으로 재전송 "
-                           "(chat=%s): %s", cid, e)
-            result = _post(None)
+                           "(chat=%s, 누적 %d회): %s", cid, _fallback_count, e)
+            result = _post(None, strip_md(text))
         else:
             raise
     logger.info("텔레그램 전송 완료 (chat=%s, %d자)", cid, len(text))
@@ -224,16 +251,19 @@ def get_updates(offset: int | None = None, timeout: int = 0) -> list[dict[str, A
 
 
 def send_safe(text: str, chat_id: str | None = None,
-              parse_mode: str | None = "Markdown", reply_markup: dict | None = None) -> bool:
+              parse_mode: str | None = "Markdown", reply_markup: dict | None = None,
+              disable_notification: bool = False) -> bool:
     """예외를 삼키는 best-effort 전송 (배치/cron/브로드캐스트 용).
 
     알림 실패가 데이터 파이프라인을 죽이지 않도록 — 실패 시 로그만 남기고 False.
     chat_id 미지정 시 settings.telegram_chat_id (소유자) 로 전송.
     parse_mode=None 이면 평문 (안내·관리 메시지처럼 서식이 불필요/위험할 때).
-    reply_markup: 버튼 dict (선택).
+    reply_markup: 버튼 dict (선택). disable_notification: 무음 도착 (선택, 기본 소리).
+    반환형(bool)은 불변 — bot/subscribers 호출부 그대로.
     """
     try:
-        send_telegram(text, chat_id=chat_id, parse_mode=parse_mode, reply_markup=reply_markup)
+        send_telegram(text, chat_id=chat_id, parse_mode=parse_mode, reply_markup=reply_markup,
+                      disable_notification=disable_notification)
         return True
     except MissingApiKeyError as e:
         logger.warning("텔레그램 미설정 — 전송 생략 (%s)", e)
