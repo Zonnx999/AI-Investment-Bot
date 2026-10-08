@@ -15,15 +15,23 @@ OpenAI chat 호환 API)로 한국어 2~3문장 요약을 생성합니다. **표�
   (라이브러리 경계에서 변환 — §4.5).
 - ``summarize_safe(digest_text)`` — best-effort 래퍼. 킬스위치 확인 후 호출,
   어떤 실패든 warning 로그만 남기고 ``None`` 반환. 다이제스트 경로는 이것만 사용.
-- ``llm_enabled()`` — 킬스위치 (환경변수 ``QUANT_BOT_LLM=0`` 으로 끔).
+- ``llm_enabled()`` — **기본 OFF** (2026-10). ``QUANT_BOT_LLM=1`` (on/true/yes) 일 때만 켬.
 
-⚠️ 배포 전 라이브 스모크 필수 (§4.10 #3)
+기본 OFF 인 이유 (2026-10 결정)
+-------------------------------
+NIM 모델 id 가 4개월에 두 번 퇴역(m2 → m2.7 → HTTP 410)했고, 생성 텍스트가 원문에
+없는 해석을 덧붙이는 충실도 위험이 실측됐으며, 결정론 원칙(CLAUDE.md §1)상 필수 기능이
+아님. 코드는 격리돼 있어 유지하고 opt-in 으로만 사용.
+
+⚠️ 켜기 전 라이브 스모크 필수 (§4.10 #3)
 ----------------------------------------
-기본 모델 id(``minimaxai/minimax-m2.7``, 2026-07 스모크로 확정 — m2 는 NIM 에서 은퇴,
-m3 는 ~54s 로 read timeout 초과)와 응답 스키마(choices[0].message.content)는
-오프라인에서 검증 불가한 외부 가정입니다. 첫 사용 전 실제 NVIDIA API 에 1콜 찔러
-모델 id 유효성·필드 존재를 확인할 것. 틀려도 요약 생략 폴백이라 다이제스트는 안전.
+기본 모델 id(``deepseek-ai/deepseek-v4.1-flash``, 2026-10 실측 3/3 성공·23~37s)와 응답
+스키마(choices[0].message.content / finish_reason)는 오프라인에서 검증 불가한 외부 가정.
+켜기 전 실제 NVIDIA API 에 1콜 찔러 확인할 것. 실패해도 요약 생략 폴백이라 다이제스트는 안전.
 모델/엔드포인트는 ``MINIMAX_MODEL`` / ``MINIMAX_BASE_URL`` 로 교체 가능.
+
+실패 분류: 404/410 → ``ModelRetiredError`` (모델 교체 필요 — 헬스 DM 이 알림),
+``finish_reason == "length"`` → ``DataValidationError`` (잘린 문장을 내보내지 않음).
 """
 
 from __future__ import annotations
@@ -39,6 +47,7 @@ from src.exceptions import (
     ApiHttpError,
     ApiTimeoutError,
     DataValidationError,
+    ModelRetiredError,
     QuantBotError,
     RateLimitError,
 )
@@ -49,9 +58,11 @@ logger = get_logger(__name__)
 
 _SOURCE = "NVIDIA-NIM"
 
-# 생성 파라미터 — 요약은 결정성에 가깝게 (낮은 temperature), 분량은 2~3문장이면 충분
+# 생성 파라미터 — 요약은 결정성에 가깝게 (낮은 temperature), 분량은 2~3문장이면 충분.
+# max_tokens 800: reasoning 계열은 사고 토큰도 이 한도를 씀 — 300 에선 실측으로
+# 문장이 잘림(finish_reason=length). 잘리면 아래에서 실패 처리.
 LLM_TEMPERATURE = 0.3
-LLM_MAX_TOKENS = 300
+LLM_MAX_TOKENS = 800
 
 # 최종 요약 최대 길이 (문자) — 초과분은 "…" 로 잘라 다이제스트 상단을 짧게 유지
 MAX_SUMMARY_CHARS = 500
@@ -71,8 +82,8 @@ _SYSTEM_PROMPT = (
 
 
 def llm_enabled() -> bool:
-    """LLM 요약 킬스위치. ``QUANT_BOT_LLM=0`` (또는 off/false) 이면 비활성."""
-    return os.getenv("QUANT_BOT_LLM", "1").strip().lower() not in ("0", "off", "false")
+    """LLM 요약 opt-in 스위치. 기본 OFF — ``QUANT_BOT_LLM`` 이 1/on/true/yes 일 때만 켬."""
+    return os.getenv("QUANT_BOT_LLM", "0").strip().lower() in ("1", "on", "true", "yes")
 
 
 def _raise_for_status(status_code: int) -> None:
@@ -86,7 +97,19 @@ def _raise_for_status(status_code: int) -> None:
         raise ApiAuthorizationError(msg + " — 권한/플랜 부족", source=_SOURCE)
     if status_code == 429:
         raise RateLimitError(msg + " — 호출 한도 초과", source=_SOURCE)
+    if status_code in (404, 410):
+        raise ModelRetiredError(msg + " — 모델 퇴역/미존재, MINIMAX_MODEL 교체 필요",
+                                status_code=status_code, source=_SOURCE)
     raise ApiHttpError(msg, status_code=status_code, source=_SOURCE)
+
+
+def _finish_reason(body: object) -> str | None:
+    """choices[0].finish_reason 방어적 추출 (없으면 None — 필드가 없는 응답도 허용)."""
+    try:
+        reason = body["choices"][0].get("finish_reason")  # type: ignore[index]
+    except (TypeError, KeyError, IndexError, AttributeError):
+        return None
+    return reason if isinstance(reason, str) else None
 
 
 def _extract_content(body: object) -> str | None:
@@ -138,8 +161,10 @@ def summarize(digest_text: str) -> str:
     MissingApiKeyError     MINIMAX_API_KEY 미설정 (HTTP 호출 전에 발생)
     ApiAuthError / ApiAuthorizationError / RateLimitError / ApiHttpError
                            NVIDIA API 4xx/5xx
+    ModelRetiredError      404/410 — 모델 id 퇴역 (MINIMAX_MODEL 교체)
     ApiTimeoutError / ApiConnectionError   네트워크 실패
-    DataValidationError    응답이 JSON 이 아니거나 스키마 위반, 또는 내용이 빈 문자열
+    DataValidationError    응답이 JSON 이 아니거나 스키마 위반, 내용이 빈 문자열,
+                           또는 finish_reason == "length" (max_tokens 에서 잘림)
     """
     import requests
 
@@ -158,7 +183,7 @@ def summarize(digest_text: str) -> str:
     headers = {"Authorization": f"Bearer {api_key}"}
 
     try:
-        # LLM 생성은 데이터 API 보다 느림 (m2.7 실측 ~7s, 리즈닝 버스트 여유) — read 60s
+        # LLM 생성은 데이터 API 보다 느림 (deepseek-v4.1-flash 실측 23~37s) — read 60s
         response = get_http_session().post(
             url, json=payload, headers=headers, timeout=(5.0, 60.0)
         )
@@ -176,6 +201,12 @@ def summarize(digest_text: str) -> str:
     except ValueError as e:
         raise DataValidationError("LLM 요약 응답이 JSON 이 아님", source=_SOURCE) from e
 
+    if _finish_reason(body) == "length":
+        # 잘린 문장(예: '...비' 에서 끊김)을 사용자에게 내보내지 않음 — 요약 생략이 낫다
+        raise DataValidationError(
+            f"LLM 요약 잘림 (finish_reason=length, max_tokens={LLM_MAX_TOKENS})",
+            source=_SOURCE,
+        )
     content = _extract_content(body)
     if not content or not content.strip():
         raise DataValidationError(
@@ -193,10 +224,10 @@ def summarize(digest_text: str) -> str:
 def summarize_safe(digest_text: str) -> str | None:
     """best-effort 요약 — 어떤 실패든 요약만 생략하고 None (다이제스트 발송 불가침).
 
-    킬스위치(``QUANT_BOT_LLM=0``)가 켜져 있거나 키 미설정이면 HTTP 호출 없이 생략.
+    꺼져 있거나(기본 — ``QUANT_BOT_LLM`` 미설정) 키 미설정이면 HTTP 호출 없이 생략.
     """
     if not llm_enabled():
-        logger.info("LLM 요약 비활성 (QUANT_BOT_LLM) — 생략")
+        logger.info("LLM 요약 꺼짐 (QUANT_BOT_LLM 미설정 — 켜려면 1) — 생략")
         return None
     try:
         return summarize(digest_text)

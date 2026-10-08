@@ -28,7 +28,6 @@ class Settings:
 
     # API keys
     anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
-    minimax_api_key: str = os.getenv("MINIMAX_API_KEY", "")  # NVIDIA NIM(MiniMax) LLM 요약 (ROADMAP §2.1, 구현 대기)
     fred_api_key: str = os.getenv("FRED_API_KEY", "")
     fmp_api_key: str = os.getenv("FMP_API_KEY", "")
     news_api_key: str = os.getenv("NEWS_API_KEY", "")
@@ -36,12 +35,15 @@ class Settings:
     dart_api_key: str = os.getenv("DART_API_KEY", "")  # DART 전자공시 (한국 재무제표, Phase 9b)
 
     # LLM 다이제스트 요약 (ROADMAP §2.1, 선택) — NVIDIA NIM (OpenAI chat 호환)
+    # 기본 OFF (QUANT_BOT_LLM=1 로 opt-in, src/llm.py). 키 이름 MINIMAX_* 는 하위호환으로 유지.
     # ⚠️ 기본 모델 id 는 배포 전 라이브 스모크로 검증 필수 (§4.10 #3, src/llm.py 참고)
     minimax_api_key: str = os.getenv("MINIMAX_API_KEY", "")
     minimax_base_url: str = os.getenv("MINIMAX_BASE_URL", "https://integrate.api.nvidia.com/v1")
-    # 2026-07 라이브 스모크: minimax-m2 는 NIM 카탈로그에서 은퇴.
-    # m2.7(~7s)·m3(~54s, read timeout 초과) 중 m2.7 채택
-    minimax_model: str = os.getenv("MINIMAX_MODEL", "minimaxai/minimax-m2.7")
+    # 이력: minimax-m2 → m2.7 (2026-07) → m2.7 도 HTTP 410 퇴역 (2026-10).
+    # 2026-10 실측(각 1~3콜): deepseek-v4.1-flash 3/3 성공 23~37s·수치 충실 /
+    # glm-5.3-flash 는 reasoning 토큰 소진으로 문장 절단 / gemma-4-31b-it 60s 타임아웃.
+    # ⚠️ .env 에 MINIMAX_MODEL 이 있으면 이 기본값을 덮어씀 — 퇴역 id 가 남아 있지 않은지 확인.
+    minimax_model: str = os.getenv("MINIMAX_MODEL", "deepseek-ai/deepseek-v4.1-flash")
 
     # 알림 채널 (Phase 7) — telegram_chat_id 는 소유자(Phase 11a 승인자) 겸 항상 수신자
     telegram_bot_token: str = os.getenv("TELEGRAM_BOT_TOKEN", "")

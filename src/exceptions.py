@@ -20,7 +20,8 @@ QuantBotError                    프로젝트 모든 예외의 베이스
 │   ├── ApiHttpError             HTTP 4xx/5xx (status_code 보유)
 │   │   ├── ApiAuthError         401 — 키 자체가 무효
 │   │   ├── ApiAuthorizationError 403 — 플랜/권한 부족
-│   │   └── RateLimitError       429 — 호출 한도 초과
+│   │   ├── RateLimitError       429 — 호출 한도 초과
+│   │   └── ModelRetiredError    404/410 — LLM 모델 id 퇴역/미존재
 │   ├── ApiTimeoutError          네트워크 타임아웃
 │   ├── ApiConnectionError       DNS/접속 실패
 │   └── DataValidationError      응답이 비었거나 스키마 위반
@@ -108,6 +109,17 @@ class RateLimitError(ApiHttpError):
 
     def __init__(self, message: str, source: str | None = None):
         super().__init__(message, status_code=429, source=source)
+
+
+class ModelRetiredError(ApiHttpError):
+    """HTTP 404/410 — LLM 모델 id 가 카탈로그에서 퇴역했거나 존재하지 않음.
+
+    일시 장애(5xx)와 달리 재시도로 안 낫고 설정(MINIMAX_MODEL) 교체가 필요하므로
+    별도 타입 — 헬스 리포트가 '모델 퇴역 — MINIMAX_MODEL 교체' 로 소유자에게 알림.
+    """
+
+    def __init__(self, message: str, status_code: int = 410, source: str | None = None):
+        super().__init__(message, status_code=status_code, source=source)
 
 
 class ApiTimeoutError(DataFetchError):
