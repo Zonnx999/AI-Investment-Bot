@@ -1,355 +1,597 @@
-"""src/digest.py — format_digest 순수 포매터 (오프라인, 합성 리포트 객체)."""
+"""src/digest.py — 다이제스트 v2 순수 렌더러·판정·조립 (오프라인, 합성 객체 + tmp DB)."""
 
 from __future__ import annotations
 
 from datetime import datetime
-from zoneinfo import ZoneInfo
 
-from src.digest import format_digest
-from src.predictors import LeadLagResult
-from src.signals import Alert, FactorScores, SignalReport
+import pandas as pd
+import pytest
+
+import src.storage as storage_mod
+from src import digest as dg
+from src.config import settings
+from src.health import HealthReport
+from src.signals import Alert, AssetObs, KrContext, RegimeView, SignalReport
 from src.universe import ScanRow
+from tests.md_legacy import assert_bold_only
 
-KST = ZoneInfo("Asia/Seoul")
-NOW = datetime(2026, 6, 14, 7, 0, tzinfo=KST)
+NOW_KR = datetime(2026, 10, 8, 8, 30, tzinfo=dg.KST)
+NOW_US = datetime(2026, 10, 8, 22, 0, tzinfo=dg.KST)
+
+ADVERSARIAL = "A_B*C`D[E Holdings, Inc."
 
 
-def _report(**kw) -> SignalReport:
-    base = dict(
-        generated_at="2026-06-14T07:00:00+09:00",
-        regime_label="🟢 위험선호 (Risk-on)",
-        factors=[FactorScores("NVDA", 100, 14, 77, 64), FactorScores("CPNG", 0, 30, 57, 29)],
-        candidates=[],
-        alerts=[],
-        first_run=False,
-    )
+# ----------------------------------------------------------------------
+# 합성 입력 헬퍼
+# ----------------------------------------------------------------------
+
+
+def _row(sym, name, total, v, h, market="KR", sector="", flags=(), excluded=None):
+    return ScanRow(symbol=sym, market=market, name=name, sector=sector, price=0.0,
+                   market_cap=1e9, total_score=total, value_score=v, health_score=h, roe=None,
+                   flags=tuple(flags), excluded=excluded, fund_asof="2026-10-05")
+
+
+def _obs(label, last, chg, dd, ma, chg20=None, asof="2026-10-07"):
+    return AssetObs(label=label, asof=asof, last=last, chg_1d_pct=chg, chg_1d_abs=None,
+                    chg_20d_pct=chg20, dd_52w_pct=dd, vs_ma200_pct=ma, vol_ratio=1.0, n_52w=250)
+
+
+def _metrics(price, ma, dd, mdd, vol, adj=None):
+    return dg.PriceMetrics(price=price, asof="2026-10-07", adj_last=adj if adj is not None else price,
+                           vs_ma200_pct=ma, dd_52w_pct=dd, mdd_1y_pct=mdd, vol_pct=vol)
+
+
+_RISK_ON = "🟢 위험선호 (Risk-on)"
+_REASON = "근거: 금리차 +0.51%p(+1) · HY 3.03%(0) · 실업수당 z-1.4(+1) — 3/3 지표, 10-07 기준"
+_ACTIVE = ["KOSPI -25% (07-03~, 임계 -12%)", "KOSDAQ -27% (임계 -15%)",
+           "장기국채 (20Y+) -12% (임계 -10%)", "금 -24% (임계 -10%)", "비트코인 -33% (임계 -25%)"]
+
+
+def _report(market="KR", alerts=(), held=False, first_run=False, active=None, pending=None,
+            kr=True):
+    shown = f"{_RISK_ON} · 직전 판정 유지 (지표 2/3)" if held else _RISK_ON
+    rv = RegimeView(shown_label=shown, score=2, available=2 if held else 3, total=3, held=held,
+                    pending=pending, prev_label=None, reason_line=_REASON,
+                    pending_count=1 if pending else 0)
+    ctx = None
+    if market == "KR" and kr:
+        ctx = KrContext(kospi=_obs("KOSPI", 6804, -2.0, -25.4, 7.1),
+                        kosdaq=_obs("KOSDAQ", 898, -2.3, -26.7, -8.7),
+                        usdkrw=_obs("원/달러", 1339.7, -0.3, -3.0, -8.0, chg20=-0.3))
+    return SignalReport(generated_at="2026-10-07T23:30:00+00:00", regime_label=shown, factors=[],
+                        candidates=[], alerts=list(alerts), first_run=first_run, regime=rv, kr=ctx,
+                        active=list(_ACTIVE if active is None else active),
+                        pending_state={"v": 2, "pick_dd10": {}})
+
+
+KR_ROWS = [_row("009970", "영원무역홀딩스", 92, 94, 90), _row("007700", "F&F홀딩스", 92, 97, 88),
+           _row("284740", "쿠쿠홈시스", 92, 94, 89), _row("041510", "에스엠", 90, 84, 95, sector="우량기업부"),
+           _row("073240", "금호타이어", 90, 94, 85), _row("003090", "대웅", 90, 92, 89)]
+KR_PX = [170900, 13470, 24900, 79000, 6660, 15700]
+KR_MA = [-10, -22, 5, -15, 10, -23]
+KR_SINCE = [-11.5, -9.4, 18.0, 5.5, -7.0, -9.7]
+OVERNIGHT = "간밤 미국 S&P500 7,802 -0.2% · 나스닥 27,539 -0.2% · 10년물 5.28% · VIX 15.1"
+
+SUMMARY_KR = {
+    "market": "KR", "rule_version": "v1", "since": "2026-07-13", "entry_date": "2026-07-13",
+    "price_asof": "2026-10-07", "computed_at": "2026-10-07T23:00:00+00:00",
+    "cum_port": -2.35, "cum_bench": -0.04, "excess_pp": -2.31, "mdd_port": -6.8, "mdd_bench": -25.0,
+    "bench_label": "홈지수", "blocks": {"n": 3, "mean": -1.5, "t": -0.6, "blocks": [1.0, -2.0, -3.0]},
+    "status": "pending", "has_reconstructed": True, "events": {"n": 6},
+}
+SUMMARY_US = dict(SUMMARY_KR, market="US", bench_label="SPY", cum_port=-0.55, cum_bench=4.0,
+                  excess_pp=-4.55)
+
+
+def _kr_views(rows=KR_ROWS, kind="keep", since=KR_SINCE):
+    return [dg.PickView(row=r, kind=kind, metrics=_metrics(p, m, -20, -30, 40), since_pct=s,
+                        since_date="2026-07-13")
+            for r, p, m, s in zip(rows, KR_PX, KR_MA, since)]
+
+
+def _health(market="KR", **kw):
+    base = dict(market=market, started_at=NOW_KR if market == "KR" else NOW_US, storage="ok",
+                universe_as_of="2026-10-05", regime_ok=3, regime_total=3)
     base.update(kw)
-    return SignalReport(**base)
+    return HealthReport(**base)
 
 
-def _pred(target, reliable, r2, lag=6) -> LeadLagResult:
-    return LeadLagResult(
-        leading_name="X", target_name=target, best_lag_months=lag,
-        correlation=0.6, r_squared=r2, slope=1.0, intercept=0.0, n_obs=120,
-        latest_leading_value=5.0, predicted_change_pct=10.0,
-        direction="상승 ↑", reliable=reliable,
+def _kr_quiet_inputs(**over) -> dg.DigestInputs:
+    diff = dg.ListDiff(prev_date="2026-10-07", first_run=False, kept=[r.symbol for r in KR_ROWS])
+    base = dict(
+        market="KR", now=NOW_KR, verdict=dg.decide_actions(diff, []), diff=diff, views=_kr_views(),
+        report=_report(), health=_health(), price_asof="2026-10-07", score_asof="2026-10-05",
+        stale_warn=False, list_since="2026-09-29", overnight_line=OVERNIGHT,
+        ledger_summary=SUMMARY_KR, ledger_has_history=True,
     )
+    base.update(over)
+    return dg.DigestInputs(**base)
 
 
-def test_digest_includes_regime_and_factors():
-    out = format_digest(_report(), [], now=NOW)
-    assert "위험선호" in out
-    assert "NVDA" in out and "CPNG" in out
-    assert "2026-06-14" in out
+US_ROWS = [_row("UVE", "Universal Insurance Holdings, Inc.", 85, 81, 89, "US", "Financial Services", ("fin_neutral",)),
+           _row("VSNT", "Versant Media Group, Inc. Class A", 84, 90, 77, "US", "Industrials"),
+           _row("CALM", "Cal-Maine Foods, Inc.", 92, 92, 92, "US", "Consumer Defensive"),
+           _row("HG", "Hamilton Insurance Group, Ltd.", 88, 88, 88, "US", "Financial Services"),
+           _row("EOG", "EOG Resources, Inc.", 86, 81, 91, "US", "Energy"),
+           _row("SM", "SM Energy Company", 86, 89, 84, "US", "Energy")]
 
 
-def test_digest_factors_sorted_by_composite():
-    out = format_digest(_report(), [], now=NOW)
-    assert out.index("NVDA") < out.index("CPNG")   # 종합 64 > 29
-
-
-def test_digest_shows_alerts_when_present():
-    rep = _report(alerts=[Alert("warning", "regime", "국면 전환: A → B")])
-    out = format_digest(rep, [], now=NOW)
-    assert "🔔" in out
-    assert "국면 전환" in out
-
-
-def test_digest_no_alert_line_when_none():
-    out = format_digest(_report(alerts=[]), [], now=NOW)
-    assert "어제와 큰 변화 없음" in out
-
-
-def test_digest_reliable_predictions_shown_weak_counted():
-    preds = [
-        _pred("BTC 수익률", True, 0.63),
-        _pred("SOXX 수익률", True, 0.34),
-        _pred("XHB 수익률", False, 0.11),
+def _us_change_inputs(**over) -> dg.DigestInputs:
+    views = [
+        dg.PickView(row=US_ROWS[0], kind="new", metrics=_metrics(45.25, 21, 0.0, -18, 38),
+                    evidence="이익수익률 19% · EV/EBITDA 2.5배 · ROE 33% · 금융업"),
+        dg.PickView(row=US_ROWS[1], kind="new", metrics=_metrics(31.44, -14, -32, -42, 42),
+                    evidence="이익수익률 14% · EV/EBITDA 3.3배 · ROE 9%"),
+        dg.PickView(row=US_ROWS[2], kind="keep", metrics=_metrics(62.7, -21, -30, -35, 30), since_pct=-24.8),
+        dg.PickView(row=US_ROWS[3], kind="keep", metrics=_metrics(34.32, 10, -5, -12, 25), since_pct=-2.4),
+        dg.PickView(row=US_ROWS[4], kind="keep", metrics=_metrics(144.21, 10, -3, -15, 28), since_pct=4.1),
+        dg.PickView(row=US_ROWS[5], kind="keep", metrics=_metrics(35.25, 25, -2, -20, 45), since_pct=18.6),
     ]
-    out = format_digest(_report(), preds, now=NOW)
-    assert "BTC 수익률" in out
-    assert "SOXX 수익률" in out
-    assert "그 외 1개 약함" in out
-
-
-def test_digest_all_weak_predictions_message():
-    out = format_digest(_report(), [_pred("BTC", False, 0.05)], now=NOW)
-    assert "신뢰할 만한 예측 없음" in out
-
-
-def test_digest_shows_candidates():
-    rep = _report(candidates=[{"ticker": "AAPL", "pe": 12.5, "reasons": []}])
-    out = format_digest(rep, [], now=NOW)
-    assert "AAPL" in out
-    assert "P/E 12.5" in out
-
-
-def test_digest_handles_loss_maker_candidate():
-    rep = _report(candidates=[{"ticker": "RIVN", "pe": None, "reasons": []}])
-    out = format_digest(rep, [], now=NOW)
-    assert "적자" in out
-
-
-def test_digest_injects_us_company_names():
-    # names 맵이 주어지면 US 발굴 종목에 회사명을 곁들임 (B)
-    out = format_digest(_report(), [], now=NOW, names={"NVDA": "NVIDIA Corp"})
-    assert "NVIDIA Corp" in out
-
-
-def test_digest_factor_legend_present():
-    # 점수 의미 범례 한 줄 (C)
-    out = format_digest(_report(), [], now=NOW)
-    assert "높을수록 매력적" in out
-
-
-def test_digest_prediction_direction_icon():
-    # 예측 가독성 (E): 상승 → 📈, 하락 → 📉
-    up = format_digest(_report(), [_pred("BTC 수익률", True, 0.6)], now=NOW)
-    assert "📈" in up
-    down = _pred("XLE 수익률", True, 0.5)
-    down.direction = "하락 ↓"
-    out = format_digest(_report(), [down], now=NOW)
-    assert "📉" in out
-    assert "개월 선행" in out   # 'M' → '개월 선행' 풀어쓰기
-
-
-# ---------------- Finding 기반 렌더링 — 기존 포맷 byte-identical (13a) ----------------
-
-
-def test_digest_factor_lines_exact_format():
-    # 팩터 섹션이 Finding 경로로 바뀌어도 줄 포맷은 리팩토링 전과 동일해야 함
-    out = format_digest(_report(), [], now=NOW, names={"NVDA": "NVIDIA Corp"})
-    assert "  `NVDA` *NVIDIA Corp* — 종합 *64*" in out       # 이름 있음 (int 렌더 유지)
-    assert "  `CPNG` — 종합 *29*" in out                     # 이름 없음
-    assert "     모멘텀 100 · 밸류 14 · 퀄리티 77 · 로우볼 0" in out
-
-
-def test_digest_candidate_lines_exact_format():
-    rep = _report(candidates=[{"ticker": "AAPL", "pe": 12.5, "reasons": []},
-                              {"ticker": "RIVN", "pe": None, "reasons": []}])
-    out = format_digest(rep, [], now=NOW, names={"AAPL": "Apple Inc."})
-    assert "  `AAPL` *Apple Inc.* — P/E 12.5" in out
-    assert "  `RIVN` — 적자" in out
-
-
-def test_digest_prediction_lines_exact_format():
-    preds = [_pred("BTC 수익률", True, 0.63), _pred("XHB 수익률", False, 0.11)]
-    out = format_digest(_report(), preds, now=NOW)
-    assert "  📈 BTC 수익률: 상승 ↑ (6개월 선행, 신뢰도 R² 0.63)" in out
-    assert "  _그 외 1개 약함 (참고 제외)_" in out
-
-
-# ---------------- 시장별 (Step 1: KR/US 발굴 분리) ----------------
-
-
-def _kr_pick(symbol, name, total, value, health, per, pbr) -> ScanRow:
-    return ScanRow(symbol=symbol, market="KR", name=name, sector="", price=0.0,
-                   market_cap=0.0, total_score=total, value_score=value,
-                   health_score=health, roe=None, per=per, pbr=pbr)
-
-
-def test_us_digest_has_us_market_label():
-    out = format_digest(_report(), [], now=NOW, market="us")
-    assert "🇺🇸 미국" in out
-    assert "모멘텀" in out          # US 는 4팩터(모멘텀 포함) 표
-
-
-def test_kr_digest_renders_korean_picks_not_us_factors():
-    picks = [_kr_pick("005930", "삼성전자", 77, 80, 74, 8.6, 1.06),
-             _kr_pick("000270", "기아", 75, 88, 70, 4.2, 0.90)]
-    out = format_digest(_report(), [], now=NOW, market="kr", kr_picks=picks)
-    assert "🇰🇷 한국" in out
-    assert "삼성전자" in out and "005930" in out
-    assert "PER 8.6" in out and "PBR 1.06" in out
-    # KR 다이제스트엔 US 팩터 표(모멘텀 포함)가 안 나와야 함
-    assert "모멘텀" not in out
-    assert "NVDA" not in out
-
-
-def test_kr_digest_handles_missing_per_pbr():
-    out = format_digest(_report(), [], now=NOW, market="kr",
-                        kr_picks=[_kr_pick("123456", "적자기업", 30, 40, 20, None, None)])
-    assert "PER —" in out and "PBR —" in out
-
-
-def test_kr_digest_empty_picks_keeps_common_sections():
-    out = format_digest(_report(), [_pred("SOXX 수익률", True, 0.34)], now=NOW,
-                        market="kr", kr_picks=[])
-    assert "발굴 종목 (한국)" not in out      # 빈 섹션 생략
-    assert "위험선호" in out                   # 국면(공통) 유지
-    assert "SOXX 수익률" in out                # 예측(공통) 유지
-
-
-# -------- send_daily_digest: 수신자 0명이면 무거운 조립 생략 (#5) --------
-
-
-def test_broadcast_skips_build_when_no_recipients(monkeypatch):
-    """active 구독자 0명이면 build_daily_digest(fetch+분석) 를 호출하지 않고 즉시 반환."""
-    import src.digest as digest
-    from src import subscribers
-
-    monkeypatch.setattr(subscribers, "ensure_owner", lambda: None)
-    monkeypatch.setattr(subscribers, "active_subscribers", lambda: [])
-
-    def _boom(*a, **k):
-        raise AssertionError("수신자 0명인데 build_daily_digest 가 호출됨")
-
-    monkeypatch.setattr(digest, "build_daily_digest", _boom)
-
-    result = digest.send_daily_digest()
-    assert result == {"sent": 0, "failed": 0, "recipients": 0}
-# ---------------- LLM 한 줄 요약 (ROADMAP §2.1 — 표현 레이어) ----------------
-
-
-def test_digest_renders_summary_at_top():
-    out = format_digest(_report(), [], now=NOW, summary="오늘은 위험선호 분위기가 이어졌습니다.")
-    assert out.startswith("🧠 오늘은 위험선호 분위기가 이어졌습니다.\n\n")
-    assert "일일 투자 신호" in out             # 본문은 그대로 뒤따름
-    assert "NVDA" in out
-
-
-def test_digest_without_summary_unchanged():
-    out = format_digest(_report(), [], now=NOW)
-    assert "🧠" not in out
-    assert out.startswith("*📊 일일 투자 신호*")
-
-
-def test_with_summary_pure_helper():
-    from src.digest import with_summary
-    assert with_summary("본문", "요약") == "🧠 요약\n\n본문"
-    assert with_summary("본문", None) == "본문"      # 실패/생략 시 원문 그대로
-    assert with_summary("본문", "") == "본문"
-
-
-# ---------------- send_daily_digest 배선 — LLM 실패해도 발송 불가침 ----------------
-
-
-def _broadcast_env(monkeypatch, digest_text="본문 다이제스트"):
-    """send_daily_digest 의 무거운 조립/전송/DB 를 전부 스텁. 전송된 텍스트 목록 반환."""
-    import src.digest as digest_mod
-
-    sent: list[str] = []
-
-    class _FakeStorage:
-        def sync(self):
-            pass
-
-    monkeypatch.setattr(digest_mod, "build_daily_digest", lambda **kw: digest_text)
-    monkeypatch.setattr("src.subscribers.ensure_owner", lambda: None)
-    monkeypatch.setattr("src.subscribers.active_subscribers", lambda: [("1", "leo")])
-    monkeypatch.setattr("src.notifier.send_safe",
-                        lambda text, chat_id: sent.append(text) or True)
-    monkeypatch.setattr("src.storage.get_storage", lambda: _FakeStorage())
-    return sent
-
-
-def test_send_daily_digest_sends_even_when_llm_fails(monkeypatch):
-    import src.digest as digest_mod
-    import src.llm as llm_mod
-    from src.exceptions import ApiHttpError
-
-    sent = _broadcast_env(monkeypatch)
-
-    def _boom(text):
-        raise ApiHttpError("LLM down", status_code=500, source="NVIDIA-NIM")
-
-    monkeypatch.setattr(llm_mod, "summarize", _boom)
-    result = digest_mod.send_daily_digest(use_llm=True)
-    assert result == {"sent": 1, "failed": 0, "recipients": 1}
-    assert sent == ["본문 다이제스트"]           # 요약 실패 → 원문 그대로 발송
-
-
-def test_send_daily_digest_prepends_summary_on_success(monkeypatch):
-    import src.digest as digest_mod
-    import src.llm as llm_mod
-
-    sent = _broadcast_env(monkeypatch)
-    monkeypatch.setenv("QUANT_BOT_LLM", "1")          # LLM 기본 OFF (2026-10) — opt-in 경로 검증
-    monkeypatch.setattr(llm_mod, "summarize", lambda text: "조용한 하루였습니다.")
-    digest_mod.send_daily_digest(use_llm=True)
-    assert sent == ["🧠 조용한 하루였습니다.\n\n본문 다이제스트"]
-
-
-def test_send_daily_digest_use_llm_false_skips_llm_entirely(monkeypatch):
-    import src.digest as digest_mod
-    import src.llm as llm_mod
-
-    sent = _broadcast_env(monkeypatch)
-    called: list[str] = []
-    monkeypatch.setattr(llm_mod, "summarize_safe",
-                        lambda text: called.append(text) or "요약")
-    digest_mod.send_daily_digest(use_llm=False)
-    assert called == []                          # --no-llm: 호출 자체가 없어야 함
-    assert sent == ["본문 다이제스트"]
-
-
-# ---------------- 제안 비중 (Phase 13c) ----------------
-
-
-def test_digest_weights_rendered_with_cash_legend():
-    """weights 주어지면 발굴 라인에 '제안 N%' + 현금 잔여 범례. 0% 도 표시(엣지 없음)."""
-    out = format_digest(_report(), [], now=NOW,
-                        weights={"NVDA": 0.25, "CPNG": 0.0})
-    assert "종합 *64* · 제안 25%" in out
-    assert "종합 *29* · 제안 0%" in out
-    assert "제안 비중: 역변동성·Kelly 상한" in out
-    assert "현금 75%" in out                                # 1 - 0.25 잔여
-
-
-def test_digest_weights_partial_and_full_invested():
-    """weights 에 없는 종목은 종전 그대로, 합≈1 이면 현금 문구 생략."""
-    out = format_digest(_report(), [], now=NOW, weights={"NVDA": 1.0})
-    assert "종합 *64* · 제안 100%" in out
-    assert "  `CPNG` — 종합 *29*\n" in out                  # 비중 없는 종목은 종전 포맷
-    assert "현금" not in out
-
-
-def test_digest_weights_none_output_identical():
-    """weights=None(기본) 은 리팩토링 전과 동일 출력 — '제안' 문구 자체가 없음."""
-    assert format_digest(_report(), [], now=NOW) == format_digest(
-        _report(), [], now=NOW, weights=None)
-    assert "제안" not in format_digest(_report(), [], now=NOW)
-
-
-def test_propose_weights_guards(monkeypatch):
-    """_propose_weights — 2종목 미만 None / 파이프라인 실패 None (다이제스트 불변 원칙)."""
-    from src import digest as digest_mod
-    from src.exceptions import InsufficientDataError
-
-    assert digest_mod._propose_weights(["NVDA"]) is None    # <2 종목: 조회 없이 종료
-
-    import pandas as pd
-    idx = pd.bdate_range("2024-01-01", periods=100)
-    fake_px = pd.DataFrame({"Close": range(100, 200)}, index=idx)
-    monkeypatch.setattr("src.data_fetcher.fetch_prices", lambda t, **k: fake_px)
-    monkeypatch.setattr(
-        "src.portfolio.propose",
-        lambda *a, **k: (_ for _ in ()).throw(InsufficientDataError("표본 부족")),
+    diff = dg.ListDiff(prev_date="2026-10-07", first_run=False, new=["UVE", "VSNT"],
+                       dropped=[dg.DroppedPick("MGR", "Affiliated Managers", "필터 제외 (보통주 아님 등)"),
+                                dg.DroppedPick("AFGE", "American Financial", "필터 제외 (보통주 아님 등)")],
+                       kept=["CALM", "HG", "EOG", "SM"])
+    base = dict(
+        market="US", now=NOW_US, verdict=dg.decide_actions(diff, []), diff=diff, views=views,
+        report=_report("US", kr=False), health=_health("US"), price_asof="2026-10-07",
+        score_asof="2026-10-05", stale_warn=False, ledger_summary=SUMMARY_US, ledger_has_history=True,
     )
-    assert digest_mod._propose_weights(["NVDA", "CPNG"]) is None
+    base.update(over)
+    return dg.DigestInputs(**base)
 
 
-def test_propose_weights_happy_path(monkeypatch):
-    """정상 경로 — propose 결과의 weights 가 그대로 반환 + 노트는 로그로만."""
-    import pandas as pd
-    from src import digest as digest_mod
-    from src.portfolio import PortfolioProposal
+# ----------------------------------------------------------------------
+# 골든 목업 (현재 구현 기준으로 고정 — 형식이 바뀌면 의도된 변경인지 확인할 것)
+# ----------------------------------------------------------------------
 
-    idx = pd.bdate_range("2024-01-01", periods=100)
-    fake_px = pd.DataFrame({"Close": range(100, 200)}, index=idx)
-    monkeypatch.setattr("src.data_fetcher.fetch_prices", lambda t, **k: fake_px)
-    monkeypatch.setattr(
-        "src.portfolio.propose",
-        lambda cands, prices, **k: PortfolioProposal(
-            weights={"NVDA": 0.6, "CPNG": 0.2}, cash_weight=0.2, notes=("테스트",)),
+GOLDEN_A_KR_QUIET = """\
+*🇰🇷 10-08(목) 08:30 · 오늘 할 일: 없음* — 후보 변화 없음 · 새 알림 없음
+기준: 시세 10-07 종가 · 점수 10-05 (3일 전)
+
+*🇰🇷 한국 시장*
+코스피 6,804 -2.0% · 200일선 +7% · 52주 고점比 -25% ⚠️ 경보 중
+코스닥 898 -2.3% · 200일선 -9% · 52주 고점比 -27% ⚠️ 경보 중
+원/달러 1,339.7 · 1개월 -0.3% · 200일선 -8%
+간밤 미국 S&P500 7,802 -0.2% · 나스닥 27,539 -0.2% · 10년물 5.28% · VIX 15.1
+
+*🌐 글로벌* (아침 1회)
+국면 🟢 위험선호 (Risk-on) (지표 3/3, 현황 설명용) — 금리차 +0.51%p(+1) · HY 3.03%(0) · 실업수당 z-1.4(+1)
+새 알림 없음 · 경보 유지 5: KOSPI -25% · KOSDAQ -27% · 장기국채 (20Y+) -12% · 외 2
+
+*📋 한국 스크리닝 후보 6* — 변화 없음 (09-29 이후 동일)
+009970 영원무역홀딩스 92 · 170,900원 · 200일선 -10% · 선정 후 -11.5%
+007700 F&F홀딩스 92 · 13,470원 · 200일선 -22% · 선정 후 -9.4%
+284740 쿠쿠홈시스 92 · 24,900원 · 200일선 +5% · 선정 후 +18.0%
+041510 에스엠 90 · 79,000원 · 200일선 -15% · 선정 후 +5.5%
+073240 금호타이어 90 · 6,660원 · 200일선 +10% · 선정 후 -7.0%
+003090 대웅 90 · 15,700원 · 200일선 -23% · 선정 후 -9.7%
+점수 = 재무점수(밸류+건전성, DART 연간, 가격요인 없음) · 가격 줄은 참고용 · 상세 /stock 코드
+
+*📒 지난 후보 성과*
+성적: 07-13 이후 이 리스트 보유 -2.4% · 홈지수 -0.0% · 초과 -2.3%p (10-07 종가, 비용 포함) · 소급 포함 · ⏳검증 전 3/6
+
+규칙 기반 참고 자료 · 투자 자문 아님 — 투자 결정은 본인 책임"""
+
+GOLDEN_B_US_CHANGE = """\
+*🇺🇸 10-08(목) 22:00 · 오늘 할 일: 매수 검토 2 · 탈락 2* — 후보 변경일 · 새 알림 없음
+기준: 시세 10-07 종가 · 점수 10-05 (3일 전) · 개장 전
+
+*🌐 아침 이후 변화* — 없음 (국면·자산 경보는 아침 메시지 참고)
+
+*📋 미국 스크리닝 후보 6* — 신규 2 · 탈락 2 · 유지 4
+🆕 UVE Universal Insurance Hold — 85 (밸류 81 · 건전성 89)
+   $45.25 · 52주 신고가 · 200일선 +21% · 1년 최대낙폭 -18% · 변동성 38%
+   근거: 이익수익률 19% · EV/EBITDA 2.5배 · ROE 33% · 금융업
+🆕 VSNT Versant Media Group, Inc — 84 (밸류 90 · 건전성 77)
+   $31.44 · 52주 고점比 -32% · 200일선 -14% · 1년 최대낙폭 -42% · 변동성 42%
+   근거: 이익수익률 14% · EV/EBITDA 3.3배 · ROE 9%
+➖ MGR · AFGE 탈락 — 필터 제외 (보통주 아님 등)
+유지 4
+CALM Cal-Maine Foods, Inc. 92 · $62.70 · 200일선 -21% · 선정 후 -24.8%
+HG Hamilton Insurance Group 88 · $34.32 · 200일선 +10% · 선정 후 -2.4%
+EOG EOG Resources, Inc. 86 · $144.21 · 200일선 +10% · 선정 후 +4.1%
+SM SM Energy Company 86 · $35.25 · 200일선 +25% · 선정 후 +18.6%
+점수 = 재무점수(밸류+건전성, FMP 연간) · 가격 줄은 참고용, 점수 미반영 · 상세 /stock 티커
+
+*📒 지난 후보 성과*
+성적: 07-13 이후 이 리스트 보유 -0.6% · SPY +4.0% · 초과 -4.5%p (10-07 종가, 비용 포함) · 소급 포함 · ⏳검증 전 3/6
+
+규칙 기반 참고 자료 · 투자 자문 아님 — 투자 결정은 본인 책임"""
+
+
+def test_golden_a_kr_quiet_day():
+    text = dg.render_with_budget(_kr_quiet_inputs())
+    assert text == GOLDEN_A_KR_QUIET
+    assert len(text) <= dg.LEN_BUDGET_QUIET["KR"]
+    assert_bold_only(text)
+
+
+def test_golden_b_us_change_day():
+    text = dg.render_with_budget(_us_change_inputs())
+    assert text == GOLDEN_B_US_CHANGE
+    assert len(text) <= dg.LEN_BUDGET_CHANGE
+    assert_bold_only(text)
+
+
+def test_golden_c_kr_degraded_day_status_line_and_basis_warning():
+    """FRED 1개 실패(국면 2/3) + 점수 9일 경과 + 성적표 게이트 미통과."""
+    health = _health(universe_as_of="2026-09-29", regime_ok=2, regime_total=3,
+                     regime_failures=["장단기 금리차 조회 실패"])
+    diff = dg.ListDiff(prev_date="2026-10-07", first_run=False, kept=[r.symbol for r in KR_ROWS])
+    warn = sum(1 for p in health.problems(NOW_KR) if p.user_text)
+    inp = _kr_quiet_inputs(
+        verdict=dg.decide_actions(diff, [], warn_count=warn), health=health,
+        report=_report(held=True), score_asof="2026-09-29", stale_warn=True,
+        ledger_summary=dict(SUMMARY_KR, computed_at="2026-10-01T00:00:00+00:00"),
     )
-    assert digest_mod._propose_weights(["NVDA", "CPNG", "NVDA"]) == {
-        "NVDA": 0.6, "CPNG": 0.2}
+    text = dg.render_with_budget(inp)
+    lines = text.splitlines()
+    assert lines[0] == ("*🇰🇷 10-08(목) 08:30 · 오늘 할 일: 없음* — 후보 변화 없음 · 새 알림 없음 "
+                        "· ⚠️ 데이터 점검 2건")
+    assert lines[1] == "기준: 시세 10-07 종가 · ⚠️ 점수 09-29 (9일 전, 주간 갱신 지연)"
+    assert "국면 🟢 위험선호 (Risk-on) · 직전 판정 유지 (지표 2/3) — 금리차" in text
+    assert "*📒 지난 후보 성과*" not in text                     # 게이트 미통과 → 섹션 생략
+    assert lines[-2] == ("⚙️ 상태: 발굴 데이터 09-29 기준(9일 전) · 국면 지표 2/3 · "
+                         "성적표 6일째 미갱신(마지막 10-07)")
+    assert lines[-1] == dg.DISCLAIMER
+    assert len(text) <= dg.LEN_BUDGET_QUIET["KR"]
+    assert_bold_only(text)
 
 
-def test_digest_weights_sub_half_percent_renders_lt1_not_zero():
-    """0 < w < 0.5% 는 '제안 <1%' — 정확한 0(엣지 없음)과 구분 (§4.10 #5 회귀)."""
-    out = format_digest(_report(), [], now=NOW,
-                        weights={"NVDA": 0.004, "CPNG": 0.0})
-    assert "종합 *64* · 제안 <1%" in out
-    assert "종합 *29* · 제안 0%" in out                     # 진짜 0 은 그대로 0%
+# ----------------------------------------------------------------------
+# decide_actions / diff_lists (순수)
+# ----------------------------------------------------------------------
+
+
+def _prev(*pairs):
+    from src.ledger import LedgerPick
+    return [LedgerPick("2026-10-07", "KR", i + 1, s, s, "069500.KS", "v1", "live", name=s,
+                       total_score=t) for i, (s, t) in enumerate(pairs)]
+
+
+def test_decide_actions_quiet_day():
+    diff = dg.ListDiff(prev_date="2026-10-07", first_run=False, kept=["A"])
+    v = dg.decide_actions(diff, [])
+    assert v.label == "없음" and v.quiet
+    assert v.reasons == ["후보 변화 없음", "새 알림 없음"]
+
+
+def test_decide_actions_counts_and_fixed_vocabulary():
+    diff = dg.ListDiff(prev_date="2026-10-07", first_run=False, new=["X", "Y"],
+                       dropped=[dg.DroppedPick("Z", "z", "순위 밖")], kept=["A"])
+    alerts = [Alert("critical", "shock", "KOSPI 하루 -10.8%", key="shock:KOSPI:2026-07-28"),
+              Alert("warning", "regime", "국면 전환", key="regime:x"),
+              Alert("warning", "drawdown", "금 -12%", key="dd:금:enter")]
+    v = dg.decide_actions(diff, alerts, ["대웅 -10%"], warn_count=1)
+    assert v.label == "매수 검토 2 · 탈락 1 · 리스크 점검 4"
+    assert v.reasons == ["후보 변경일", "KOSPI 급변", "국면 전환 확정", "외 2건", "⚠️ 데이터 점검 1건"]
+
+
+def test_decide_actions_first_run_is_baseline_not_buy():
+    """첫 원장 실행(직전 리스트 없음)은 '기준 수립' — 6종목이 전부 매수 검토가 되지 않는다."""
+    diff = dg.diff_lists([], KR_ROWS)
+    assert diff.first_run and diff.new == [] and len(diff.kept) == 6
+    v = dg.decide_actions(diff, [])
+    assert v.label == "없음"
+    assert v.reasons[0] == "후보 목록 기준 수립 (첫 기록)"
+
+
+def test_diff_lists_reasons_filter_score_rank():
+    prev = _prev(("009970", 92), ("MGR", 86), ("CALM", 92), ("GONE", 80))
+    cur = [KR_ROWS[0], _row("NEW1", "신규", 95, 90, 90)]
+    dropped_rows = {
+        "MGR": _row("MGR", "Affiliated", 86, 80, 80, excluded="sibling"),
+        "CALM": _row("CALM", "Cal-Maine", 79, 70, 70),
+        "GONE": None,
+    }
+    d = dg.diff_lists(prev, cur, dropped_rows, prev_date="2026-10-07")
+    assert d.new == ["NEW1"] and d.kept == ["009970"]
+    assert {x.symbol: x.reason for x in d.dropped} == {
+        "MGR": "필터 제외 (보통주 아님 등)", "CALM": "점수 하락 92→79", "GONE": "순위 밖"}
+    assert d.changed and d.swaps == []
+
+
+def test_diff_lists_tie_swap_is_not_a_change():
+    """탈락·신규의 total_score 가 같으면(시총 tie-break) '↔ 동점 교체' — 판정 카운트 제외."""
+    prev = _prev(("A", 90), ("B", 90))
+    cur = [_row("A", "a", 90, 90, 90), _row("C", "c", 90, 90, 90)]
+    d = dg.diff_lists(prev, cur, {"B": _row("B", "b", 90, 90, 90)})
+    assert d.swaps == [("B", "C")] and d.new == [] and d.dropped == [] and not d.changed
+    v = dg.decide_actions(d, [])
+    assert v.label == "없음" and v.reasons[0] == "후보 변화 없음 (동점 교체만)"
+    lines = dg.render_candidates("KR", [dg.PickView(row=r, kind="keep", metrics=_metrics(1, 0, 0, 0, 0))
+                                        for r in cur], d)
+    assert "↔ 동점 교체: B → C" in lines
+    assert lines[0].endswith("동점 교체 1")
+
+
+# ----------------------------------------------------------------------
+# 섹션 렌더러
+# ----------------------------------------------------------------------
+
+
+def test_render_header_and_basis_formats():
+    v = dg.Verdict(label="없음", reasons=["후보 변화 없음", "새 알림 없음"])
+    assert dg.render_header("KR", NOW_KR, v) == "*🇰🇷 10-08(목) 08:30 · 오늘 할 일: 없음* — 후보 변화 없음 · 새 알림 없음"
+    assert dg.render_basis("US", NOW_US, "2026-10-07", "2026-10-05", stale_warn=False) == \
+        "기준: 시세 10-07 종가 · 점수 10-05 (3일 전) · 개장 전"
+    # 시세가 2영업일 이상 전이면 휴장 표기, 점수 기준일 없으면 명시
+    assert dg.render_basis("KR", NOW_KR, "2026-10-02", None, stale_warn=False) == \
+        "기준: 시세 10-02 종가 (휴장) · 점수 기준일 없음"
+
+
+def test_render_candidates_hold_replaces_section():
+    lines = dg.render_candidates("KR", _kr_views(), dg.ListDiff(None, True), hold_age=16)
+    assert lines == ["*📋 한국 스크리닝 후보* — 보류", "후보 보류 — 점수 16일 경과, 재점수 필요"]
+
+
+def test_render_candidates_first_run_lines_use_52w_not_since():
+    views = _kr_views(kind="base", since=[None] * 6)
+    lines = dg.render_candidates("KR", views, dg.diff_lists([], KR_ROWS))
+    assert lines[0] == "*📋 한국 스크리닝 후보 6* — 기준 수립 (첫 기록)"
+    assert lines[1] == "009970 영원무역홀딩스 92 · 170,900원 · 200일선 -10% · 52주 고점比 -20%"
+    assert not any(ln.startswith("🆕") for ln in lines)
+
+
+def test_render_candidates_price_failure_line():
+    v = dg.PickView(row=KR_ROWS[0], kind="keep", metrics=None)
+    lines = dg.render_candidates("KR", [v], dg.ListDiff("2026-10-07", False, kept=["009970"]))
+    assert lines[1] == "009970 영원무역홀딩스 92 · 가격 조회 실패"
+
+
+def test_render_candidates_more_than_six_new_collapses():
+    rows = [_row(f"S{i}", f"n{i}", 90, 90, 90) for i in range(8)]
+    views = [dg.PickView(row=r, kind="new", metrics=_metrics(1, 0, -1, -1, 1)) for r in rows]
+    diff = dg.ListDiff("2026-10-07", False, new=[r.symbol for r in rows])
+    lines = dg.render_candidates("KR", views, diff)
+    assert sum(1 for ln in lines if ln.startswith("🆕")) == dg.MAX_NEW_LINES
+    assert "외 2 — /scan kr" in lines
+
+
+def test_evidence_from_detail_us_and_kr():
+    us = {"health": {"components": [["ROE", 20, 20, "47.6%"]]},
+          "value": {"components": [["EV/EBITDA", 21.9, 25, "2.5x"], ["이익수익률", 25, 25, "26.1%"]]}}
+    assert dg.evidence_from_detail(us, "US", ("fin_neutral",)) == "이익수익률 26.1% · EV/EBITDA 2.5배 · ROE 47.6% · 금융업"
+    kr = {"health": {"components": [["ROE", 28.7, 35, "11.5%"]]},
+          "value": {"components": [["PER", 34.0, 40, "4.0"], ["PBR", 35.0, 35, "0.46"]]}}
+    assert dg.evidence_from_detail(kr, "KR", (), is_holding=True) == "PER 4.0배 · PBR 0.46 · ROE 11.5% · 지주사"
+    assert dg.evidence_from_detail(None, "US") == ""
+    assert dg.evidence_from_detail(kr, "KR", ("one_off",)).endswith("일회성이익 가드")
+
+
+def test_render_alerts_merge_shock_and_cap_five_lines():
+    alerts = [Alert("critical", "shock", "KOSPI 하루 -10.8%", key="shock:KOSPI:d"),
+              Alert("critical", "shock", "KOSDAQ 하루 -7.7%", key="shock:KOSDAQ:d")]
+    alerts += [Alert("warning", "drawdown", f"자산{i} 낙폭", key=f"dd:자산{i}:enter") for i in range(6)]
+    lines = dg.render_alert_lines(alerts, ["대웅 선정 후 -10.3% — 보유 시 점검 (1회 알림)"])
+    assert lines[0] == "🚨 KOSPI 하루 -10.8% · KOSDAQ 하루 -7.7%"
+    assert len(lines) == dg.MAX_ALERT_LINES + 1 and lines[-1] == "외 3건"   # 8줄 중 5줄 표시
+    assert dg.render_alerts_kr([]) == []
+    assert dg.render_changes_us([]) == ["*🌐 아침 이후 변화* — 없음 (국면·자산 경보는 아침 메시지 참고)"]
+
+
+def test_render_global_pending_and_prev_label():
+    rep = _report(pending="⚪ 중립 / 혼조")
+    rep.regime.prev_label = None
+    lines = dg.render_global(rep)
+    assert "변화 관찰 중: ⚪ 중립 / 혼조 1/2" in lines[1]
+    rep2 = _report()
+    rep2.regime.prev_label = "🟡 약한 위험선호"
+    assert "(어제: 🟡 약한 위험선호)" in dg.render_global(rep2)[1]
+    assert dg.render_global(None) == ["*🌐 글로벌* (아침 1회)", "국면 조회 실패"]
+
+
+def test_render_kr_market_handles_missing_context():
+    rep = _report(kr=False)
+    lines = dg.render_kr_market(rep, None)
+    assert lines == ["*🇰🇷 한국 시장*", "코스피·코스닥 조회 실패"]
+
+
+def test_render_ledger_variants(monkeypatch):
+    lines, footer = dg.render_ledger(None, now=NOW_KR, has_history=False)
+    assert lines == ["*📒 지난 후보 성과*", "첫 발송 — 성과 기록 시작"] and footer is None
+    lines, footer = dg.render_ledger(None, now=NOW_KR, has_history=True)
+    assert lines[1] == "채점 전 — 발송 후 자동 채점"
+    stale = dict(SUMMARY_KR, computed_at="2026-10-01T00:00:00+00:00")
+    lines, footer = dg.render_ledger(stale, now=NOW_KR, has_history=True)
+    assert lines == [] and footer.startswith("성적표 6일째 미갱신")
+    # 월요일(현지) 확장 블록
+    monday = datetime(2026, 10, 12, 8, 30, tzinfo=dg.KST)
+    fresh = dict(SUMMARY_KR, computed_at="2026-10-11T23:00:00+00:00", price_asof="2026-10-09")
+    lines, _ = dg.render_ledger(fresh, now=monday, has_history=True, weekly=True)
+    assert any("주간 성적표" in ln for ln in lines)
+
+
+def test_render_status_none_when_healthy_and_combines_footer():
+    assert dg.render_status(_health(), NOW_KR) is None
+    assert dg.render_status(_health(), NOW_KR, ["성적표 3일째 미갱신(마지막 10-02)"]) == \
+        "⚙️ 상태: 성적표 3일째 미갱신(마지막 10-02)"
+
+
+def test_price_metrics_from_frame_hand_calc():
+    idx = pd.bdate_range("2025-10-01", periods=260)
+    close = pd.Series([100.0] * 259 + [90.0], index=idx)
+    df = pd.DataFrame({"Close": close, "Adj Close": close * 0.98})
+    m = dg.price_metrics_from_frame(df)
+    assert m.price == 90.0 and m.adj_last == pytest.approx(88.2)
+    assert m.dd_52w_pct == pytest.approx(-10.0)
+    assert m.vs_ma200_pct == pytest.approx((90 / ((199 * 100 + 90) / 200) - 1) * 100)
+    assert m.mdd_1y_pct == pytest.approx(-10.0)
+    assert m.asof == idx[-1].strftime("%Y-%m-%d")
+    assert dg.price_metrics_from_frame(pd.DataFrame()) is None
+
+
+def test_predictions_and_weights_only_behind_flags():
+    assert dg.render_predictions([]) == []
+    assert dg._weights_line({"CALM": 0.2, "HG": 0.18}) == "제안 비중(참고, 검증 전): CALM 20% · HG 18% · 현금 62%"
+    assert dg._weights_line(None) is None
+    assert dg.with_summary("본문", None) == "본문"
+    assert dg.with_summary("본문", "요약_x") == "🧠 요약＿x\n\n본문"      # 요약도 md_safe
+
+
+# ----------------------------------------------------------------------
+# 길이 예산 — 하드캡 초과 시 유지 종목 줄부터 축약 (줄 중간 자르기 금지)
+# ----------------------------------------------------------------------
+
+
+def test_render_with_budget_collapses_keep_lines_first():
+    new_rows = [_row(f"N{i}", "회사이름이아주긴회사명입니다" * 2, 95, 90, 90) for i in range(6)]
+    keep_rows = [_row(f"K{i}", "회사이름이아주긴회사명입니다" * 2, 90, 90, 90) for i in range(6)]
+    views = [dg.PickView(row=r, kind="new", metrics=_metrics(100, 1, -1, -1, 1),
+                         evidence="PER 4.0배 · PBR 0.46 · ROE 11.5% · 지주사") for r in new_rows]
+    views += [dg.PickView(row=r, kind="keep", metrics=_metrics(100, 1, -1, -1, 1), since_pct=1.0)
+              for r in keep_rows]
+    alerts = [Alert("warning", "drawdown", "자산 낙폭 " + "설명 " * 60, key=f"dd:a{i}:enter") for i in range(5)]
+    diff = dg.ListDiff("2026-10-07", False, new=[r.symbol for r in new_rows],
+                       kept=[r.symbol for r in keep_rows])
+    inp = _kr_quiet_inputs(views=views, diff=diff, report=_report(alerts=alerts),
+                           verdict=dg.decide_actions(diff, alerts))
+    assert len(dg.render_digest(inp)) > dg.LEN_HARD_CAP
+    text = dg.render_with_budget(inp)
+    assert len(text) <= dg.LEN_HARD_CAP
+    assert "유지 6 — /scan kr" in text                      # 유지 종목 줄부터 축약
+    assert not any(ln.startswith("K0 ") for ln in text.splitlines())
+    assert all(len(ln) < dg.LEN_HARD_CAP for ln in text.splitlines())   # 줄 중간 자르기 없음
+    assert_bold_only(text)
+
+
+# ----------------------------------------------------------------------
+# assemble_daily_digest — fetch/DB 경계를 스텁 (쓰기 0, tmp DB)
+# ----------------------------------------------------------------------
+
+
+@pytest.fixture
+def fresh_db(tmp_path, monkeypatch):
+    import src.ledger as ledger_mod
+
+    monkeypatch.setenv("QUANT_BOT_DB_PATH", str(tmp_path / "digest.db"))
+    monkeypatch.setattr(storage_mod, "_storage", None)
+    monkeypatch.setattr(ledger_mod, "_schema_ready_store", None)
+    yield tmp_path / "digest.db"
+    monkeypatch.setattr(storage_mod, "_storage", None)
+
+
+def _wire(monkeypatch, *, picks, prev=(), starts=None, entries=None, summary=None,
+          report=None, fresh=None, metrics=None, dd_state=None):
+    """assemble_daily_digest 의 외부 경계 전부 스텁."""
+    import src.ledger as ledger_mod
+    import src.signals as sig
+    import src.universe as uni
+
+    monkeypatch.setattr(uni, "pick_top", lambda market, n=6, **k: list(picks))
+    monkeypatch.setattr(uni, "freshness", lambda market="US": fresh or
+                        {"fund_asof": "2026-10-05", "price_asof": "2026-10-07", "age_days": 3})
+    monkeypatch.setattr(uni, "lookup", lambda s: None)
+    monkeypatch.setattr(uni, "lookup_detail", lambda s: None)
+    rep = report if report is not None else _report(market=picks[0].market if picks else "KR")
+    if dd_state is not None and rep.pending_state is not None:
+        rep.pending_state["pick_dd10"] = dd_state
+    monkeypatch.setattr(sig, "generate_signal_report", lambda **k: rep)
+    monkeypatch.setattr(ledger_mod, "last_sent_list",
+                        lambda m: ("2026-10-07" if prev else None, list(prev)))
+    monkeypatch.setattr(ledger_mod, "inclusion_start", lambda m, syms=None: dict(starts or {}))
+    monkeypatch.setattr(ledger_mod, "entry_prices", lambda m: dict(entries or {}))
+    monkeypatch.setattr(ledger_mod, "load_summary", lambda m: summary)
+    mt = metrics or {}
+    monkeypatch.setattr(dg, "_price_metrics",
+                        lambda sym, market, ex, sec: mt.get(sym, _metrics(100.0, 1.0, -5.0, -10.0, 20.0)))
+    monkeypatch.setattr(dg, "_overnight_us_line", lambda: OVERNIGHT)
+    monkeypatch.setattr(dg, "_bench_price_asof", lambda market: "2026-10-07")
+    return rep
+
+
+def test_assemble_quiet_day_bundle(fresh_db, monkeypatch):
+    prev = _prev(*[(r.symbol, r.total_score) for r in KR_ROWS])
+    _wire(monkeypatch, picks=KR_ROWS, prev=prev,
+          starts={r.symbol: "2026-07-13" for r in KR_ROWS},
+          entries={r.symbol: {"entry_px": 100.0} for r in KR_ROWS}, summary=SUMMARY_KR)
+    b = dg.assemble_daily_digest("kr", now=NOW_KR)
+    assert b.market == "KR" and not b.hold and b.record_ledger and b.dd10_new == {}
+    assert b.verdict.label == "없음" and b.diff.kept == [r.symbol for r in KR_ROWS]
+    assert b.score_asof == "2026-10-05" and b.health.price_as_of == "2026-10-07"
+    assert "선정 후 +0.0%" in b.text and "변화 없음 (07-13 이후 동일)" in b.text
+    assert b.silent is False                        # 기본: 항상 소리
+    assert_bold_only(b.text)
+
+
+def test_assemble_pick_dd10_fires_once_and_updates_pending_state(fresh_db, monkeypatch):
+    prev = _prev(("009970", 92), ("007700", 92))
+    rows = KR_ROWS[:2]
+    rep = _wire(monkeypatch, picks=rows, prev=prev,
+                starts={"009970": "2026-07-13", "007700": "2026-07-13"},
+                entries={"009970": {"entry_px": 100.0}, "007700": {"entry_px": 100.0}},
+                metrics={"009970": _metrics(89.0, -5, -11, -11, 30, adj=89.0),
+                         "007700": _metrics(95.0, -5, -5, -5, 30, adj=95.0)})
+    b = dg.assemble_daily_digest("kr", now=NOW_KR)
+    assert b.dd10_new == {"009970": "2026-07-13"}
+    assert b.verdict.label == "리스크 점검 1" and "영원무역홀딩스 -11%" in b.verdict.reasons
+    assert "⚠️ 영원무역홀딩스 선정 후 -11.0% — 보유 시 점검 (1회 알림)" in b.text
+    assert "새 알림 1건 (위) · 경보 유지" in b.text          # 🌐 줄의 카운트에 종목 알림 포함
+    assert rep.pending_state["pick_dd10"] == {"KR": {"009970": "2026-07-13"}}
+    # 같은 진입(시작일 동일)이 이미 기록돼 있으면 재발화하지 않음
+    _wire(monkeypatch, picks=rows, prev=prev,
+          starts={"009970": "2026-07-13", "007700": "2026-07-13"},
+          entries={"009970": {"entry_px": 100.0}}, metrics={"009970": _metrics(80.0, -5, -20, -20, 30)},
+          dd_state={"KR": {"009970": "2026-07-13"}})
+    b2 = dg.assemble_daily_digest("kr", now=NOW_KR)
+    assert b2.dd10_new == {} and b2.verdict.label == "없음"
+
+
+def test_assemble_stale_scores_warn_and_hold(fresh_db, monkeypatch):
+    rows = [ScanRow(**{**r.__dict__, "fund_asof": "2026-09-29"}) for r in KR_ROWS]
+    _wire(monkeypatch, picks=rows, fresh={"fund_asof": "2026-09-29", "price_asof": None, "age_days": 9})
+    b = dg.assemble_daily_digest("kr", now=NOW_KR)
+    assert "⚠️ 점수 09-29 (9일 전, 주간 갱신 지연)" in b.text and b.record_ledger
+    rows15 = [ScanRow(**{**r.__dict__, "fund_asof": "2026-09-23"}) for r in KR_ROWS]
+    _wire(monkeypatch, picks=rows15, fresh={"fund_asof": "2026-09-23", "price_asof": None, "age_days": 15})
+    b2 = dg.assemble_daily_digest("kr", now=NOW_KR)
+    assert "후보 보류 — 점수 15일 경과, 재점수 필요" in b2.text
+    assert b2.record_ledger is False and not b2.hold          # 보류 섹션이지만 발송은 함
+
+
+def test_assemble_hold_when_no_picks_or_degraded(fresh_db, monkeypatch):
+    _wire(monkeypatch, picks=[])
+    b = dg.assemble_daily_digest("kr", now=NOW_KR)
+    assert b.hold and b.hold_reason == "KR 후보 0개" and b.record_ledger is False
+    _wire(monkeypatch, picks=KR_ROWS)
+    monkeypatch.setattr(storage_mod.get_storage(), "init_sync", "timeout", raising=False)
+    b2 = dg.assemble_daily_digest("kr", now=NOW_KR)
+    assert b2.hold and b2.degraded and b2.hold_reason.startswith("강등")
+
+
+def test_assemble_us_has_no_kr_sections_and_silent_option(fresh_db, monkeypatch):
+    prev = _prev(*[(r.symbol, r.total_score) for r in US_ROWS])
+    _wire(monkeypatch, picks=US_ROWS, prev=prev, report=_report("US", kr=False),
+          starts={r.symbol: "2026-07-13" for r in US_ROWS})
+    object.__setattr__(settings, "silent_quiet", True)
+    try:
+        b = dg.assemble_daily_digest("us", now=NOW_US)
+    finally:
+        object.__setattr__(settings, "silent_quiet", False)
+    assert "한국 시장" not in b.text and "*🌐 글로벌*" not in b.text
+    assert "*🌐 아침 이후 변화* — 없음" in b.text and "개장 전" in b.text
+    assert b.silent is True and len(b.text) <= dg.LEN_BUDGET_QUIET["US"]
+    assert_bold_only(b.text)
+
+
+def test_assemble_survives_signal_report_failure(fresh_db, monkeypatch):
+    import src.signals as sig
+    from src.exceptions import DataFetchError
+
+    _wire(monkeypatch, picks=KR_ROWS)
+
+    def boom(**k):
+        raise DataFetchError("panel down")
+
+    monkeypatch.setattr(sig, "generate_signal_report", boom)
+    b = dg.assemble_daily_digest("kr", now=NOW_KR)
+    assert b.report is None and "코스피·코스닥 조회 실패" in b.text and "국면 조회 실패" in b.text
+    assert "신호 리포트" in b.health.optional_failures
+    assert_bold_only(b.text)
+
+
+def test_build_daily_digest_keeps_string_contract(fresh_db, monkeypatch):
+    _wire(monkeypatch, picks=KR_ROWS)
+    out = dg.build_daily_digest(market="kr", top_n=6, tickers=("NVDA",), suggest_weights=True)
+    assert isinstance(out, str) and out.startswith("*🇰🇷 ")
