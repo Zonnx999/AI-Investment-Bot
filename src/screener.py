@@ -253,14 +253,29 @@ FIN_EXEMPT_INDUSTRIES = frozenset({
     "Financial - Data & Stock Exchanges",   # SPGI·CME 류 — 자산경량, 정상 지표 적용
     "Insurance - Brokers",                  # AON 류
 })
+# FMP 가 'Financial - Credit Services' 로 묶는 자산경량 지급결제망 + FMP 오분류 종목.
+# 이 종목들의 총이익률·ROIC·순부채/EBITDA·EV 배수·FCF 는 의미 있는 지표라 중립화하지 않는다.
+# (대출 금융사 COF·SYF·ALLY 는 그대로 중립 대상)
+FIN_EXEMPT_SYMBOLS = frozenset({
+    "V", "MA", "PYPL", "GPN", "FI", "FISV", "FIS",
+    "SUNB",                                 # Sunbelt Rentals — 장비 임대업, FMP 오분류
+})
 FIN_NEUTRAL_LABEL = "금융중립"
 NEUTRAL_FRAC = 0.5      # 중립 = 만점의 50%
 EY_OUTLIER = 0.35       # 이익수익률 35% 초과 = 파생증권/분모 오류 -> 중립 (전 업종)
 FCF_OUTLIER = 0.40      # FCF수익률 40% 초과 = 이상치 -> 중립 (전 업종)
 
 
-def is_balance_sheet_financial(sector: str | None, industry: str | None) -> bool:
-    """대차대조표형 금융업(은행·보험·자산운용 등) 여부 — 점수 중립화 대상."""
+def is_balance_sheet_financial(
+    sector: str | None, industry: str | None, symbol: str | None = None,
+) -> bool:
+    """대차대조표형 금융업(은행·보험·자산운용 등) 여부 — 점수 중립화 대상.
+
+    symbol 은 선택값 (기본 None -> 기존 2인자 호출과 호환). 지급결제망 등
+    FIN_EXEMPT_SYMBOLS 는 industry 가 Credit Services 여도 비금융으로 취급.
+    """
+    if symbol and symbol.upper() in FIN_EXEMPT_SYMBOLS:
+        return False
     return (sector or "") == "Financial Services" and (industry or "") not in FIN_EXEMPT_INDUSTRIES
 
 
@@ -334,7 +349,9 @@ def value_scorecard(quote: dict, metrics: dict, *, is_fin: bool | None = None) -
     이상치 격리 (전 업종): 이익수익률 >35%, FCF수익률 >40% 는 파생증권/분모 오류라 중립.
     """
     if is_fin is None:
-        is_fin = is_balance_sheet_financial(quote.get("sector"), quote.get("industry"))
+        is_fin = is_balance_sheet_financial(
+            quote.get("sector"), quote.get("industry"), quote.get("symbol"),
+        )
     ev_ebitda = _safe(metrics, "evToEBITDA", 20.0)
     ev_sales = _safe(metrics, "evToSales", 10.0)
     pbr = _safe(metrics, "priceToBookRatio", 5.0)            # ratios

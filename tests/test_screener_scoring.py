@@ -428,6 +428,29 @@ def test_is_balance_sheet_financial_rules():
     assert is_balance_sheet_financial("", "Banks") is False
 
 
+def test_is_balance_sheet_financial_payment_networks_exempt():
+    cs = "Financial - Credit Services"
+    # 지급결제망·오분류 종목은 industry 가 Credit Services 여도 비금융 (symbol 예외)
+    for sym in ("V", "MA", "PYPL", "GPN", "SUNB", "v"):
+        assert is_balance_sheet_financial("Financial Services", cs, sym) is False
+    # 대출 금융사는 계속 중립 대상
+    for sym in ("COF", "SYF", "ALLY"):
+        assert is_balance_sheet_financial("Financial Services", cs, sym) is True
+    # symbol 생략/None 이면 기존 동작 (하위 호환)
+    assert is_balance_sheet_financial("Financial Services", cs) is True
+    assert is_balance_sheet_financial("Financial Services", cs, None) is True
+
+
+def test_value_scorecard_infers_fin_from_symbol_exemption():
+    q = {"symbol": "V", "sector": "Financial Services",
+         "industry": "Financial - Credit Services", "price": 300.0}
+    m = {"evToEBITDA": 20.0, "evToSales": 10.0, "priceToBookRatio": 12.0,
+         "earningsYield": 0.03, "freeCashFlowYield": 0.03}
+    assert "금융중립" not in str(value_scorecard(q, m).components)
+    q2 = dict(q, symbol="COF")
+    assert "금융중립" in str(value_scorecard(q2, m).components)
+
+
 def test_financial_health_neutralizes_everything_but_roe():
     card = health_scorecard(GOOD, is_fin=True)
     for label, mx in (("매출총이익률", 25), ("ROIC", 20), ("순부채/EBITDA", 20),
