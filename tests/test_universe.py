@@ -1224,11 +1224,175 @@ def test_build_universe_helpers():
 
 
 def test_build_universe_require_remote_guard(fresh_db, monkeypatch):
-    """WP-OPS-CORE 계약 require_remote — 없으면 True(진행), 있으면 그 결과를 따름."""
+    """WP-OPS-CORE 계약 `require_remote(what) -> None` (실패 시 StorageError) 소비.
+
+    없으면 True(진행) · None 반환이면 True(정상 연결) · StorageError 면 False.
+    반환값을 bool 로 읽으면 None → False 가 되어 정상 연결에서도 종료코드 2 가 나는 사고(리뷰 지적).
+    """
     from scripts import build_universe as bu
 
     store = storage_mod.get_storage()
-    monkeypatch.setattr(type(store), "require_remote", lambda self, what: False, raising=False)
+    monkeypatch.delattr(type(store), "require_remote", raising=False)
+    assert bu._require_remote("x") is True                                   # 병합 전: 메서드 없음
+
+    seen = []
+    monkeypatch.setattr(type(store), "require_remote",
+                        lambda self, what: seen.append(what), raising=False)   # -> None
+    assert bu._require_remote("build_universe") is True and seen == ["build_universe"]
+
+    def boom(self, what):
+        raise storage_mod.StorageError("Turso 연결 실패 (테스트)")
+
+    monkeypatch.setattr(type(store), "require_remote", boom, raising=False)
     assert bu._require_remote("x") is False
-    monkeypatch.setattr(type(store), "require_remote", lambda self, what: True, raising=False)
-    assert bu._require_remote("x") is True
+
+
+# ---------------- scripts/build_universe.py main() 종료코드 경로 (오프라인) ----------------
+
+
+def _patch_build_universe_pipeline(monkeypatch, *, kr_stats=None, us_stats=None):
+    """universe 의 네트워크 단계 전부를 가짜로 대체하고 호출 기록을 돌려준다."""
+    calls = []
+    ok = {"enriched": 5, "no_data": 1, "failed": 0, "aborted": False}
+
+    def rec(name, ret):
+        def fn(*a, **k):
+            calls.append(name)
+            return ret
+        return fn
+
+    monkeypatch.setattr(universe, "discover", rec("discover", {"US": 3, "KR": 2, "CRYPTO": 1}))
+    monkeypatch.setattr(universe, "enrich", rec("enrich", us_stats or dict(ok)))
+    monkeypatch.setattr(universe, "enrich_kr", rec("enrich_kr", kr_stats or dict(ok)))
+    monkeypatch.setattr(universe, "reclassify_us",
+                        rec("reclassify_us", {"changed": 1, "excluded": 1, "by_reason": {"sibling": 1}}))
+    monkeypatch.setattr(universe, "refresh_kr_prices",
+                        rec("refresh_kr_prices", {"discovered": 2, "rescored": 2, "skipped": 0}))
+    monkeypatch.setattr(universe, "symbols_needing_enrichment", lambda *a, **k: [])
+    monkeypatch.setattr(universe, "_kr_symbols_needing_enrichment", lambda *a, **k: [])
+    return calls
+
+
+def test_build_universe_main_ok_when_require_remote_returns_none(fresh_db, monkeypatch, capsys):
+    from scripts import build_universe as bu
+
+    store = storage_mod.get_storage()
+    monkeypatch.setattr(type(store), "require_remote", lambda self, what: None, raising=False)
+    calls = _patch_build_universe_pipeline(monkeypatch)
+    monkeypatch.setattr("sys.argv", ["build_universe.py"])
+    assert bu.main() == bu.EXIT_OK
+    assert calls == ["discover", "enrich", "enrich_kr"]
+    assert "연결 불가" not in capsys.readouterr().out
+
+
+def test_build_universe_main_exit2_when_remote_unavailable(fresh_db, monkeypatch, capsys):
+    from scripts import build_universe as bu
+
+    store = storage_mod.get_storage()
+
+    def boom(self, what):
+        raise storage_mod.StorageError("Turso 연결 실패 (테스트)")
+
+    monkeypatch.setattr(type(store), "require_remote", boom, raising=False)
+    calls = _patch_build_universe_pipeline(monkeypatch)
+    monkeypatch.setattr("sys.argv", ["build_universe.py"])
+    assert bu.main() == bu.EXIT_REMOTE_UNAVAILABLE
+    assert calls == []                                              # 쓰기 작업 시작 안 함
+    assert "연결 불가" in capsys.readouterr().out
+
+
+def test_build_universe_main_exit5_on_kr_abort(fresh_db, monkeypatch, capsys):
+    from scripts import build_universe as bu
+
+    monkeypatch.delattr(type(storage_mod.get_storage()), "require_remote", raising=False)
+    _patch_build_universe_pipeline(
+        monkeypatch, kr_stats={"enriched": 0, "no_data": 0, "failed": 0, "aborted": True})
+    monkeypatch.setattr("sys.argv", ["build_universe.py", "--enrich"])
+    assert bu.main() == bu.EXIT_PARTIAL
+    assert "중단됨" in capsys.readouterr().out
+
+
+def test_build_universe_main_exit5_on_failure_rate(fresh_db, monkeypatch):
+    from scripts import build_universe as bu
+
+    monkeypatch.delattr(type(storage_mod.get_storage()), "require_remote", raising=False)
+    calls = _patch_build_universe_pipeline(
+        monkeypatch, us_stats={"enriched": 7, "no_data": 0, "failed": 3, "aborted": False})   # 30%
+    monkeypatch.setattr("sys.argv", ["build_universe.py", "--enrich"])
+    assert bu.main() == bu.EXIT_PARTIAL
+    assert calls == ["enrich", "enrich_kr"]                         # --enrich 는 discover 생략
+
+
+def test_build_universe_main_standalone_modes(fresh_db, monkeypatch):
+    from scripts import build_universe as bu
+
+    monkeypatch.delattr(type(storage_mod.get_storage()), "require_remote", raising=False)
+    calls = _patch_build_universe_pipeline(monkeypatch)
+    monkeypatch.setattr("sys.argv", ["build_universe.py", "--reclassify", "--kr-refresh"])
+    assert bu.main() == bu.EXIT_OK
+    assert calls == ["reclassify_us", "refresh_kr_prices"]          # 발굴/보강은 실행 안 함
+
+
+# ---------------- 금융중립 symbol 예외 (WP-SCORE FIN_EXEMPT_SYMBOLS 소비) ----------------
+
+
+def test_is_balance_sheet_financial_passes_symbol_exemption(fresh_db, monkeypatch):
+    """V(Credit Services)는 symbol 예외로 비금융 — screener 판정과 universe 판정이 같아야 한다."""
+    assert universe._is_balance_sheet_financial("Financial Services", "Financial - Credit Services", "V") is False
+    assert universe._is_balance_sheet_financial("Financial Services", "Financial - Credit Services", "SOFI") is True
+    assert universe._is_balance_sheet_financial("Financial Services", "Banks - Regional", None) is True
+
+    # 병합 후 계약: screener 함수가 있으면 symbol 까지 3인자로 넘긴다
+    from src import screener
+    seen = []
+    monkeypatch.setattr(screener, "is_balance_sheet_financial",
+                        lambda sector, industry, symbol=None: seen.append((sector, industry, symbol)) or False,
+                        raising=False)
+    assert universe._is_balance_sheet_financial("Financial Services", "x", "MA") is False
+    assert seen == [("Financial Services", "x", "MA")]
+
+
+def test_compute_enrich_v_is_not_fin_neutral(fresh_db, monkeypatch):
+    conn = universe._conn()
+    universe._upsert_universe_row(conn, symbol="V", market="US", name="Visa",
+                                  sector="Financial Services", industry="Financial - Credit Services",
+                                  price=300.0, market_cap=5e11, dividend_yield=0.7)
+    conn.commit()
+    monkeypatch.setattr("src.screener.latest_fundamentals", lambda ticker, *, basis="ttm": dict(_TTM_FAKE))
+    seen_quote = {}
+    real = universe._scorecards
+
+    def spy(quote_like, m, is_fin):
+        seen_quote.update(quote_like, is_fin=is_fin)
+        return real(quote_like, m, is_fin)
+
+    monkeypatch.setattr(universe, "_scorecards", spy)
+    detail = _json.loads(universe._compute_enrich(conn, "V", "US")["detail"])
+    assert detail["fin"] is False and "fin_neutral" not in detail["flags"]
+    assert seen_quote["symbol"] == "V" and seen_quote["is_fin"] is False   # quote_like 에 symbol 전달
+
+
+# ---------------- enrich_kr: corpCode 실패는 aborted ----------------
+
+
+@pytest.mark.parametrize("exc", [
+    __import__("src.exceptions", fromlist=["DataValidationError"]).DataValidationError("DART 점검 중 (status 800)"),
+    __import__("src.exceptions", fromlist=["ApiAuthError"]).ApiAuthError("DART 키 오류 (010)"),
+])
+def test_enrich_kr_corp_code_failure_sets_aborted(fresh_db, monkeypatch, exc):
+    conn = universe._conn()
+    universe._upsert_universe_row(conn, symbol="005930", market="KR", name="삼성전자", sector="",
+                                  industry="", price=1.0, market_cap=4e14, dividend_yield=0.0)
+    conn.commit()
+
+    def boom():
+        raise exc
+
+    called = []
+    monkeypatch.setattr("src.data_fetcher.fetch_dart_corp_codes", boom)
+    monkeypatch.setattr("src.data_fetcher.fetch_dart_financials", lambda *a, **k: called.append(a))
+    stats = universe.enrich_kr()
+    assert stats["aborted"] is True and stats["enriched"] == 0 and called == []
+
+    from scripts import build_universe as bu
+    assert bu._enrich_outcome(stats) is True                          # → 종료코드 5

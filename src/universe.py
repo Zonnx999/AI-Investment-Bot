@@ -661,15 +661,26 @@ def symbols_needing_enrichment(
 
 
 _FIN_EXEMPT_INDUSTRIES = ("Financial - Data & Stock Exchanges", "Insurance - Brokers")
+# 지급결제망·FMP 오분류 종목 — industry 가 Credit Services 여도 비금융 (WP-SCORE FIN_EXEMPT_SYMBOLS 와 동일)
+_FIN_EXEMPT_SYMBOLS = frozenset({"V", "MA", "PYPL", "GPN", "FI", "FISV", "FIS", "SUNB"})
 
 
-def _is_balance_sheet_financial(sector: str | None, industry: str | None) -> bool:
-    """WP-SCORE 계약 screener.is_balance_sheet_financial 소비 (병합 전엔 같은 규칙으로 폴백)."""
+def _is_balance_sheet_financial(
+    sector: str | None, industry: str | None, symbol: str | None = None,
+) -> bool:
+    """WP-SCORE 계약 `screener.is_balance_sheet_financial(sector, industry, symbol=None)` 소비.
+
+    symbol 을 반드시 넘긴다 — screener 의 FIN_EXEMPT_SYMBOLS(V·MA·PYPL 등) 판정은 symbol 로만
+    가능해서, 빠뜨리면 유니버스 점수만 '금융중립' 으로 어긋난다(리뷰 지적).
+    병합 전(함수 없음)엔 같은 규칙으로 폴백.
+    """
     from src import screener
 
     fn = getattr(screener, "is_balance_sheet_financial", None)
     if fn is not None:
-        return bool(fn(sector or "", industry or ""))
+        return bool(fn(sector or "", industry or "", symbol))
+    if symbol and symbol.upper() in _FIN_EXEMPT_SYMBOLS:
+        return False
     return (sector or "") == "Financial Services" and (industry or "") not in _FIN_EXEMPT_INDUSTRIES
 
 
@@ -745,10 +756,10 @@ def _compute_enrich(conn, symbol: str, market: str) -> dict | None:
     dps = _finite(m.get("dividendPerShare"))
     last_div = dps if dps is not None else (
         (div_yield / 100.0) * price if (div_yield and price) else 0.0)
-    quote_like = {"price": price, "sector": sector, "industry": industry,
+    quote_like = {"symbol": symbol, "price": price, "sector": sector, "industry": industry,
                   "lastAnnualDividend": last_div}
 
-    is_fin = _is_balance_sheet_financial(sector, industry)
+    is_fin = _is_balance_sheet_financial(sector, industry, symbol)
     health, value = _scorecards(quote_like, m, is_fin)
     total = round((health.total + value.total) / 2)
 
@@ -1065,7 +1076,10 @@ def enrich_kr(
     try:
         corp_map = fetch_dart_corp_codes()
     except DataFetchError as e:
-        logger.warning("DART corpCode 실패 — KR 보강 중단: %s", e)
+        # corpCode 없이는 KR 보강이 0건 — 조용한 '정상 종료' 대신 aborted 로 올려
+        # build_universe 가 종료코드 5 + '중단됨' 안내를 내게 한다 (점검 800·키 오류 010/011 포함).
+        logger.error("DART corpCode 실패 — KR 보강 중단: %s", e)
+        stats["aborted"] = True
         return stats
 
     targets = _kr_symbols_needing_enrichment(max_age)

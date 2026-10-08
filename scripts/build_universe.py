@@ -66,13 +66,23 @@ def _make_progress_bar():
 
 
 def _require_remote(what: str) -> bool:
-    """WP-OPS-CORE 계약 Storage.require_remote(what) 소비 — 병합 전엔 항상 True (getattr 가드)."""
-    from src.storage import get_storage
+    """WP-OPS-CORE 계약 `Storage.require_remote(what) -> None` 소비.
+
+    계약: 원격이 필요한데 연결이 안 되면 StorageError 를 던지고, 정상(또는 로컬 sqlite3)이면
+    None 을 반환한다. 반환값을 bool 로 해석하면 안 된다(None → False 오판 사고 방지, 리뷰 지적).
+    병합 전(메서드 없음)엔 항상 True (getattr 가드).
+    """
+    from src.storage import StorageError, get_storage
 
     fn = getattr(get_storage(), "require_remote", None)
     if fn is None:
         return True
-    return bool(fn(what))
+    try:
+        fn(what)
+    except StorageError as e:
+        logger.error("원격 DB 필요 — %s", e)
+        return False
+    return True
 
 
 def _enrich_outcome(stats: dict) -> bool:
@@ -87,7 +97,8 @@ def _print_enrich_result(stats: dict) -> None:
     print()
     print(f"    완료: 보강 {stats['enriched']} / 데이터없음 {stats['no_data']} / 실패 {stats['failed']}")
     if stats.get("aborted"):
-        print("    !! 중단됨 — 호출 한도(429 연속) 또는 키/플랜 오류. 남은 종목은 다음 실행에서 이어집니다.")
+        print("    !! 중단됨 — 호출 한도(429 연속), 키/플랜 오류 또는 DART corpCode 실패(점검 중 포함). "
+              "남은 종목은 다음 실행에서 이어집니다.")
 
 
 def _print_exclusions() -> None:
