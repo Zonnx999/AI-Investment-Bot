@@ -755,14 +755,27 @@ def fetch_krx_base_info(market: str, bas_dd: str) -> list[dict]:
 # ----------------------------------------------------------------------
 #
 # KRX 6자리 종목코드 ↔ DART 8자리 corp_code 매핑이 먼저 필요 (corpCode.xml zip).
-# 재무제표(fnlttSinglAcnt 주요계정): 순이익='당기순이익(손실)'(중복행 주의),
-# 자본총계/부채총계/매출액/영업이익. CFS(연결) 우선, 없으면 OFS(별도).
-# → KRX 시총과 결합해 ROE/PER/PBR 산출 (universe.calculate_kr_scores).
+# 재무제표: fnlttSinglAcntAll(전체 계정, fs_div=CFS 연결 → 013 이면 OFS 별도)에서
+# **지배주주 귀속** 순이익·자본(ifrs-full_*AttributableToOwnersOfParent)을 account_id 로
+# 찾는다 (account_nm 은 회사마다 달라 폴백만). 같은 응답의 전기·전전기 금액으로 3개년도
+# 추가 호출 없이 확보. → KRX 시총과 결합해 ROE/PER/PBR 산출 (universe.calculate_kr_scores).
+# 실응답 검증(2026-10, 4사): 행에 fs_div 키 없음, ProfitLoss/Equity 는 CF·SCE 에도 중복
+# 등장 → sj_div 제한 필수 (tests/fixtures/dart_fnlttSinglAcntAll_trimmed.json).
 # ----------------------------------------------------------------------
 
 DART_BASE_URL = "https://opendart.fss.or.kr/api"
 TTL_DART_CORP = timedelta(days=30)     # corp_code 매핑은 거의 불변
 TTL_DART_FIN = timedelta(days=7)       # 재무제표는 분기 갱신
+
+# DART 상태코드 (OpenDART 개발가이드) — 010/011/901 은 키 문제, 012 는 접근 권한, 020 은 한도
+_DART_AUTH_STATUSES = ("010", "011", "901")
+_DART_FORBIDDEN_STATUS = "012"
+_DART_RATE_LIMIT_STATUS = "020"
+_DART_NO_DATA_STATUS = "013"
+
+# 손익 계정은 손익계산서(IS) 또는 단일 포괄손익계산서(CIS), 재무상태 계정은 BS 에서만 찾는다
+_DART_PL_DIVS = ("IS", "CIS")
+_DART_BS_DIVS = ("BS",)
 
 
 @cached("dart_corp_codes", TTL_DART_CORP, "json")
@@ -807,57 +820,88 @@ def fetch_dart_corp_codes() -> dict[str, str]:
     return mapping
 
 
-def _parse_dart_accounts(items: list[dict]) -> dict:
-    """DART fnlttSinglAcnt list → 핵심 계정 dict (순수 함수, 오프라인 테스트).
+def _dart_amt(raw) -> float | None:
+    """DART 금액 문자열 → float (콤마 제거, '-'/빈값/None → None)."""
+    try:
+        return float(str(raw).replace(",", ""))
+    except (TypeError, ValueError):
+        return None
 
-    CFS(연결) 우선, 없으면 OFS(별도). '당기순이익(손실)' 중복행은 첫 값만.
+
+def _dart_pick(items: list[dict], account_id: str, sj_divs: tuple[str, ...],
+               names: tuple[str, ...] = ()) -> tuple[float | None, float | None, float | None]:
+    """첫 매칭 행의 (당기, 전기, 전전기) 금액. account_id 우선, 없으면 account_nm 폴백.
+
+    sj_div 로 재무제표 종류를 제한한다 — ProfitLoss/Equity 는 현금흐름표·자본변동표에도
+    여러 번 나와 제한 없이 첫 행을 집으면 엉뚱한 값이 들어온다 (실응답 검증).
+    당기 금액이 없는 행은 건너뛴다 (다음 매칭 행 시도).
     """
-    def _amt(raw) -> float | None:
-        try:
-            return float(str(raw).replace(",", ""))
-        except (TypeError, ValueError):
-            return None
+    for use_name in (False, True):
+        for x in items:
+            if x.get("sj_div") not in sj_divs:
+                continue
+            hit = (x.get("account_nm") in names) if use_name else (x.get("account_id") == account_id)
+            if not hit:
+                continue
+            cur = _dart_amt(x.get("thstrm_amount"))
+            if cur is None:
+                continue
+            return cur, _dart_amt(x.get("frmtrm_amount")), _dart_amt(x.get("bfefrmtrm_amount"))
+    return None, None, None
 
-    cfs: dict[str, float] = {}
-    ofs: dict[str, float] = {}
-    for x in items:
-        nm = x.get("account_nm")
-        val = _amt(x.get("thstrm_amount"))
-        bucket = cfs if x.get("fs_div") == "CFS" else ofs
-        if nm and val is not None and nm not in bucket:
-            bucket[nm] = val
 
-    base = cfs or ofs
-    # 흑자 기업은 괄호 없는 '당기순이익' 으로 보고하기도 함 → 표준형 우선 + 폴백.
-    # (값 0.0 을 None 으로 덮지 않도록 `or` 가 아니라 명시적 None 체크)
-    net_income = base.get("당기순이익(손실)")
-    if net_income is None:
-        net_income = base.get("당기순이익")
+def _parse_dart_all(items: list[dict], fs_div: str) -> dict:
+    """DART fnlttSinglAcntAll list → 핵심 계정 dict (순수 함수, 오프라인 테스트).
+
+    반환 키 (기존 키 의미 유지 + 확장):
+      net_income     지배주주 귀속 순이익 (귀속 계정 없으면 총계)
+      equity         지배주주 귀속 자본   (귀속 계정 없으면 총계)
+      equity_total   자본총계 (부채비율 분모용)
+      net_income_total, ni_prev1, ni_prev2 (전기·전전기 — 일회성 가드용, 추가 호출 0)
+      debt, assets, revenue, op_income, op_prev1, op_prev2
+      fs_div         'CFS' | 'OFS'
+      attrib         'owners'(귀속 계정 둘 다 확인) | 'separate'(OFS — 비지배 개념 없음)
+                     | 'total'(귀속 계정 없어 총계 폴백)
+    """
+    ni_o = _dart_pick(items, "ifrs-full_ProfitLossAttributableToOwnersOfParent", _DART_PL_DIVS)
+    ni_t = _dart_pick(items, "ifrs-full_ProfitLoss", _DART_PL_DIVS,
+                      ("당기순이익(손실)", "당기순이익", "연결당기순이익"))
+    eq_o = _dart_pick(items, "ifrs-full_EquityAttributableToOwnersOfParent", _DART_BS_DIVS)
+    eq_t = _dart_pick(items, "ifrs-full_Equity", _DART_BS_DIVS, ("자본총계",))
+    liab = _dart_pick(items, "ifrs-full_Liabilities", _DART_BS_DIVS, ("부채총계",))
+    assets = _dart_pick(items, "ifrs-full_Assets", _DART_BS_DIVS, ("자산총계",))
+    rev = _dart_pick(items, "ifrs-full_Revenue", _DART_PL_DIVS, ("매출액", "영업수익", "수익(매출액)"))
+    op = _dart_pick(items, "dart_OperatingIncomeLoss", _DART_PL_DIVS, ("영업이익", "영업이익(손실)"))
+
+    owners = ni_o[0] is not None and eq_o[0] is not None
+    ni = ni_o if ni_o[0] is not None else ni_t
+    eq = eq_o if eq_o[0] is not None else eq_t
+    if fs_div == "OFS":
+        attrib = "separate"
+    else:
+        attrib = "owners" if owners else "total"
     return {
-        "net_income": net_income,
-        "equity": base.get("자본총계"),
-        "debt": base.get("부채총계"),
-        "revenue": base.get("매출액"),
-        "op_income": base.get("영업이익"),
-        "assets": base.get("자산총계"),
-        "fs_div": "CFS" if cfs else ("OFS" if ofs else None),
+        "net_income": ni[0], "ni_prev1": ni[1], "ni_prev2": ni[2],
+        "equity": eq[0],
+        "equity_total": eq_t[0] if eq_t[0] is not None else eq[0],
+        "net_income_total": ni_t[0],
+        "debt": liab[0], "assets": assets[0], "revenue": rev[0],
+        "op_income": op[0], "op_prev1": op[1], "op_prev2": op[2],
+        "attrib": attrib,
+        "fs_div": fs_div,
     }
 
 
-@cached("dart_financials", TTL_DART_FIN, "json")
-def fetch_dart_financials(corp_code: str, year: int) -> dict:
-    """DART 주요계정 재무제표 → 핵심 계정 dict. 데이터 없으면 빈 dict.
-
-    reprt_code=11011 (사업보고서/연간). status 013(데이터없음) → {} 반환.
-    """
+def _dart_fnltt_all(corp_code: str, year: int, fs_div: str) -> dict:
+    """fnlttSinglAcntAll 1콜 → 응답 body(dict). HTTP/네트워크/JSON 오류는 도메인 예외로."""
     import requests
 
     key = settings.require("dart_api_key")
     try:
         response = get_http_session().get(
-            f"{DART_BASE_URL}/fnlttSinglAcnt.json",
+            f"{DART_BASE_URL}/fnlttSinglAcntAll.json",
             params={"crtfc_key": key, "corp_code": corp_code,
-                    "bsns_year": str(year), "reprt_code": "11011"},
+                    "bsns_year": str(year), "reprt_code": "11011", "fs_div": fs_div},
         )
     except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
         if is_timeout(e):
@@ -868,18 +912,49 @@ def fetch_dart_financials(corp_code: str, year: int) -> dict:
             f"DART {corp_code}: HTTP {response.status_code}",
             status_code=response.status_code, source="DART",
         )
+    try:
+        body = response.json()
+    except ValueError as e:
+        raise DataValidationError(f"DART {corp_code}: JSON 파싱 실패", source="DART") from e
+    if not isinstance(body, dict):
+        raise DataValidationError(f"DART {corp_code}: 응답 형식이 dict 가 아님", source="DART")
+    return body
 
-    body = response.json()
-    status = body.get("status")
-    if status == "013":          # 조회된 데이터 없음 (미상장/미제출)
-        return {}
-    if status == "020":          # 사용 한도 초과
+
+def _dart_status_check(body: dict, corp_code: str) -> bool:
+    """상태코드 → 정상이면 True, 013(데이터 없음)이면 False, 그 외는 도메인 예외."""
+    status = str(body.get("status") or "")
+    if status == "000":
+        return True
+    if status == _DART_NO_DATA_STATUS:          # 조회된 데이터 없음 (미상장/미제출/별도만)
+        return False
+    if status == _DART_RATE_LIMIT_STATUS:       # 사용 한도 초과
         raise RateLimitError("DART 사용 한도 초과 (020)", source="DART")
-    if status != "000":
-        raise DataValidationError(
-            f"DART {corp_code}: status={status} ({body.get('message')})", source="DART"
-        )
-    return _parse_dart_accounts(body.get("list", []))
+    if status in _DART_AUTH_STATUSES:           # 미등록/만료/정지 키
+        raise ApiAuthError(f"DART 인증키 오류 (status={status})", source="DART")
+    if status == _DART_FORBIDDEN_STATUS:        # 접근 권한 없음
+        raise ApiAuthorizationError(f"DART 접근 권한 없음 (status={status})", source="DART")
+    raise DataValidationError(
+        f"DART {corp_code}: status={status} ({body.get('message')})", source="DART"
+    )
+
+
+@cached("dart_financials_all", TTL_DART_FIN, "json")
+def fetch_dart_financials(corp_code: str, year: int) -> dict:
+    """DART 전체 계정 재무제표 → 지배주주 귀속 핵심 계정 dict. 데이터 없으면 빈 dict.
+
+    reprt_code=11011 (사업보고서/연간). fs_div=CFS(연결) 먼저, status 013 이면 OFS(별도)
+    로 1회 재시도 (연결 재무제표가 없는 종목 — 기본 1콜/종목, OFS 전용만 +1콜).
+    둘 다 013 → {}. 캐시 네임스페이스는 'dart_financials_all' — 구형 'dart_financials'
+    (fnlttSinglAcnt, 귀속 개념 없음) 캐시를 신형 코드가 읽지 않도록 분리.
+    """
+    body = _dart_fnltt_all(corp_code, year, "CFS")
+    if _dart_status_check(body, corp_code):
+        return _parse_dart_all(body.get("list") or [], "CFS")
+    body = _dart_fnltt_all(corp_code, year, "OFS")
+    if _dart_status_check(body, corp_code):
+        return _parse_dart_all(body.get("list") or [], "OFS")
+    return {}
 
 
 # ----------------------------------------------------------------------

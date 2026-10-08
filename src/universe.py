@@ -496,14 +496,16 @@ def _discover_kr_rows(conn, floor: float = KR_MARKET_CAP_FLOOR) -> tuple[int, di
         try:
             price = float(row.get("TDD_CLSPRC") or 0)
             mcap = float(row.get("MKTCAP") or 0)
-            trdval = float(row.get("ACC_TRDVAL") or 0)
+            raw_trdval = row.get("ACC_TRDVAL")
+            # 거래대금 필드가 없으면 None → 'halted' 규칙만 건너뜀 (결측을 거래정지로 오판 금지)
+            trdval = float(str(raw_trdval).replace(",", "")) if raw_trdval not in (None, "") else None
         except (TypeError, ValueError):
             continue
         if mcap < floor:
             if code not in existing:                 # 신규 소형주는 애초에 안 넣음
                 continue
             excluded = "below_floor"                 # 기존 행은 가격·시총 갱신 + 사유
-        elif trdval <= 0:
+        elif trdval is not None and trdval <= 0:
             excluded = "halted"
         else:
             excluded = None
