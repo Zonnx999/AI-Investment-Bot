@@ -33,6 +33,8 @@ main() {
     DEPLOYED_FILE="$STATE_DIR/.deployed_sha"
     BAD_FILE="$STATE_DIR/.bad_sha"
     NOTIFIED_FILE="$STATE_DIR/.autopull_notified"
+    FETCH_FAIL_FILE="$STATE_DIR/.autopull_fetch_fail"
+    FETCH_FAIL_NOTIFY="${AUTOPULL_FETCH_FAIL_NOTIFY:-8}"
     PY="$REPO/.venv/bin/python"
     PIP="$REPO/.venv/bin/pip"
     HEALTH_WAIT="${AUTOPULL_HEALTH_WAIT:-60}"
@@ -54,7 +56,20 @@ main() {
         fi
     done
 
-    git fetch origin "$BRANCH" --quiet
+    # fetch 일시 실패(GitHub·네트워크 장애)는 exit 0 — 15분마다 OnFailure DM 폭주 방지.
+    # 연속 FETCH_FAIL_NOTIFY 회(기본 8 = 약 2시간) 실패하면 그때 1회만 알린다.
+    if ! git fetch origin "$BRANCH" --quiet; then
+        local nfail
+        nfail=$(( $(cat "$FETCH_FAIL_FILE" 2>/dev/null || echo 0) + 1 ))
+        echo "$nfail" > "$FETCH_FAIL_FILE"
+        log "git fetch 실패 (연속 ${nfail}회) — 다음 주기 재시도"
+        if [ "$nfail" -eq "$FETCH_FAIL_NOTIFY" ]; then
+            notify_once "fetch-fail:$(date -u +%FT%TZ)" \
+                "[quant-bot 배포 점검] git fetch 가 ${nfail}회 연속 실패 — GitHub/네트워크/deploy key 확인. (서버는 현재 버전 유지)"
+        fi
+        exit 0
+    fi
+    rm -f "$FETCH_FAIL_FILE"
     local remote_sha deployed_sha
     remote_sha="$(git rev-parse "origin/$BRANCH")"
     if [ -s "$DEPLOYED_FILE" ]; then
@@ -71,11 +86,19 @@ main() {
         exit 0                                        # 롤백된 sha — 새 커밋이 올 때까지 재시도 안 함
     fi
 
-    local changed code_changed
+    local changed code_changed eff=""
     changed="$(git diff --name-only "$deployed_sha" "$remote_sha")"
     code_changed="$(grep -vE "$NOCODE_RE" <<<"$changed" | grep -v '^$' || true)"
 
     if [ -n "$code_changed" ]; then
+        # 롤백 표식은 remote 가 아니라 '실효 코드 커밋' 기준: 롤백 뒤 [skip ci] 대시보드·docs 커밋이
+        # 올라와 remote 가 달라져도 같은 불량 코드를 재배포하지 않는다 (그 비코드 커밋은 다음 코드 커밋과 함께 반영).
+        eff="$(last_code_commit "$deployed_sha" "$remote_sha")"
+        [ -n "$eff" ] || eff="$remote_sha"
+        if [ -s "$BAD_FILE" ] && [ "$(cat "$BAD_FILE")" = "$eff" ]; then
+            log "롤백된 코드 커밋 ${eff:0:7} — 새 코드 커밋 대기 (수동 재시도: rm $BAD_FILE)"
+            exit 0
+        fi
         local gate age
         gate="$(ci_gate "$remote_sha" "$deployed_sha")"
         case "$gate" in
@@ -100,15 +123,18 @@ main() {
 
     log "update ${deployed_sha:0:7} -> ${remote_sha:0:7}"
 
-    # 1) 의존성 '먼저' — 실패하면 코드는 그대로(이전 버전) 두고 exit 1 → 다음 주기 재시도 + OnFailure DM
+    # 1) 의존성 '먼저' — 실패하면 코드는 그대로(이전 버전) 두고 exit 0 → 다음 주기 재시도 (DM 은 sha 당 1회)
     local lock_changed=""
     if grep -qx 'requirements.lock' <<<"$changed"; then
         lock_changed=1
         git show "$remote_sha:requirements.lock" > "$STATE_DIR/.requirements.lock.new"
         log "requirements.lock 변경 → pip install -r (코드 교체 전)"
         if ! "$PIP" install --quiet -r "$STATE_DIR/.requirements.lock.new"; then
+            # exit 1 이면 지속 실패 시 15분마다 OnFailure DM → 같은 sha 는 1회만 알리고 exit 0 (재시도는 계속)
             log "pip 실패 — 코드 미반영, 다음 주기 재시도"
-            exit 1
+            notify_once "$remote_sha:pip" \
+                "[quant-bot 배포 보류] ${remote_sha:0:7} requirements.lock 설치 실패 — 서버는 ${deployed_sha:0:7} 유지, 15분마다 재시도 중. journalctl -u quant-autopull 확인."
+            exit 0
         fi
     fi
 
@@ -141,7 +167,7 @@ main() {
 
     # 5) 롤백
     log "ROLLBACK: ${remote_sha:0:7} 기동 실패 → ${deployed_sha:0:7} 복귀"
-    echo "$remote_sha" > "$BAD_FILE"
+    echo "$eff" > "$BAD_FILE"                         # remote 가 아니라 실효 코드 커밋 (위 주석 참고)
     git reset --hard "$deployed_sha" --quiet
     if [ -n "$lock_changed" ]; then
         git show "$deployed_sha:requirements.lock" > "$STATE_DIR/.requirements.lock.old" 2>/dev/null \
@@ -184,6 +210,13 @@ else:
 ' <<<"$body"
 }
 
+# $1=deployed $2=remote → 범위 내 '마지막 코드 커밋' (비코드 경로 제외). 없으면 빈 문자열.
+last_code_commit() {
+    git log -1 --format=%H "$1..$2" -- . \
+        ':(exclude)dashboard' ':(exclude)docs' ':(exclude)tests' ':(exclude)deploy' \
+        ':(exclude).github' ':(exclude)README.md' ':(exclude)CLAUDE.md'
+}
+
 # remote_sha 자체의 CI 결과가 우선. [skip ci] 데이터 커밋·문서 전용 푸시처럼 remote 에 CI 가 없으면
 # 범위 내 '마지막 코드 커밋' 의 CI 로 판정 (그 뒤 커밋은 전부 비코드 경로라 트리 동작 동일).
 ci_gate() {
@@ -194,9 +227,7 @@ ci_gate() {
     fi
     r="$(ci_conclusion "$remote")"
     if [ "$r" = "missing" ]; then
-        c="$(git log -1 --format=%H "$deployed..$remote" -- . \
-            ':(exclude)dashboard' ':(exclude)docs' ':(exclude)tests' ':(exclude)deploy' \
-            ':(exclude).github' ':(exclude)README.md' ':(exclude)CLAUDE.md')"
+        c="$(last_code_commit "$deployed" "$remote")"
         if [ -n "$c" ] && [ "$c" != "$remote" ]; then
             r="$(ci_conclusion "$c")"
         fi

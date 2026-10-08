@@ -309,6 +309,52 @@ def test_crash_loop_rolls_back_and_marks_bad(sim):
     assert sim.read("calls") == before
 
 
+def test_rollback_then_dashboard_commit_does_not_redeploy_bad_code(sim):
+    """롤백 뒤 [skip ci] 대시보드 커밋이 올라와도 같은 불량 코드를 재배포하지 않는다."""
+    deployed = sim.mark_deployed()
+    bad = sim.commit({"src/a.py": "v = 2\n"})
+    sim.ci(bad, "success")
+    sim.flag("restart_breaks")
+    assert sim.run().returncode == 1
+    assert sim.data(".bad_sha") == bad
+
+    sim.flag("restart_breaks", False)
+    sim.commit({"dashboard/x.json": '{"c": 3}\n'})       # CI 결과 없는 데이터 커밋
+    before = sim.read("calls")
+    r = sim.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert sim.read("calls") == before                  # restart 도 CI 조회도 없음
+    assert sim.head() == deployed
+
+    # 새 코드 커밋(수정본)이 오면 정상 배포
+    fix = sim.commit({"src/a.py": "v = 3\n"})
+    sim.ci(fix, "success")
+    r2 = sim.run()
+    assert r2.returncode == 0, r2.stdout + r2.stderr
+    assert sim.head() == fix
+    assert sim.data(".deployed_sha") == fix
+    assert sim.data(".bad_sha") == ""
+
+
+def test_fetch_failure_is_silent_then_notifies_once_at_threshold(sim):
+    deployed = sim.mark_deployed()
+    sim.git(sim.server, "remote", "set-url", "origin", str(sim.root / "nope.git"))
+    for _ in range(2):
+        r = sim.run(AUTOPULL_FETCH_FAIL_NOTIFY="3")
+        assert r.returncode == 0                        # 일시 장애는 OnFailure 를 타지 않는다
+    assert sim.read("dm") == ""
+    assert sim.run(AUTOPULL_FETCH_FAIL_NOTIFY="3").returncode == 0
+    assert len(sim.read("dm").splitlines()) == 1        # 3회째에 1회
+    assert sim.run(AUTOPULL_FETCH_FAIL_NOTIFY="3").returncode == 0
+    assert len(sim.read("dm").splitlines()) == 1        # 이후 반복 없음
+    assert sim.head() == deployed and sim.read("calls") == ""
+
+    # 복구되면 카운터 초기화
+    sim.git(sim.server, "remote", "set-url", "origin", str(sim.origin))
+    assert sim.run().returncode == 0
+    assert sim.data(".autopull_fetch_fail") == ""
+
+
 def test_bot_not_active_after_restart_rolls_back(sim):
     deployed = sim.mark_deployed()
     sha = sim.commit({"src/a.py": "v = 2\n"})
@@ -337,10 +383,13 @@ def test_pip_failure_leaves_code_untouched_then_retries(sim):
     sim.ci(sha, "success")
     sim.flag("pip_fails")
     r = sim.run()
-    assert r.returncode == 1
+    assert r.returncode == 0                            # exit 1 이면 매 주기 OnFailure DM 폭주
     assert sim.head() == deployed                       # reset 전에 설치 → 코드 불변
     assert sim.data(".deployed_sha") == deployed
     assert "restart" not in sim.read("calls")
+    assert len(sim.read("dm").splitlines()) == 1
+    assert sim.run().returncode == 0                    # 지속 실패해도 같은 sha 는 DM 1회
+    assert len(sim.read("dm").splitlines()) == 1
 
     sim.flag("pip_fails", False)                        # 다음 주기에 자동 재시도
     r2 = sim.run()
@@ -450,3 +499,22 @@ def test_units_respect_one_replica_one_process():
         text = "\n".join(_unit_lines(name))
         assert "quant_bot.db" not in text, name        # §4.10 #9: 한 레플리카 파일 = 한 프로세스
         assert "flock" in text, name                   # 같은 레플리카를 쓰는 유닛끼리 직렬화
+
+
+# WP-UNIVERSE 가 병합되기 전까지 build_universe.py 에 아직 없는 '예정' 플래그 (병합 후엔 일반 검사가 그대로 고정).
+_PENDING_BUILD_UNIVERSE_FLAGS = {"--kr-refresh"}
+
+
+def test_build_universe_flags_in_units_are_defined():
+    """유닛 ExecStart 가 build_universe.py 에 없는 CLI 플래그를 쓰면(argparse exit 2) 매일 DM 이 난다."""
+    import re
+
+    src = (REAL_SCRIPT.parent / "build_universe.py").read_text()
+    defined = set(re.findall(r'add_argument\(\s*"(--[a-z0-9-]+)"', src))
+    assert "--discover" in defined                     # 정규식 자체 점검
+    for svc in UNIT_DIR.glob("*.service"):
+        for ln in _unit_lines(svc.name):
+            if ln.startswith("ExecStart=") and "build_universe.py" in ln:
+                flags = set(re.findall(r"\s(--[a-z0-9-]+)", ln.split("build_universe.py", 1)[1]))
+                missing = flags - defined - _PENDING_BUILD_UNIVERSE_FLAGS
+                assert not missing, f"{svc.name}: build_universe.py 에 없는 플래그 {missing}"

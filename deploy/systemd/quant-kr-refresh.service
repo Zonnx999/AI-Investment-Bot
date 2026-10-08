@@ -13,7 +13,7 @@ Environment=PYTHONUNBUFFERED=1
 Environment=QUANT_BOT_DB_PATH=/home/ubuntu/AI-Investment-Bot/data/universe_replica.db
 Environment=QUANT_BOT_CACHE=off
 Environment=QUANT_BOT_SYNC_TIMEOUT=300
-ExecStart=/usr/bin/flock -w 300 /home/ubuntu/AI-Investment-Bot/data/.universe.lock /home/ubuntu/AI-Investment-Bot/.venv/bin/python scripts/build_universe.py --discover --markets KR
+ExecStart=/usr/bin/flock -w 300 /home/ubuntu/AI-Investment-Bot/data/.universe.lock /home/ubuntu/AI-Investment-Bot/.venv/bin/python scripts/build_universe.py --kr-refresh
 TimeoutStartSec=1200
 Nice=10
 MemoryMax=600M
