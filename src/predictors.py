@@ -221,13 +221,19 @@ def predict_semis_from_korea_exports(
 
     가설: 한국은 글로벌 반도체 공급망의 길목 → 한국 수출이 반도체 업황을 선행.
     """
-    from src.data_fetcher import fetch_korea_trade, fetch_prices
+    from src.data_fetcher import KOREA_EXPORTS_LABEL, fetch_korea_trade, fetch_prices
     from src.utils import close_series
 
     trade = fetch_korea_trade(start="2014-01-01")
-    if trade.empty:
-        raise InsufficientDataError("한국 무역 데이터 비어있음", n_points=0, required=1)
-    exports_yoy = yoy_growth(to_monthly(trade.iloc[:, 0]))  # 첫 컬럼 = 수출(금액)
+    # 위치(iloc[:, 0])가 아니라 이름으로 선택 — fetch_korea_trade 는 실패 시리즈를 건너뛰므로
+    # 수출이 실패한 날 첫 컬럼은 '수입' 이 된다 (ALR-09). 없으면 예측 불가로 처리.
+    exports = trade.get(KOREA_EXPORTS_LABEL) if not trade.empty else None
+    if exports is None or exports.dropna().empty:
+        raise InsufficientDataError(
+            "한국 수출 시계열 없음 (조회 실패) — 수입 데이터로 대체하지 않음",
+            n_points=0, required=1,
+        )
+    exports_yoy = yoy_growth(to_monthly(exports.dropna()))
     semis_yoy = yoy_growth(to_monthly(close_series(fetch_prices(etf, period="max"))))
     return analyze_lead_lag(
         exports_yoy, semis_yoy, "한국 수출 증가율", f"{etf} 수익률", max_lag=max_lag

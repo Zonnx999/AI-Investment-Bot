@@ -125,3 +125,53 @@ def test_parse_wikipedia_items_builds_sorted_series():
     assert s.index.is_monotonic_increasing      # 정렬됨
     assert s.iloc[0] == 100.0
     assert isinstance(s.index, pd.DatetimeIndex)
+
+
+# ---------------- ALR-09: 한국 수출은 위치가 아니라 이름으로 선택 (WP-SIGNAL) ----------------
+
+
+def test_semis_from_korea_exports_never_uses_imports_as_exports(monkeypatch):
+    """수출 시리즈 조회 실패(수입만 남음) → 수입을 수출로 쓰지 않고 InsufficientDataError."""
+    import src.data_fetcher as df
+    from src.predictors import predict_semis_from_korea_exports
+
+    idx = pd.date_range("2014-01-31", periods=140, freq="ME")
+    only_imports = pd.DataFrame({"수입(금액, USD)": np.linspace(4e10, 6e10, 140)}, index=idx)
+    monkeypatch.setattr(df, "fetch_korea_trade", lambda start=None: only_imports)
+
+    def no_prices(*a, **k):
+        raise AssertionError("수출 없이 가격 조회까지 가면 안 됨")
+
+    monkeypatch.setattr(df, "fetch_prices", no_prices)
+    with pytest.raises(InsufficientDataError):
+        predict_semis_from_korea_exports()
+
+    monkeypatch.setattr(df, "fetch_korea_trade", lambda start=None: pd.DataFrame())
+    with pytest.raises(InsufficientDataError):
+        predict_semis_from_korea_exports()
+
+
+def test_semis_from_korea_exports_selects_export_column_by_name(monkeypatch):
+    """컬럼 순서가 바뀌어도(수입이 먼저) 수출 컬럼을 이름으로 골라 분석에 넘김."""
+    import src.data_fetcher as df
+    import src.predictors as pr
+
+    idx = pd.date_range("2014-01-31", periods=140, freq="ME")
+    exports = pd.Series(np.linspace(3e10, 7e10, 140), index=idx)
+    trade = pd.DataFrame({"수입(금액, USD)": np.full(140, 5e10),
+                          df.KOREA_EXPORTS_LABEL: exports}, index=idx)
+    monkeypatch.setattr(df, "fetch_korea_trade", lambda start=None: trade)
+    daily = pd.bdate_range("2013-01-01", "2025-08-29")
+    monkeypatch.setattr(df, "fetch_prices", lambda t, period="max", **k: pd.DataFrame(
+        {"Close": np.linspace(50, 150, len(daily))}, index=daily))
+    captured = {}
+
+    def fake_analyze(lead, target, lead_name, target_name, max_lag=6):
+        captured["lead"] = lead
+        return "ok"
+
+    monkeypatch.setattr(pr, "analyze_lead_lag", fake_analyze)
+    assert pr.predict_semis_from_korea_exports() == "ok"
+    expected = pr.yoy_growth(pr.to_monthly(exports))
+    pd.testing.assert_series_equal(captured["lead"], expected, check_names=False,
+                                   check_freq=False)

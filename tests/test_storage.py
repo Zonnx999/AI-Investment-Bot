@@ -575,3 +575,89 @@ def test_sync_timeout_default_stays_20(monkeypatch):
     """기본 SYNC_TIMEOUT 20s 는 유지 — 유닛별 값은 systemd/CI env 로 명시."""
     monkeypatch.delenv("QUANT_BOT_SYNC_TIMEOUT", raising=False)
     assert storage_mod._sync_timeout() == 20.0
+
+
+# ---------------- stale-if-error (cached.stale) · get_state(strict) — WP-SIGNAL ----------------
+
+
+class _StubConnRaisesSqliteError:
+    """execute() 가 sqlite3.OperationalError 를 던지는 가짜 conn (DB 장애 모사)."""
+
+    def execute(self, *_a, **_kw):
+        import sqlite3
+
+        raise sqlite3.OperationalError("database is locked")
+
+    def close(self):
+        pass
+
+
+def _age_cache_by(monkeypatch, delta):
+    from datetime import datetime, timezone
+
+    future = datetime.now(timezone.utc) + delta
+    monkeypatch.setattr(storage_mod, "_utcnow", lambda: future)
+
+
+def test_cached_stale_returns_expired_value_with_fetched_at(cache_on, monkeypatch):
+    calls = {"n": 0}
+
+    @cached("stale_ns", TTL, "series")
+    def fetch(series_id: str, start: str | None = None) -> pd.Series:
+        calls["n"] += 1
+        idx = pd.date_range("2026-10-01", periods=2).as_unit("ns")
+        return pd.Series([1.0, 2.0], index=idx, name=series_id)
+
+    fetch("T10Y2Y")                                   # 정규 호출로 캐시 채움
+    _age_cache_by(monkeypatch, timedelta(hours=5))    # TTL(1h) 경과 → 정규 조회는 miss
+    hit = fetch.stale("T10Y2Y", max_age=timedelta(days=7))
+    assert hit is not None
+    value, fetched_at = hit
+    assert list(value) == [1.0, 2.0] and value.name == "T10Y2Y"
+    assert fetched_at.tzinfo is not None
+    # 키는 정규 호출과 동일 — positional/keyword 혼용 무관
+    assert fetch.stale(series_id="T10Y2Y", start=None, max_age=timedelta(days=7)) is not None
+    assert fetch.stale("NOPE", max_age=timedelta(days=7)) is None
+    assert calls["n"] == 1                            # stale 은 원본을 부르지 않음
+
+
+def test_cached_stale_respects_max_age_and_cache_off(cache_on, monkeypatch):
+    @cached("stale_ns2", TTL, "json")
+    def fetch(x: str) -> dict:
+        return {"x": x}
+
+    fetch("a")
+    _age_cache_by(monkeypatch, timedelta(days=8))
+    assert fetch.stale("a", max_age=timedelta(days=7)) is None     # 7일 초과
+    hit = fetch.stale("a", max_age=timedelta(days=9))
+    assert hit is not None and hit[0] == {"x": "a"}
+    monkeypatch.setenv("QUANT_BOT_CACHE", "off")
+    assert fetch.stale("a", max_age=timedelta(days=30)) is None    # 캐시 off → None
+
+
+def test_any_age_getters_on_db_error_return_none(store):
+    store._conn = _StubConnRaisesSqliteError()
+    assert store.get_series_any_age("ns", "k") is None
+    assert store.get_dataframe_any_age("ns", "k") is None
+    assert store.get_json_any_age("ns", "k") is None
+
+
+def test_get_state_strict_distinguishes_missing_from_unreadable(store):
+    assert store.get_state("signals", "global:v2", strict=True) is None   # 없음 = 첫 실행
+    store.put_state("signals", "global:v2", {"v": 2})
+    assert store.get_state("signals", "global:v2", strict=True) == {"v": 2}
+
+    store._conn = _StubConnRaisesSqliteError()
+    assert store.get_state("signals", "global:v2") is None                # 기본: 종전 동작
+    with pytest.raises(storage_mod.StorageError):
+        store.get_state("signals", "global:v2", strict=True)
+
+
+def test_get_state_strict_raises_on_corrupt_payload(store):
+    store._conn.execute(
+        "INSERT INTO state(namespace, key, payload, updated_at) VALUES (?, ?, ?, ?)",
+        ("signals", "bad", "{not json", "2026-10-08T00:00:00+00:00"),
+    )
+    assert store.get_state("signals", "bad") is None
+    with pytest.raises(storage_mod.StorageError):
+        store.get_state("signals", "bad", strict=True)

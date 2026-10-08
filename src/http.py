@@ -29,8 +29,8 @@ src/http.py
   예외 대신 **마지막 response 를 그대로 반환**합니다. 상태 코드 → 도메인 예외
   변환은 호출부(예: ``data_fetcher._fmp_get``)의 책임입니다.
 - 재시도는 GET/HEAD 에만 적용 (멱등성 보장).
-- fredapi 는 내부적으로 ``urllib.request.urlopen`` 을 써서 이 세션을 주입할 수
-  없습니다 (fredapi 0.5.2 기준). FRED 호출은 도메인 예외 wrapping 만 적용.
+- FRED 도 이 세션으로 REST 를 직접 호출합니다 (``data_fetcher._fred_get`` —
+  fredapi 는 세션 주입이 불가하고 상태코드를 뭉개서 걷어냄).
 """
 
 from __future__ import annotations
