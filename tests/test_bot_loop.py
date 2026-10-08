@@ -168,3 +168,51 @@ def test_healthy_start_has_no_restart_deadline(fresh_db, owner_set, monkeypatch)
     monkeypatch.setattr(bot, "DEGRADED_RESTART_SEC", 0)
     monkeypatch.setattr(bot, "get_updates", _one_batch_then_stop([]))
     assert bot.main() == 0                            # 강등 아님 → 자진 종료 없음
+
+
+# ---------------- WP-POLISH: 강등 중 구독 이벤트 처리 경고 ----------------
+
+
+def _msg_update(uid: int, chat_id: int, text: str) -> dict:
+    return {"update_id": uid, "message": {"chat": {"id": chat_id, "username": "u"}, "text": text}}
+
+
+def test_degraded_loop_warns_on_subscription_events(fresh_db, owner_set, monkeypatch, caplog):
+    bot = _load_bot()
+    storage_mod.get_storage().init_sync = "timeout"
+    monkeypatch.setattr(bot, "DEGRADED_RESTART_SEC", 3600)      # 이번 테스트에선 자진 종료 안 함
+    monkeypatch.setattr(bot, "get_updates", _one_batch_then_stop([_msg_update(5, 100, "/start")]))
+    monkeypatch.setattr("src.notifier.send_safe", lambda *a, **k: True)
+    monkeypatch.setattr(bot, "send_safe", lambda *a, **k: True)
+    with caplog.at_level("WARNING"):
+        assert bot.main() == 0
+    msgs = [r.getMessage() for r in caplog.records if "강등(오프라인) 상태에서" in r.getMessage()]
+    assert len(msgs) == 1 and "구독/승인 1건" in msgs[0]
+
+
+def test_degraded_loop_no_warning_for_plain_queries(fresh_db, owner_set, monkeypatch, caplog):
+    """조회/도움말 같은 구독과 무관한 메시지만이면 경고하지 않는다."""
+    bot = _load_bot()
+    storage_mod.get_storage().init_sync = "timeout"
+    monkeypatch.setattr(bot, "DEGRADED_RESTART_SEC", 3600)
+    monkeypatch.setattr(bot, "get_updates", _one_batch_then_stop([_msg_update(6, 100, "안녕")]))
+    monkeypatch.setattr(bot, "send_safe", lambda *a, **k: True)
+    with caplog.at_level("WARNING"):
+        assert bot.main() == 0
+    assert not any("강등(오프라인) 상태에서" in r.getMessage() for r in caplog.records)
+
+
+def test_healthy_loop_never_warns_about_degraded_events(fresh_db, owner_set, monkeypatch, caplog):
+    bot = _load_bot()
+    assert storage_mod.get_storage().init_sync == "local"
+    monkeypatch.setattr(bot, "get_updates", _one_batch_then_stop([_msg_update(7, 100, "/start")]))
+    monkeypatch.setattr(bot, "send_safe", lambda *a, **k: True)
+    monkeypatch.setattr("src.notifier.send_safe", lambda *a, **k: True)
+    with caplog.at_level("WARNING"):
+        assert bot.main() == 0
+    assert not any("강등(오프라인) 상태에서" in r.getMessage() for r in caplog.records)
+
+
+def test_run_docstring_documents_degraded_write_limit():
+    bot = _load_bot()
+    assert "강등" in bot.run.__doc__ and "offline.db" in bot.run.__doc__

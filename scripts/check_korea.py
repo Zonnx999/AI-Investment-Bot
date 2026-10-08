@@ -1,7 +1,8 @@
 """
 scripts/check_korea.py
 ======================
-한국 월간 수출/수입/무역수지 + 전년동월대비 증감률.
+한국 월간 수출/수입 + 전년동월대비 증감률.
+(무역수지 시리즈는 2024-12 이후 FRED 업데이트가 중단돼 제거 — data_fetcher.KOREA_TRADE_SERIES 참고)
 
 한국은 글로벌 IT 하드웨어/반도체 공급망의 핵심이라, 한국 수출 둔화는
 반도체 사이클의 '탄광 속 카나리아' 역할을 합니다.
@@ -38,15 +39,13 @@ def main() -> None:
     recent = df.tail(12)
 
     print(f"\n최근 12개월 추이 (단위: USD)\n" + "-" * 70)
-    print(f"{'월':<10} {'수출':>15} {'수입':>15} {'무역수지':>15}")
+    print(f"{'월':<10} {'수출':>15} {'수입':>15}")
     for date, row in recent.iterrows():
         exp = row.get("수출(금액, USD)")
         imp = row.get("수입(금액, USD)")
-        bal = row.get("무역수지(USD)")
         exp_s = f"${exp/1e9:>10,.2f} B" if exp else "—"
         imp_s = f"${imp/1e9:>10,.2f} B" if imp else "—"
-        bal_s = f"${bal/1e9:>+10,.2f} B" if bal else "—"
-        print(f"{str(date.date()):<10} {exp_s:>15} {imp_s:>15} {bal_s:>15}")
+        print(f"{str(date.date()):<10} {exp_s:>15} {imp_s:>15}")
 
     # 전년동월대비 증감률 (가장 최근 월)
     if len(df) >= 13:

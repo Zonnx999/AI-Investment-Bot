@@ -186,6 +186,8 @@ class Storage:
     def __init__(self, db_path: Path | None = None):
         self.db_path = self._resolve_path(db_path)
         self.is_turso = False
+        # 연결 상태 기본값 — _connect() 가 예외로 중단돼도 속성이 항상 존재 (getattr 가드 불필요)
+        self.init_sync = "local"
         try:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
             self._conn = self._connect()
@@ -341,7 +343,7 @@ class Storage:
         """초기 pull 타임아웃으로 오프라인 파일에 강등됐는가 (발굴 종목·구독자 등 원격
         데이터가 없는 cold 파일). 다이제스트는 이 경우 브로드캐스트를 보류해야 함.
         "error"(stale 레플리카)·"offline"(의도된 킬스위치)은 강등이 아님."""
-        return getattr(self, "init_sync", "local") == "timeout"
+        return self.init_sync == "timeout"
 
     def require_remote(self, what: str) -> None:
         """원격(Turso)과 맞춰진 연결이 필수인 작업의 가드.
@@ -353,7 +355,7 @@ class Storage:
         remote_configured = bool(settings.turso_database_url) and not self._db_path_was_injected
         if not remote_configured:
             return
-        state = getattr(self, "init_sync", "local")
+        state = self.init_sync
         if state != "ok":
             raise StorageError(
                 f"{what}: Turso 원격 연결 필요 — 초기 동기화 상태 {state!r} "

@@ -92,6 +92,13 @@ def run() -> NoReturn:
 
     READY=1 은 스키마 초기화(ensure_owner)·offset 읽기가 **끝난 뒤** 보낸다 — 그 전에
     보내면 초기화 크래시 루프가 systemd 에 '기동 성공' 으로 기록됨 (Type=notify).
+
+    알려진 한계 — 강등(init_sync=="timeout") 중 상태 쓰기: 오프라인 파일(*.offline.db)로
+    떨어진 동안 처리한 구독 요청·소유자 승인 콜백·updates offset 은 **그 파일에만** 기록되고
+    DEGRADED_RESTART_SEC 뒤 재시작하면 버려진다. 사용자는 '승인됨' 응답을 받았는데 실제로는
+    반영이 안 되고, offset 도 원격 기준으로 되돌아가 같은 메시지가 다시 처리될 수 있다
+    (명령 응답 2회). 강등 구간을 짧게 두고(자진 종료로 재프로브) 처리 건수를 경고 로그로
+    남기는 것으로 타협했다 — 필요하면 소유자가 해당 건을 다시 처리한다.
     """
     store = get_storage()
     subscribers.ensure_owner()                       # 소유자 항상 active (스키마 초기화 포함)
@@ -172,6 +179,14 @@ def run() -> NoReturn:
         # 3) 구독 명령 처리 (조회 명령은 parse_updates 가 "ignore" 로 흘림 —
         #    callback_query update 는 메시지가 없어 이벤트 없이 offset 만 전진)
         events, next_offset = subscribers.parse_updates(updates)
+        if restart_at is not None:
+            n_sub = sum(1 for ev in events if ev.kind != "ignore")
+            n_cb = sum(1 for u in updates if u.get("callback_query"))
+            if n_sub or n_cb:
+                logger.warning(
+                    "강등(오프라인) 상태에서 구독/승인 %d건·버튼 %d건 처리 — 오프라인 파일에만 기록돼 "
+                    "재시작(%ds 이내) 후 사라지고 같은 메시지가 다시 처리될 수 있음",
+                    n_sub, n_cb, DEGRADED_RESTART_SEC)
         try:
             # 상시 봇만 인라인 버튼 부착 — callback_query 를 이 루프가 처리하므로.
             subscribers.apply_events(events, interactive_buttons=True)

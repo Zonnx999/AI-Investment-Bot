@@ -260,7 +260,8 @@ class HealthReport:
                 lines.append(f"유니버스: {mk} {_to_kst(uni):%m-%d} 기준 ({_age_days(uni, now)}일 전)")
         if "price_stale" in probs:
             lines.append(probs["price_stale"].owner_text)
-        if self.regime_total:
+        # regime_ok 가 None(미측정)이면 'None/3 반영' 이 나가지 않게 줄 자체를 생략 (problems() 와 같은 가드)
+        if self.regime_total and self.regime_ok is not None:
             lines.append(probs["regime_partial"].owner_text if "regime_partial" in probs
                          else f"국면 지표: {self.regime_ok}/{self.regime_total} 반영")
 
@@ -289,8 +290,19 @@ class HealthReport:
 
     @classmethod
     def from_state(cls, d: dict) -> HealthReport:
-        """to_state() 의 역변환 (signature 등 파생 키는 무시)."""
+        """to_state() 의 역변환 (signature 등 파생 키는 무시).
+
+        Raises ValueError — started_at 이 없거나 ISO 형식이 아닐 때 (부분 손상된 state).
+        호출부는 ValueError 하나만 잡으면 된다 (KeyError 가 아니라).
+        """
+        raw = d.get("started_at")
+        if not raw:
+            raise ValueError("HealthReport.from_state: started_at 누락 (손상된 state)")
+        try:
+            started = datetime.fromisoformat(raw)
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"HealthReport.from_state: started_at 형식 오류 ({raw!r})") from e
         names = {f for f in cls.__dataclass_fields__}
         kwargs = {k: v for k, v in d.items() if k in names}
-        kwargs["started_at"] = datetime.fromisoformat(d["started_at"])
+        kwargs["started_at"] = started
         return cls(**kwargs)

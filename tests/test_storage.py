@@ -661,3 +661,35 @@ def test_get_state_strict_raises_on_corrupt_payload(store):
     assert store.get_state("signals", "bad") is None
     with pytest.raises(storage_mod.StorageError):
         store.get_state("signals", "bad", strict=True)
+
+
+# ---------------- WP-POLISH: init_sync 는 __init__ 에서 항상 기본값 "local" ----------------
+
+
+def test_init_sync_has_default_before_connect(tmp_path, monkeypatch):
+    """_connect() 진입 시점에 이미 init_sync 가 존재 ("local") — 중간 예외에도 속성 부재가 없다."""
+    seen = {}
+    real_connect = Storage._connect
+
+    def spy(self):
+        seen["before"] = getattr(self, "init_sync", "<없음>")
+        return real_connect(self)
+
+    monkeypatch.setattr(Storage, "_connect", spy)
+    s = Storage(db_path=tmp_path / "d.db")
+    try:
+        assert seen["before"] == "local"
+        assert s.init_sync == "local"
+    finally:
+        s.close()
+
+
+def test_degraded_and_require_remote_use_plain_attribute(tmp_path):
+    s = Storage(db_path=tmp_path / "e.db")
+    try:
+        s.init_sync = "timeout"
+        assert s.degraded is True
+        s.init_sync = "ok"
+        assert s.degraded is False
+    finally:
+        s.close()
