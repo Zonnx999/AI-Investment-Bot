@@ -1,0 +1,55 @@
+name: CI
+
+# 오프라인 테스트 게이트. 서버 autopull 은 이 잡(check name = "pytest")이 success 인 커밋만 배포한다
+# (scripts/server_autopull.sh ci_gate). 잡 id 를 바꾸면 AUTOPULL_CHECK_NAME 도 같이 바꿔야 함.
+on:
+  push:
+    branches: ["**"]
+    # autopull 의 비코드 경로(NOCODE_RE)와 일치시킬 것 — 여기서만 빠지는 '*.md' 가 있으면 그 푸시는
+    # CI 결과가 영원히 없어 배포가 '결과 없음' 으로 멈춘다.
+    paths-ignore: ["dashboard/**", "docs/**", "README.md", "CLAUDE.md"]
+  pull_request:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # 테스트는 오프라인 계약 (CLAUDE.md §4.2) — 운영 키·DB 가 절대 섞이지 않게 명시적으로 비움
+      TURSO_DATABASE_URL: ""
+      TURSO_AUTH_TOKEN: ""
+      TELEGRAM_BOT_TOKEN: ""
+      TELEGRAM_CHAT_ID: ""
+      QUANT_BOT_LOG_DIR: /tmp/quant-bot-logs
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.lock
+
+      # 서버와 같은 버전 고정 세트(requirements.lock) + libsql(hosting) 포함 → libsql 회귀 테스트 2개도 실행
+      - name: Install (locked)
+        run: |
+          pip install -r requirements.lock
+          pip install --no-deps -e .
+          pip install "pytest==9.1.1"
+
+      - name: Shell syntax (autopull 은 자기 자신을 배포하므로 문법 오류 = 배포 영구 정지)
+        run: bash -n scripts/server_autopull.sh
+
+      - name: Tests (offline)
+        run: python -m pytest -q -p no:cacheprovider
