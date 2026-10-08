@@ -67,6 +67,9 @@ def test_classify_regime_isolates_failures_when_no_keys(no_api_keys):
     assert len(report.failures) == 3
     assert report.signals == []
     assert report.score == 0
+    # 전부 실패 = '중립/혼조' 가 아니라 판정 보류 (T3a §4 완전성 규칙)
+    assert report.regime == "⚪ 판정 보류 (지표 0/3)"
+    assert report.available == 0 and not report.complete
     # 에러 메시지가 사용자용 signals 에 섞이면 안 됨
     assert all("실패" not in s and "Error" not in s for s in report.signals)
 
@@ -101,3 +104,182 @@ def test_cumulative_and_drawdown_empty_panel_domain_error():
         cumulative_returns(empty)
     with pytest.raises(InsufficientDataError):
         current_drawdown(empty)
+
+
+# ---------------- 국면 완전성 · 근거 줄 · stale-if-error (T3a §4, §8) ----------------
+
+
+def _daily(values, end="2026-10-07") -> pd.Series:
+    return pd.Series(values, index=pd.bdate_range(end=end, periods=len(values)))
+
+
+def _weekly(values, end="2026-10-03") -> pd.Series:
+    return pd.Series(values, index=pd.date_range(end=end, periods=len(values), freq="W-SAT"))
+
+
+_GOOD_SERIES = {
+    "T10Y2Y": lambda: _daily(np.full(80, 0.36)),
+    "BAMLH0A0HYM2": lambda: _daily(np.full(260, 3.24)),
+    "ICSA": lambda: _weekly(np.linspace(220_000, 230_000, 60)),
+}
+
+
+def _fake_resilient(fail=(), stale=()):
+    from src.exceptions import ApiHttpError
+
+    def fake(series_id):
+        if series_id in fail:
+            raise ApiHttpError(f"FRED {series_id}: HTTP 502", status_code=502, source="FRED")
+        return _GOOD_SERIES[series_id](), ("2026-10-06" if series_id in stale else None)
+
+    return fake
+
+
+def test_classify_regime_one_failure_is_hold_with_partial_score(monkeypatch):
+    import src.macro_analyzer as ma
+
+    monkeypatch.setattr(ma, "_fetch_resilient", _fake_resilient(fail=("T10Y2Y",)))
+    report = ma.classify_regime()
+    assert report.regime == "⚪ 판정 보류 (지표 2/3)"
+    assert report.available == 2 and report.total == 3 and not report.complete
+    assert report.failures == ["yield_curve"]               # 대시보드 호환 이름 유지
+    assert ma.failed_indicator_names(report) == ["장단기 금리차"]
+    # score 는 부분합 그대로 (HY +1, 실업수당 0 근처)
+    assert report.score == sum(o.score_delta for o in report.outcomes)
+
+
+def test_classify_regime_complete_uses_label_bands(monkeypatch):
+    import src.macro_analyzer as ma
+
+    monkeypatch.setattr(ma, "_fetch_resilient", _fake_resilient())
+    report = ma.classify_regime()
+    assert report.complete and report.available == 3
+    assert report.regime == ma.regime_label_for_score(report.score)
+    assert report.asof == {"T10Y2Y": "2026-10-07", "BAMLH0A0HYM2": "2026-10-07",
+                           "ICSA": "2026-10-03"}
+
+
+def test_reason_line_markdown_safe_with_stale_and_count(monkeypatch):
+    import src.macro_analyzer as ma
+
+    monkeypatch.setattr(ma, "_fetch_resilient", _fake_resilient(stale=("BAMLH0A0HYM2",)))
+    report = ma.classify_regime()
+    line = report.reason_line()
+    assert line.startswith("근거: 금리차 +0.36%p(+1) · HY 3.24%(")
+    assert "10-06 캐시" in line and "3/3 지표" in line and "10-07 기준" in line
+    assert not any(c in line for c in "_*`[]")
+    assert report.stale == ["BAMLH0A0HYM2"]
+
+    monkeypatch.setattr(ma, "_fetch_resilient", _fake_resilient(fail=("ICSA",)))
+    partial = ma.classify_regime().reason_line()
+    assert "실업수당 실패" in partial and "2/3 지표" in partial
+    assert not any(c in partial for c in "_*`[]")           # jobless_claims 의 _ 가 새지 않음
+
+
+def test_observation_age_issues_flags_old_series():
+    from datetime import date
+
+    import src.macro_analyzer as ma
+
+    rep = ma.RegimeReport(regime="x", score=0,
+                          asof={"T10Y2Y": "2026-09-20", "ICSA": "2026-09-26"})
+    issues = ma.observation_age_issues(rep, date(2026, 10, 8))
+    assert issues == ["T10Y2Y 최신 관측 18일 전"]           # ICSA 12일 ≤ 21일 → 정상
+
+
+@pytest.fixture
+def macro_cache_on(tmp_path, monkeypatch):
+    """fetch_macro 의 실제 @cached 경로를 tmp DB 로 격리 (네트워크는 _fred_get 스텁)."""
+    import src.storage as storage_mod
+
+    monkeypatch.setenv("QUANT_BOT_CACHE", "on")
+    monkeypatch.setenv("QUANT_BOT_DB_PATH", str(tmp_path / "macro.db"))
+    monkeypatch.setattr(storage_mod, "_storage", None)
+    yield storage_mod
+    if storage_mod._storage is not None:
+        storage_mod._storage.close()
+    monkeypatch.setattr(storage_mod, "_storage", None)
+
+
+_OBS = [{"date": "2026-10-06", "value": "0.40"}, {"date": "2026-10-07", "value": "."},
+        {"date": "2026-10-08", "value": "0.36"}]
+
+
+def _age_cache(monkeypatch, storage_mod, days):
+    from datetime import datetime, timedelta, timezone
+
+    future = datetime.now(timezone.utc) + timedelta(days=days)
+    monkeypatch.setattr(storage_mod, "_utcnow", lambda: future)
+
+
+def test_fetch_resilient_uses_stale_cache_on_502(macro_cache_on, monkeypatch):
+    import src.data_fetcher as df
+    import src.macro_analyzer as ma
+    from src.exceptions import ApiHttpError
+
+    monkeypatch.setattr(df, "_fred_get", lambda sid, start: list(_OBS))
+    fresh, since = ma._fetch_resilient("T10Y2Y")               # 캐시 채움 (정규 키)
+    assert since is None and list(fresh) == [0.40, 0.36]
+
+    _age_cache(monkeypatch, macro_cache_on, days=2)            # TTL(12h) 지남, 7일 이내
+
+    def down(sid, start):
+        raise ApiHttpError("FRED T10Y2Y: HTTP 502", status_code=502, source="FRED")
+
+    monkeypatch.setattr(df, "_fred_get", down)
+    stale, since = ma._fetch_resilient("T10Y2Y")
+    assert list(stale) == [0.40, 0.36]
+    assert since is not None and len(since) == 10              # 캐시 받은 KST 날짜
+
+
+@pytest.mark.parametrize("exc_name", ["DataValidationError", "ApiAuthError"])
+def test_fetch_resilient_does_not_mask_config_or_id_errors(macro_cache_on, monkeypatch, exc_name):
+    import src.data_fetcher as df
+    import src.exceptions as ex
+    import src.macro_analyzer as ma
+
+    monkeypatch.setattr(df, "_fred_get", lambda sid, start: list(_OBS))
+    ma._fetch_resilient("T10Y2Y")
+    _age_cache(monkeypatch, macro_cache_on, days=2)
+
+    def bad(sid, start):
+        raise getattr(ex, exc_name)("FRED T10Y2Y: bad", source="FRED")
+
+    monkeypatch.setattr(df, "_fred_get", bad)
+    with pytest.raises(getattr(ex, exc_name)):
+        ma._fetch_resilient("T10Y2Y")
+
+
+def test_fetch_resilient_reraises_when_stale_older_than_7_days(macro_cache_on, monkeypatch):
+    import src.data_fetcher as df
+    import src.macro_analyzer as ma
+    from src.exceptions import ApiTimeoutError
+
+    monkeypatch.setattr(df, "_fred_get", lambda sid, start: list(_OBS))
+    ma._fetch_resilient("T10Y2Y")
+    _age_cache(monkeypatch, macro_cache_on, days=8)
+
+    def slow(sid, start):
+        raise ApiTimeoutError("FRED T10Y2Y 타임아웃", source="FRED")
+
+    monkeypatch.setattr(df, "_fred_get", slow)
+    with pytest.raises(ApiTimeoutError):
+        ma._fetch_resilient("T10Y2Y")
+
+
+def test_fetch_panel_with_failures_reports_failed_labels(monkeypatch):
+    import src.macro_analyzer as ma
+    from src.exceptions import DataValidationError
+
+    idx = pd.bdate_range("2026-01-01", periods=5)
+
+    def fake_prices(ticker, period="1y", **k):
+        if ticker == "BTC-USD":
+            raise DataValidationError("empty", source="yfinance")
+        return pd.DataFrame({"Close": np.arange(5.0) + 1}, index=idx)
+
+    monkeypatch.setattr(ma, "fetch_prices", fake_prices)
+    panel, failed = ma.fetch_panel_with_failures({"S&P 500": "SPY", "비트코인": "BTC-USD"})
+    assert failed == ["비트코인"] and list(panel.columns) == ["S&P 500"]
+    assert list(ma.fetch_cross_asset_panel({"S&P 500": "SPY", "비트코인": "BTC-USD"}).columns) \
+        == ["S&P 500"]

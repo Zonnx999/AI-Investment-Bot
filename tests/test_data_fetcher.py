@@ -169,3 +169,146 @@ def test_fmp_get_rejects_error_shaped_200(monkeypatch):
             df._fmp_get("quote", {"symbol": "AAPL"})
     finally:
         object.__setattr__(df.settings, "fmp_api_key", prev)
+
+
+# ---------------- FRED REST 직접 호출 — 상태코드별 도메인 예외 (WP-SIGNAL, T3a §8) ----------------
+
+_FAKE_FRED_KEY = "fake_fred_key_0123456789abcdef"
+
+
+class _FredResp:
+    """requests.Response 최소 대역 — status_code / ok / json()."""
+
+    def __init__(self, status_code, body=None, *, raw_text=False):
+        self.status_code = status_code
+        self.ok = status_code < 400
+        self._body = body
+        self._raw_text = raw_text
+
+    def json(self):
+        if self._raw_text:
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+        return self._body
+
+
+@pytest.fixture
+def fred_session(monkeypatch):
+    """FRED 세션 대역 + 가짜 키. set(resp) 로 다음 응답 지정, calls 로 요청 확인."""
+    import src.data_fetcher as df
+
+    state = {"resp": None, "calls": []}
+
+    class _Session:
+        def get(self, url, params=None, **k):
+            state["calls"].append((url, dict(params or {})))
+            if isinstance(state["resp"], BaseException):
+                raise state["resp"]
+            return state["resp"]
+
+    monkeypatch.setattr(df, "get_http_session", lambda: _Session())
+    prev = df.settings.fred_api_key
+    object.__setattr__(df.settings, "fred_api_key", _FAKE_FRED_KEY)
+    state["set"] = lambda r: state.__setitem__("resp", r)
+    yield state
+    object.__setattr__(df.settings, "fred_api_key", prev)
+
+
+def test_fetch_macro_rest_happy_path_drops_missing_dot(fred_session):
+    from src.data_fetcher import FRED_OBSERVATIONS_URL, fetch_macro
+
+    fred_session["set"](_FredResp(200, {"count": 3, "observations": [
+        {"realtime_start": "2026-10-08", "date": "2026-10-06", "value": "0.40"},
+        {"realtime_start": "2026-10-08", "date": "2026-10-07", "value": "."},
+        {"realtime_start": "2026-10-08", "date": "2026-10-08", "value": "0.36"},
+    ]}))
+    s = fetch_macro("T10Y2Y", start="2026-01-01")
+    assert list(s.values) == [0.40, 0.36]
+    assert s.name == "T10Y2Y" and str(s.index[-1].date()) == "2026-10-08"
+    url, params = fred_session["calls"][0]
+    assert url == FRED_OBSERVATIONS_URL
+    assert params["series_id"] == "T10Y2Y" and params["file_type"] == "json"
+    assert params["observation_start"] == "2026-01-01"
+
+
+@pytest.mark.parametrize("resp, exc_name", [
+    (_FredResp(200, {"observations": []}), "DataValidationError"),
+    (_FredResp(200, {"observations": [{"date": "2026-10-07", "value": "."}]}),
+     "DataValidationError"),
+    (_FredResp(400, {"error_code": 400, "error_message":
+                     "Bad Request.  Invalid value for variable series_id.  Series IDs "
+                     "should be 25 or less alphanumeric characters."}),
+     "DataValidationError"),
+    (_FredResp(400, {"error_code": 400, "error_message":
+                     "Bad Request.  The value for variable api_key is not registered.  "
+                     "Read https://fred.stlouisfed.org/docs/api/api_key.html for more "
+                     "information."}),
+     "ApiAuthError"),
+    (_FredResp(404, None, raw_text=True), "DataValidationError"),
+    (_FredResp(401, None, raw_text=True), "ApiAuthError"),
+    (_FredResp(403, None, raw_text=True), "ApiAuthorizationError"),
+    (_FredResp(429, None, raw_text=True), "RateLimitError"),
+    (_FredResp(502, None, raw_text=True), "ApiHttpError"),
+    (_FredResp(200, None, raw_text=True), "DataFetchError"),
+])
+def test_fetch_macro_status_mapping_and_no_key_in_message(fred_session, resp, exc_name):
+    import src.exceptions as ex
+    from src.data_fetcher import fetch_macro
+
+    fred_session["set"](resp)
+    with pytest.raises(getattr(ex, exc_name)) as info:
+        fetch_macro("T10Y2Y")
+    assert type(info.value).__name__ == exc_name
+    assert _FAKE_FRED_KEY not in str(info.value)
+    assert "api_key=" not in str(info.value) and "stlouisfed" not in str(info.value)
+
+
+def test_fetch_macro_502_keeps_status_code_and_is_not_validation_error(fred_session):
+    """502 가 '시리즈 없음'(DataValidationError)으로 오분류되던 사고 회귀."""
+    from src.data_fetcher import fetch_macro
+    from src.exceptions import ApiHttpError, DataValidationError
+
+    fred_session["set"](_FredResp(502, None, raw_text=True))
+    with pytest.raises(ApiHttpError) as info:
+        fetch_macro("T10Y2Y")
+    assert info.value.status_code == 502
+    assert not isinstance(info.value, DataValidationError)
+
+
+def test_fetch_macro_network_errors_map_to_timeout_and_connection(fred_session):
+    import requests
+
+    from src.data_fetcher import fetch_macro
+    from src.exceptions import ApiConnectionError, ApiTimeoutError
+
+    fred_session["set"](requests.exceptions.ReadTimeout("read timed out"))
+    with pytest.raises(ApiTimeoutError):
+        fetch_macro("T10Y2Y")
+    fred_session["set"](requests.exceptions.ConnectionError("refused"))
+    with pytest.raises(ApiConnectionError):
+        fetch_macro("T10Y2Y")
+
+
+def test_fetch_macro_requires_key_before_any_network(no_api_keys, monkeypatch):
+    import src.data_fetcher as df
+
+    def no_network():
+        raise AssertionError("키 없이 네트워크 호출 시도")
+
+    monkeypatch.setattr(df, "get_http_session", no_network)
+    with pytest.raises(MissingApiKeyError):
+        df.fetch_macro("T10Y2Y")
+
+
+def test_fetch_macro_cached_mapping_unchanged():
+    """@cached("macro") 가 fetch_macro 에 붙어 있고 stale 폴백이 부착됨 (§4.10 #2)."""
+    from src.data_fetcher import fetch_macro
+
+    assert fetch_macro.__name__ == "fetch_macro"
+    assert callable(getattr(fetch_macro, "stale", None))
+
+
+def test_korea_trade_series_drop_dead_balance_and_name_exports():
+    from src.data_fetcher import KOREA_EXPORTS_LABEL, KOREA_TRADE_SERIES
+
+    assert KOREA_EXPORTS_LABEL in KOREA_TRADE_SERIES
+    assert "XTNTVA01KRM664S" not in KOREA_TRADE_SERIES.values()   # 2024-12 업데이트 중단
