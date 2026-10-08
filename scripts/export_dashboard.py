@@ -44,7 +44,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DASHBOARD_DIR = PROJECT_ROOT / "dashboard"
 KST = ZoneInfo("Asia/Seoul")
 
-# screened 테이블 컬럼 목록 (SELECT 절 순서와 _row_to_* 인덱스가 1:1 대응)
+# screened 테이블 컬럼 목록 (SELECT 절 순서와 _row_to_* 인덱스가 1:1 대응).
+# 뒤에 붙는 선택 컬럼 3개(updated_at, seen_at, excluded)는 _fetch_market_rows 가 존재 여부를 확인해
+# 붙이고(없으면 NULL), converter 는 길이가 짧은 구형 튜플도 받는다 (기준일/제외 사유 — CMAP-03/06).
 _US_COLS = (
     "symbol, name, sector, price, market_cap, "
     "dividend_yield, roe, health_score, value_score, total_score"
@@ -74,9 +76,30 @@ def clean_float(v) -> float | None:
         return None
 
 
+def _date_part(ts) -> str | None:
+    """ISO 타임스탬프/날짜 → 'YYYY-MM-DD' (없으면 None)."""
+    if not ts:
+        return None
+    t = str(ts)
+    return t[:10] if len(t) >= 10 else None
+
+
+def _asof_fields(extra: tuple) -> dict:
+    """행 끝의 (updated_at, seen_at, excluded) → 기준일/제외 사유 필드.
+
+    fund_asof = 재무 보강 기준일, price_asof = 가격/시총 기준일, excluded = 제외 사유(None=정상).
+    """
+    updated_at, seen_at, excluded = (list(extra) + [None] * 3)[:3]
+    return {
+        "fund_asof": _date_part(updated_at),
+        "price_asof": _date_part(seen_at),
+        "excluded": excluded or None,
+    }
+
+
 def row_to_us(row: tuple) -> dict:
     """US screened 행(tuple) → JSON dict."""
-    symbol, name, sector, price, mcap, div_yield, roe, hs, vs, ts = row
+    symbol, name, sector, price, mcap, div_yield, roe, hs, vs, ts = row[:10]
     return {
         "symbol": symbol or "",
         "name": name or "",
@@ -88,12 +111,13 @@ def row_to_us(row: tuple) -> dict:
         "health_score": int(hs or 0),
         "value_score": int(vs or 0),
         "total_score": int(ts or 0),
+        **_asof_fields(row[10:]),
     }
 
 
 def row_to_kr(row: tuple) -> dict:
     """KR screened 행(tuple) → JSON dict."""
-    symbol, name, sector, price, mcap, div_yield, roe, per, pbr, hs, vs, ts = row
+    symbol, name, sector, price, mcap, div_yield, roe, per, pbr, hs, vs, ts = row[:12]
     return {
         "symbol": symbol or "",
         "name": name or "",
@@ -107,12 +131,13 @@ def row_to_kr(row: tuple) -> dict:
         "health_score": int(hs or 0),
         "value_score": int(vs or 0),
         "total_score": int(ts or 0),
+        **_asof_fields(row[12:]),
     }
 
 
 def row_to_crypto(row: tuple) -> dict:
     """CRYPTO screened 행(tuple) → JSON dict."""
-    symbol, name, price, mcap, hs, vs, ts = row
+    symbol, name, price, mcap, hs, vs, ts = row[:7]
     return {
         "symbol": symbol or "",
         "name": name or "",
@@ -121,6 +146,7 @@ def row_to_crypto(row: tuple) -> dict:
         "rank_score": int(hs or 0),    # health_score = rank_score (발굴 단계 매핑)
         "volatility_score": int(vs or 0),
         "total_score": int(ts or 0),
+        **_asof_fields(row[7:]),
     }
 
 
@@ -160,11 +186,18 @@ def regime_to_dict(summary: dict) -> dict:
             if row != col
         }
 
+    available = getattr(regime, "available", None)
+    total = getattr(regime, "total", None)
+    # 지표가 하나라도 빠지면 라벨이 '판정 보류' — 대시보드는 점수를 숨기고 보류로 표시
+    held = bool(total) and available is not None and available < total
     return {
         "label": finding.title,                 # = regime.regime
         "score": regime.score,                  # int 유지 (finding.score 는 float)
         "signals": list(finding.evidence),      # = regime.signals
         "failures": regime.failures,
+        "available": available,                 # 평가 성공 지표 수 / 전체 (추가 키)
+        "total": total,
+        "held": held,
         "panel": panel,
         "correlations": correlations,
         "finding": finding_to_json(finding),    # 13a 공통 shape (추가 키)
@@ -211,9 +244,13 @@ def _fetch_market_rows(conn: sqlite3.Connection, market: str) -> list[dict]:
     else:
         raise ValueError(f"알 수 없는 시장: {market!r}")
 
+    # 기준일/제외 사유 컬럼 — stale 레플리카·구스키마엔 없을 수 있어 존재할 때만 참조 (§4.10 #9)
+    have = {r[1] for r in conn.execute("PRAGMA table_info(screened)").fetchall()}
+    extra = ", ".join(c if c in have else "NULL" for c in ("updated_at", "seen_at", "excluded"))
+    # 동점은 시총 내림차순 (universe.scan 과 같은 순서 — CMAP-10)
     rows = conn.execute(
-        f"SELECT {cols} FROM screened WHERE market=? AND enriched=1 "
-        f"ORDER BY total_score DESC",
+        f"SELECT {cols}, {extra} FROM screened WHERE market=? AND enriched=1 "
+        f"ORDER BY total_score DESC, market_cap DESC",
         (market,),
     ).fetchall()
     return [converter(r) for r in rows]
@@ -269,7 +306,11 @@ def export_screener(
         counts[market] = len(items)
 
         fname = {"KR": "kr_data.json", "US": "us_data.json", "CRYPTO": "crypto_data.json"}[market]
+        # price_as_of: 가격/시총 기준일 중 최신 (행별 price_asof 에서 도출 — 없으면 None)
+        price_dates = [i["price_asof"] for i in items if i.get("price_asof")]
         payload = {"generated_at": now_str, "data_as_of": as_of,
+                   "price_as_of": max(price_dates) if price_dates else None,
+                   "excluded_count": sum(1 for i in items if i.get("excluded")),
                    "count": len(items), "items": items}
         size = _write_json(DASHBOARD_DIR / fname, payload)
         logger.info("%s 내보내기 완료: %d종목 → %s (%.1fKB)", market, len(items), fname, size / 1024)

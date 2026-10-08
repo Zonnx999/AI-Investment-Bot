@@ -257,7 +257,7 @@
 <div class="container">
     <div class="header">
         <h1>AI Investment Bot 대시보드</h1>
-        <p class="subtitle">결정론적 신호 · 레이 달리오 All Weather 영감 · 매일 갱신</p>
+        <p class="subtitle">결정론적 신호 · 레이 달리오 All Weather 영감 · 하루 1회(지연 가능)</p>
     </div>
 
     <!-- 탭 -->
@@ -271,16 +271,17 @@
 
     <!-- 한국 탭 -->
     <div id="korea-tab" class="tab-content active">
-        <div class="info-box">한국 거래소(KOSPI·KOSDAQ) 중대형주 · DART 재무 기반 점수 · 하루 1회 갱신</div>
+        <div id="korea-stale" class="warn-box" style="display:none"></div>
+        <div class="info-box">한국 거래소(KOSPI·KOSDAQ) 중대형주 · DART 재무 기반 점수 · 하루 1회(지연 가능)</div>
         <div class="controls">
             <input type="text" id="korea-search" class="search-box" placeholder="종목코드 또는 회사명 검색..." oninput="onSearch('korea')">
             <button class="filter-btn active" onclick="filterTable('korea','all',this)">모두</button>
-            <button class="filter-btn" onclick="filterTable('korea','excellent',this)">우수 (60+)</button>
-            <button class="filter-btn" onclick="filterTable('korea','good',this)">좋음 (50–59)</button>
+            <button class="filter-btn" onclick="filterTable('korea','excellent',this)">상위 (60+)</button>
+            <button class="filter-btn" onclick="filterTable('korea','good',this)">중상위 (50–59)</button>
         </div>
         <div class="stats">
             <div class="stat-card"><div class="stat-label">분석 종목</div><div class="stat-value" id="korea-total">—</div></div>
-            <div class="stat-card"><div class="stat-label">우수 (60+)</div><div class="stat-value" id="korea-excellent">—</div></div>
+            <div class="stat-card"><div class="stat-label">상위 (60+)</div><div class="stat-value" id="korea-excellent">—</div></div>
             <div class="stat-card"><div class="stat-label">평균 점수</div><div class="stat-value" id="korea-avg">—</div></div>
         </div>
         <div class="table-container">
@@ -290,28 +291,29 @@
                     <th>회사명</th>
                     <th class="sortable" onclick="sortTable('korea','price')">주가 (₩) <span id="sort-korea-price"></span></th>
                     <th class="sortable" onclick="sortTable('korea','health_score')">건전성 <span id="sort-korea-health_score"></span></th>
-                    <th class="sortable" onclick="sortTable('korea','value_score')">저평가 <span id="sort-korea-value_score"></span></th>
+                    <th class="sortable" onclick="sortTable('korea','value_score')">밸류 <span id="sort-korea-value_score"></span></th>
                     <th class="sortable" onclick="sortTable('korea','total_score')">종합 <span id="sort-korea-total_score">↓</span></th>
                     <th>PER / PBR / ROE</th>
                 </tr></thead>
                 <tbody id="korea-table"><tr><td colspan="7" class="loading"><span class="spinner"></span>로딩 중...</td></tr></tbody>
             </table>
         </div>
-        <div class="update-time">마지막 갱신: <span id="korea-update">—</span></div>
+        <div class="update-time">점수 기준일: <span id="korea-asof">—</span> · 내보낸 시각: <span id="korea-update">—</span></div>
     </div>
 
     <!-- 미국 탭 -->
     <div id="us-tab" class="tab-content">
-        <div class="info-box">NYSE · NASDAQ 상장 중대형주 · FMP key-metrics 기반 점수 · 하루 1회 갱신</div>
+        <div id="us-stale" class="warn-box" style="display:none"></div>
+        <div class="info-box">NYSE · NASDAQ 상장 중대형주 · FMP key-metrics 기반 점수 · 하루 1회(지연 가능)</div>
         <div class="controls">
             <input type="text" id="us-search" class="search-box" placeholder="티커 또는 회사명 검색..." oninput="onSearch('us')">
             <button class="filter-btn active" onclick="filterTable('us','all',this)">모두</button>
-            <button class="filter-btn" onclick="filterTable('us','excellent',this)">우수 (60+)</button>
-            <button class="filter-btn" onclick="filterTable('us','good',this)">좋음 (50–59)</button>
+            <button class="filter-btn" onclick="filterTable('us','excellent',this)">상위 (60+)</button>
+            <button class="filter-btn" onclick="filterTable('us','good',this)">중상위 (50–59)</button>
         </div>
         <div class="stats">
             <div class="stat-card"><div class="stat-label">분석 종목</div><div class="stat-value" id="us-total">—</div></div>
-            <div class="stat-card"><div class="stat-label">우수 (60+)</div><div class="stat-value" id="us-excellent">—</div></div>
+            <div class="stat-card"><div class="stat-label">상위 (60+)</div><div class="stat-value" id="us-excellent">—</div></div>
             <div class="stat-card"><div class="stat-label">평균 점수</div><div class="stat-value" id="us-avg">—</div></div>
         </div>
         <div class="table-container">
@@ -321,19 +323,20 @@
                     <th>회사명</th>
                     <th class="sortable" onclick="sortTable('us','price')">주가 ($) <span id="sort-us-price"></span></th>
                     <th class="sortable" onclick="sortTable('us','health_score')">건전성 <span id="sort-us-health_score"></span></th>
-                    <th class="sortable" onclick="sortTable('us','value_score')">저평가 <span id="sort-us-value_score"></span></th>
+                    <th class="sortable" onclick="sortTable('us','value_score')">밸류 <span id="sort-us-value_score"></span></th>
                     <th class="sortable" onclick="sortTable('us','total_score')">종합 <span id="sort-us-total_score">↓</span></th>
                     <th>배당 / ROE</th>
                 </tr></thead>
                 <tbody id="us-table"><tr><td colspan="7" class="loading"><span class="spinner"></span>탭 클릭 시 로드됩니다</td></tr></tbody>
             </table>
         </div>
-        <div class="update-time">마지막 갱신: <span id="us-update">—</span></div>
+        <div class="update-time">점수 기준일: <span id="us-asof">—</span> · 내보낸 시각: <span id="us-update">—</span></div>
     </div>
 
     <!-- 크립토 탭 -->
     <div id="crypto-tab" class="tab-content">
-        <div class="info-box">CoinGecko 시총 상위 암호화폐 · 순위·변동성 기반 점수 · 하루 1회 갱신</div>
+        <div id="crypto-stale" class="warn-box" style="display:none"></div>
+        <div class="info-box">CoinGecko 시총 상위 암호화폐 · 순위·변동성 기반 점수 (주식 점수와 비교 불가) · 하루 1회(지연 가능)</div>
         <div class="controls">
             <input type="text" id="crypto-search" class="search-box" placeholder="심볼 또는 이름 검색..." oninput="onSearch('crypto')">
             <button class="filter-btn active" onclick="filterTable('crypto','all',this)">모두</button>
@@ -359,7 +362,7 @@
                 <tbody id="crypto-table"><tr><td colspan="7" class="loading"><span class="spinner"></span>탭 클릭 시 로드됩니다</td></tr></tbody>
             </table>
         </div>
-        <div class="update-time">마지막 갱신: <span id="crypto-update">—</span></div>
+        <div class="update-time">점수 기준일: <span id="crypto-asof">—</span> · 내보낸 시각: <span id="crypto-update">—</span></div>
     </div>
 
     <!-- 시장 국면 탭 -->
@@ -374,10 +377,11 @@
 
     <!-- 범례 (스크리너 탭 공통) -->
     <div class="legend" id="screener-legend">
-        <div class="legend-item"><div class="legend-dot badge-excellent"></div><span><strong>우수</strong> 60+ — 강력 추천</span></div>
-        <div class="legend-item"><div class="legend-dot badge-good"></div><span><strong>좋음</strong> 50–59 — 추천</span></div>
-        <div class="legend-item"><div class="legend-dot badge-fair"></div><span><strong>중간</strong> 40–49 — 검토</span></div>
-        <div class="legend-item"><div class="legend-dot badge-poor"></div><span><strong>약함</strong> 40 미만 — 비추천</span></div>
+        <div class="legend-item"><div class="legend-dot badge-excellent"></div><span><strong>상위</strong> 60+</span></div>
+        <div class="legend-item"><div class="legend-dot badge-good"></div><span><strong>중상위</strong> 50–59</span></div>
+        <div class="legend-item"><div class="legend-dot badge-fair"></div><span><strong>중간</strong> 40–49</span></div>
+        <div class="legend-item"><div class="legend-dot badge-poor"></div><span><strong>하위</strong> 40 미만</span></div>
+        <div class="legend-item" style="flex-basis:100%;color:var(--text-muted)">시장 안에서의 상대 점수이며 시장 간 비교는 할 수 없습니다. 투자 자문 아님, 모든 결정은 본인 책임.</div>
     </div>
 </div>
 
@@ -426,9 +430,10 @@
             const data = await res.json();
 
             if (tab === 'korea' || tab === 'us' || tab === 'crypto') {
-                state[tab].raw = data.items || [];
+                // 후보 제외 종목(보통주 아님 등)은 목록·통계에서 뺀다 (텔레그램 /scan 과 같은 기준)
+                state[tab].raw = (data.items || []).filter(x => !x.excluded);
                 applyFilterAndSort(tab);
-                setUpdateTime(tab, data.generated_at);
+                setUpdateTime(tab, data);
             } else if (tab === 'regime') {
                 renderRegime(data);
             } else if (tab === 'predictions') {
@@ -640,13 +645,43 @@
         el(market + '-avg').textContent = avg;
     }
 
-    function setUpdateTime(market, isoStr) {
+    // 점수가 이 일수보다 오래되면 경고 배너 (서버 UNIVERSE_STALE_DAYS=8 과 같은 기준)
+    const STALE_DAYS = 8;
+
+    function fmtKstDate(iso) {
+        const d = new Date(iso);
+        if (isNaN(d)) return String(iso);
+        return d.toLocaleDateString('ko-KR',
+            { timeZone: 'Asia/Seoul', year: 'numeric', month: '2-digit', day: '2-digit' });
+    }
+
+    // 점수 기준일(data_as_of = DB 재무 보강 시점)과 내보낸 시각(generated_at)을 분리 표기.
+    // 기준일이 STALE_DAYS 를 넘기면 배너로 알린다 (헤더의 '하루 1회' 는 지연될 수 있음).
+    function setUpdateTime(market, data) {
+        const asofEl = document.getElementById(market + '-asof');
         const el = document.getElementById(market + '-update');
-        if (!el || !isoStr) return;
-        try {
-            el.textContent = new Date(isoStr).toLocaleString('ko-KR',
-                { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-        } catch { el.textContent = isoStr; }
+        const banner = document.getElementById(market + '-stale');
+        const asof = data.data_as_of;
+        if (asofEl) asofEl.textContent = asof ? fmtKstDate(asof) : '정보 없음';
+        if (el && data.generated_at) {
+            try {
+                el.textContent = new Date(data.generated_at).toLocaleString('ko-KR',
+                    { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+            } catch { el.textContent = data.generated_at; }
+        }
+        if (!banner) return;
+        const notes = [];
+        const ageDays = asof ? (Date.now() - Date.parse(asof)) / 86400000 : NaN;
+        if (!asof || isNaN(ageDays)) {
+            notes.push('점수 기준일 정보가 없습니다 — 최신 여부를 확인할 수 없어요.');
+        } else if (ageDays > STALE_DAYS) {
+            notes.push(`⚠️ 점수 기준일이 ${fmtKstDate(asof)} (${Math.floor(ageDays)}일 전)입니다 — 최신이 아닐 수 있어요.`);
+        }
+        if (data.excluded_count > 0) {
+            notes.push(`보통주 아님 등 ${data.excluded_count}종목은 후보에서 제외했어요.`);
+        }
+        banner.innerHTML = notes.map(esc).join('<br>');
+        banner.style.display = notes.length ? 'block' : 'none';
     }
 
     // ----------------------------------------------------------------
@@ -659,7 +694,10 @@
             return;
         }
 
-        const regimeCls = data.score >= 2 ? 'regime-risk-on'
+        // 지표가 하나라도 빠지면 서버가 '판정 보류' 로 라벨링 — 점수/색을 내지 않고 보류로 표시
+        const isHold = data.held === true || /판정 보류/.test(data.label || '');
+        const regimeCls = isHold                ? 'regime-neutral'
+            : data.score >= 2 ? 'regime-risk-on'
             : data.score === 1             ? 'regime-caution'
             : data.score === 0             ? 'regime-neutral'
             : data.score === -1            ? 'regime-caution'
@@ -701,7 +739,10 @@
         document.getElementById('regime-content').innerHTML = `
             <div class="regime-badge ${regimeCls}">${esc(data.label)}</div>
             <p style="color:var(--text-muted);font-size:13px;margin-bottom:12px">
-                점수: ${data.score > 0 ? '+' : ''}${data.score} &nbsp;·&nbsp;
+                ${isHold
+                    ? `판정 보류 — 평가된 지표 ${data.available ?? '?'}/${data.total ?? 3}개뿐이라 점수를 내지 않습니다.`
+                    : `점수: ${data.score > 0 ? '+' : ''}${data.score}`}
+                &nbsp;·&nbsp;
                 3개 거시 지표 합산 (장단기 금리차 / 하이일드 스프레드 / 실업수당 청구)
             </p>
             <ul class="signal-list">${signals}</ul>
@@ -727,9 +768,8 @@
             const r2cls = p.r_squared >= 0.3 ? 'r2-high' : p.r_squared >= 0.15 ? 'r2-mid' : 'r2-low';
             const dircls = p.direction.includes('↑') ? 'dir-up'
                 : p.direction.includes('↓') ? 'dir-down' : 'dir-flat';
-            const reliableBadge = p.reliable
-                ? '<span class="badge badge-excellent" style="font-size:11px">신뢰</span>'
-                : '<span class="badge badge-fair" style="font-size:11px">참고용</span>';
+            // 백테스트 검증을 통과한 예측이 아직 없음 → 전부 '검증 미통과 · 참고용' (p.reliable 은 R² 기준 플래그일 뿐)
+            const reliableBadge = '<span class="badge badge-fair" style="font-size:11px">검증 미통과 · 참고용</span>';
             return `<tr>
                 <td style="font-weight:600;font-size:13px">${esc(p.name)}</td>
                 <td style="font-size:12px;color:var(--text-muted)">${esc(p.leading)}</td>
@@ -750,7 +790,7 @@
         document.getElementById('predictions-content').innerHTML = `
             <div class="info-box">
                 선행지표 → 목표 자산 lead-lag 회귀 예측. 상관관계 기반이며 인과관계가 아닙니다.
-                R² 0.30 이상(초록)만 신뢰, 나머지는 참고용으로 판단하세요.
+                백테스트 검증을 통과하지 못한 참고용 통계이므로 매매 근거로 쓰지 마세요.
             </div>
             <div class="table-container" style="max-height:none">
                 <table>
@@ -762,7 +802,7 @@
                         <th>R²</th>
                         <th>방향</th>
                         <th>예측 변화율</th>
-                        <th>신뢰도</th>
+                        <th>검증</th>
                     </tr></thead>
                     <tbody>${rows}</tbody>
                 </table>

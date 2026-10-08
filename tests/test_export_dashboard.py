@@ -408,3 +408,115 @@ def test_main_returns_2_without_writing_when_turso_degraded(export_env, monkeypa
     assert ed.main() == 2
     assert "::error::" in capsys.readouterr().out
     assert list(export_env.glob("*.json")) == []
+
+
+# ----------------------------------------------------------------------
+# WP-SURFACE — 기준일/제외 사유 payload, 국면 보류, index.html 문구
+# ----------------------------------------------------------------------
+
+from pathlib import Path  # noqa: E402
+
+_INDEX_HTML = Path(__file__).resolve().parent.parent / "dashboard" / "index.html"
+
+
+def test_row_converters_add_asof_and_excluded_fields():
+    us = row_to_us(_US_ROW + ("2026-07-10T16:52:00+00:00", "2026-07-09T00:00:00+00:00", "sibling"))
+    assert us["fund_asof"] == "2026-07-10"
+    assert us["price_asof"] == "2026-07-09"
+    assert us["excluded"] == "sibling"
+    kr = row_to_kr(_KR_ROW + ("2026-07-08T01:00:00+00:00", None, None))
+    assert kr["fund_asof"] == "2026-07-08" and kr["price_asof"] is None and kr["excluded"] is None
+    cr = row_to_crypto(_CRYPTO_ROW + ("2026-06-15T00:00:00+00:00", None, None))
+    assert cr["fund_asof"] == "2026-06-15" and cr["excluded"] is None
+
+
+def test_row_converters_old_tuple_shape_still_works():
+    # 구형(컬럼 수가 짧은) 튜플 — 기준일 필드는 None 으로 채워짐 (하위호환)
+    for d in (row_to_us(_US_ROW), row_to_kr(_KR_ROW), row_to_crypto(_CRYPTO_ROW)):
+        assert d["fund_asof"] is None and d["price_asof"] is None and d["excluded"] is None
+
+
+def test_regime_to_dict_marks_hold_when_indicators_missing():
+    summary = _make_fake_summary()
+    summary["regime"].regime = "⚪ 판정 보류 (지표 2/3)"
+    summary["regime"].available = 2
+    summary["regime"].total = 3
+    summary["regime"].failures = ["hy_spread"]
+    d = regime_to_dict(summary)
+    assert d["held"] is True and d["available"] == 2 and d["total"] == 3
+    assert "판정 보류" in d["label"]
+
+
+def test_regime_to_dict_complete_is_not_held():
+    summary = _make_fake_summary()
+    summary["regime"].available = 3
+    summary["regime"].total = 3
+    assert regime_to_dict(summary)["held"] is False
+    assert {"label", "score", "signals", "failures", "panel", "correlations"} <= set(regime_to_dict(summary))
+
+
+def _seed_with_asof(rows):
+    """rows: (symbol, market, enriched, updated_at, seen_at, excluded, market_cap, total)."""
+    conn = storage_mod.get_storage().conn
+    conn.executescript(_SCREENED_MIN)
+    for col in ("seen_at", "excluded"):
+        conn.execute(f"ALTER TABLE screened ADD COLUMN {col} TEXT")
+    for sym, market, enriched, updated, seen, excl, mcap, total in rows:
+        conn.execute(
+            "INSERT INTO screened (symbol, market, name, sector, price, market_cap, "
+            "dividend_yield, roe, health_score, value_score, total_score, per, pbr, "
+            "enriched, updated_at, seen_at, excluded) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (sym, market, sym, "Tech", 10.0, mcap, 0.01, 0.1, 50, 50, total, 8.0, 1.0,
+             enriched, updated, seen, excl),
+        )
+    conn.commit()
+
+
+def test_main_payload_has_asof_and_excluded_fields(export_env):
+    _seed_with_asof([
+        ("AAA", "US", 1, "2026-07-10T05:00:00+00:00", "2026-07-09T00:00:00+00:00", None, 2e9, 70),
+        ("BBB", "US", 1, "2026-07-09T05:00:00+00:00", "2026-07-08T00:00:00+00:00", None, 3e9, 70),
+        ("AFGE", "US", 1, "2026-07-10T05:00:00+00:00", None, "sibling", 9e9, 85),
+        ("005930", "KR", 1, "2026-07-08T01:00:00+00:00", "2026-07-08T00:00:00+00:00", None, 1e12, 60),
+        ("BTC", "CRYPTO", 1, "2026-07-11T00:00:00+00:00", None, None, 1e12, 80),
+    ])
+    assert ed.main() == 0
+    us = json.loads((export_env / "us_data.json").read_text(encoding="utf-8"))
+    assert us["data_as_of"] == "2026-07-10T05:00:00+00:00"          # main/_data_as_of 동작 불변
+    assert us["price_as_of"] == "2026-07-09"
+    assert us["excluded_count"] == 1
+    by = {i["symbol"]: i for i in us["items"]}
+    assert by["AFGE"]["excluded"] == "sibling"
+    assert by["AAA"]["excluded"] is None
+    assert by["AAA"]["fund_asof"] == "2026-07-10" and by["AAA"]["price_asof"] == "2026-07-09"
+    # 점수 동점(70)은 시총 내림차순 — universe.scan 과 같은 순서 (CMAP-10)
+    order = [i["symbol"] for i in us["items"]]
+    assert order == ["AFGE", "BBB", "AAA"]
+    kr = json.loads((export_env / "kr_data.json").read_text(encoding="utf-8"))
+    assert kr["items"][0]["price_asof"] == "2026-07-08"
+
+
+def test_main_payload_without_new_columns_degrades_to_none(export_env):
+    # 구스키마(seen_at/excluded 없음) 레플리카 — SELECT 가 깨지지 않고 필드는 None
+    _seed([("AAA", "US", 1, "2026-07-10T05:00:00+00:00"), ("005930", "KR", 1, "2026-07-08")])
+    assert ed.main() == 0
+    us = json.loads((export_env / "us_data.json").read_text(encoding="utf-8"))
+    item = us["items"][0]
+    assert item["fund_asof"] == "2026-07-10" and item["price_asof"] is None and item["excluded"] is None
+    assert us["price_as_of"] is None and us["excluded_count"] == 0
+
+
+def test_index_html_vocabulary_and_banners():
+    html = _INDEX_HTML.read_text(encoding="utf-8")
+    assert "하루 1회(지연 가능)" in html
+    assert "매일 갱신" not in html and "하루 1회 갱신" not in html
+    assert "강력 추천" not in html and "비추천" not in html
+    assert "저평가" not in html                       # 라벨은 '밸류'
+    assert ">밸류 <span" in html and "건전성" in html
+    assert "STALE_DAYS = 8" in html and "data.data_as_of" in html
+    assert "x.excluded" in html                        # 제외 종목은 목록에서 뺌
+    assert "검증 미통과 · 참고용" in html
+    assert "신뢰</span>" not in html
+    assert "판정 보류" in html and "isHold" in html
+    assert "투자 자문 아님, 모든 결정은 본인 책임." in html
