@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly universe rescore — Sat 10:00 Asia/Seoul
+
+[Timer]
+OnCalendar=Sat 10:00 Asia/Seoul
+Persistent=true
+Unit=quant-universe.service
+
+[Install]
+WantedBy=timers.target

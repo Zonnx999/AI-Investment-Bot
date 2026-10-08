@@ -40,3 +40,14 @@ logs/
 
 # 스크리너 출력 (자동 생성 데이터)
 dashboard/screener_data.json
+
+# 빌드 산출물 (pip install -e . 가 생성 — 추적하면 서버 autopull 이 불필요한 재시작을 유발)
+*.egg-info/
+
+# data/ 아래 점파일(런타임 상태: .deployed_sha, .bad_sha, .autopull.lock, .digest.lock ...) — .gitkeep 만 추적
+data/.*
+!data/.gitkeep
+
+# 로컬 에이전트 설정 / 깨진 venv 백업
+.claude/settings.local.json
+.venv.broken-*/

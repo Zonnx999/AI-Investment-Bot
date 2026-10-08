@@ -1,0 +1,19 @@
+# 일일 다이제스트 발송 (%i = kr | us). 발송 전용 --no-sync, 레플리카 data/digest_replica.db (봇과 분리).
+# kr/us 인스턴스는 같은 레플리카를 쓰므로 flock 으로 직렬화 (1 파일 = 1 프로세스, CLAUDE.md §4.10 #9).
+[Unit]
+Description=AI-Investment-Bot daily digest (%i)
+After=network-online.target
+Wants=network-online.target
+OnFailure=quant-alert@digest-%i.service
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/AI-Investment-Bot
+Environment=PYTHONUNBUFFERED=1
+Environment=QUANT_BOT_DB_PATH=/home/ubuntu/AI-Investment-Bot/data/digest_replica.db
+Environment=QUANT_BOT_SYNC_TIMEOUT=180
+ExecStart=/usr/bin/flock -w 600 /home/ubuntu/AI-Investment-Bot/data/.digest.lock /home/ubuntu/AI-Investment-Bot/.venv/bin/python scripts/send_digest.py --no-sync --market %i
+SuccessExitStatus=10
+TimeoutStartSec=900
+Nice=5

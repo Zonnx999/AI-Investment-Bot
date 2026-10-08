@@ -1,0 +1,20 @@
+# (선택 — 데이터 스펙의 'KR 일 1회 시총·가격 갱신' 채택 시에만 설치) KRX 일별 가격·시총 + 오프라인 PER/PBR 재계산.
+[Unit]
+Description=AI-Investment-Bot KR daily price/market-cap refresh
+After=network-online.target
+Wants=network-online.target
+OnFailure=quant-alert@kr-refresh.service
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/AI-Investment-Bot
+Environment=PYTHONUNBUFFERED=1
+Environment=QUANT_BOT_DB_PATH=/home/ubuntu/AI-Investment-Bot/data/universe_replica.db
+Environment=QUANT_BOT_CACHE=off
+Environment=QUANT_BOT_SYNC_TIMEOUT=300
+ExecStart=/usr/bin/flock -w 300 /home/ubuntu/AI-Investment-Bot/data/.universe.lock /home/ubuntu/AI-Investment-Bot/.venv/bin/python scripts/build_universe.py --kr-refresh
+TimeoutStartSec=1200
+Nice=10
+MemoryMax=600M
+OOMScoreAdjust=300
