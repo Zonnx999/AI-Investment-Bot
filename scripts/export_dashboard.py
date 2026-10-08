@@ -14,6 +14,12 @@ Phase 12 — Turso DB → dashboard/*.json 내보내기.
 실행:
     source .venv/bin/activate
     python scripts/export_dashboard.py
+
+종료코드 (GitHub Actions 가 실패를 드러내도록 — 낡은/빈 데이터로 공개 파일을 덮어쓰지 않음):
+    0  성공 (국면·예측 실패는 ::warning:: 만)
+    1  DB 연결 불가 (StorageError)
+    2  Turso 설정됐는데 초기 동기화가 ok 아님 (강등/stale) — 파일 미기록
+    3  US 또는 KR 보강 종목 0행 / screened 읽기 실패 — 파일 미기록
 """
 
 from __future__ import annotations
@@ -30,7 +36,7 @@ from zoneinfo import ZoneInfo
 from src.exceptions import InsufficientDataError, QuantBotError
 from src.findings import Finding, from_prediction, from_regime
 from src.logger import get_logger
-from src.storage import StorageError, get_storage
+from src.storage import _DB_ERRORS, StorageError, get_storage
 
 logger = get_logger(__name__)
 
@@ -230,17 +236,41 @@ def _write_json(path: Path, obj: dict) -> int:
 # ----------------------------------------------------------------------
 
 
-def export_screener(conn: sqlite3.Connection) -> dict[str, int]:
-    """KR / US / CRYPTO 종목을 각각 JSON 으로 저장. {market: 종목수} 반환."""
+def _data_as_of(conn: sqlite3.Connection, market: str) -> str | None:
+    """시장별 데이터 기준 시각 = 재무 보강 시점 max(updated_at) (UTC ISO). 없으면 None.
+
+    generated_at(내보낸 시각)과 별개 — 대시보드가 '며칠 묵은 데이터인지' 표시할 근거.
+    """
+    row = conn.execute(
+        "SELECT max(updated_at) FROM screened WHERE market=? AND enriched=1",
+        (market,),
+    ).fetchone()
+    return row[0] if row and row[0] else None
+
+
+_MARKETS = ("KR", "US", "CRYPTO")
+
+
+def export_screener(
+    conn: sqlite3.Connection,
+    prefetched: dict[str, tuple[list[dict], str | None]] | None = None,
+) -> dict[str, int]:
+    """KR / US / CRYPTO 종목을 각각 JSON 으로 저장. {market: 종목수} 반환.
+
+    prefetched: main() 이 먼저 읽고 검증한 {market: (items, data_as_of)} — 주면 DB 를
+    다시 읽지 않고 그 시장들만 씀 (검증 통과 전엔 아무 파일도 안 건드리기 위함).
+    """
     now_str = datetime.now(KST).isoformat(timespec="seconds")
     counts: dict[str, int] = {}
+    if prefetched is None:
+        prefetched = {m: (_fetch_market_rows(conn, m), _data_as_of(conn, m)) for m in _MARKETS}
 
-    for market in ("KR", "US", "CRYPTO"):
-        items = _fetch_market_rows(conn, market)
+    for market, (items, as_of) in prefetched.items():
         counts[market] = len(items)
 
         fname = {"KR": "kr_data.json", "US": "us_data.json", "CRYPTO": "crypto_data.json"}[market]
-        payload = {"generated_at": now_str, "count": len(items), "items": items}
+        payload = {"generated_at": now_str, "data_as_of": as_of,
+                   "count": len(items), "items": items}
         size = _write_json(DASHBOARD_DIR / fname, payload)
         logger.info("%s 내보내기 완료: %d종목 → %s (%.1fKB)", market, len(items), fname, size / 1024)
 
@@ -316,29 +346,64 @@ def main() -> int:
         storage = get_storage()
     except StorageError as e:
         logger.error("DB 연결 실패 — 내보내기 중단: %s", e)
+        print(f"::error::DB 연결 실패 — 내보내기 중단 ({type(e).__name__})")
         return 1
+
+    # --- 원격 동기화 확인: 강등(오프라인 파일)·stale 레플리카로 공개 파일을 덮어쓰지 않음 ---
+    # (`::error::`/`::warning::` 는 GitHub Actions 워크플로 명령 — stdout 으로 내보내야 주석이 됨)
+    try:
+        storage.require_remote("export_dashboard")
+    except StorageError as e:
+        logger.error("원격 동기화 미완료 — 내보내기 중단 (파일 미기록): %s", e)
+        print(f"::error::Turso 초기 동기화 상태 {getattr(storage, 'init_sync', '?')} — "
+              "낡은 데이터로 덮어쓰지 않도록 내보내기 중단")
+        return 2
 
     conn = storage.conn
 
-    # --- 스크리너 (KR / US / CRYPTO) ---
-    counts = export_screener(conn)
+    # --- 스크리너: 세 시장을 **먼저 전부 읽고** 검증한 뒤에만 쓴다 ---
+    try:
+        data = {m: (_fetch_market_rows(conn, m), _data_as_of(conn, m)) for m in _MARKETS}
+    except _DB_ERRORS as e:
+        logger.error("screened 읽기 실패 — 내보내기 중단 (파일 미기록): %s", e)
+        print("::error::screened 테이블 읽기 실패 — 내보내기 중단")
+        return 3
+    empty = [m for m in ("US", "KR") if not data[m][0]]
+    if empty:
+        logger.error("보강 종목 0행 (%s) — 기존 파일 보존, 내보내기 중단", "/".join(empty))
+        print(f"::error::{'/'.join(empty)} 보강 종목 0행 — 기존 대시보드 파일을 덮어쓰지 않음")
+        return 3
+    if not data["CRYPTO"][0]:
+        # CRYPTO 는 부가 데이터 — 비었으면 그 파일만 보존하고 나머지는 진행
+        logger.warning("CRYPTO 0행 — crypto_data.json 보존")
+        print("::warning::CRYPTO 0행 — crypto_data.json 은 갱신하지 않음")
+        del data["CRYPTO"]
+    counts = export_screener(conn, prefetched=data)
 
     # --- 시장 국면 ---
     regime_ok = True
     if not args.skip_regime:
         regime_ok = export_regime()
+        if not regime_ok:
+            print("::warning::시장 국면 내보내기 실패 — regime_data.json 에 오류 기록")
 
     # --- 선행지표 예측 ---
+    from src.predictors import PREDICTORS
+
     pred_count = 0
     if not args.skip_predictions:
         pred_count = export_predictions()
+        if pred_count < len(PREDICTORS):
+            print(f"::warning::선행지표 예측 {len(PREDICTORS) - pred_count}개 실패/스킵")
 
     # --- stdout 요약 (대시보드 deliverable) ---
     total = sum(counts.values())
     print(f"내보내기 완료: US {counts.get('US', 0)} / KR {counts.get('KR', 0)} / "
           f"CRYPTO {counts.get('CRYPTO', 0)}종목 (합계 {total})")
+    print("데이터 기준(보강 시점, UTC): "
+          + " / ".join(f"{m} {data[m][1] or '없음'}" for m in data))
     print(f"시장 국면: {'OK' if regime_ok else '실패'}")
-    print(f"선행지표: {pred_count}/{len(__import__('src.predictors', fromlist=['PREDICTORS']).PREDICTORS)}개")
+    print(f"선행지표: {pred_count}/{len(PREDICTORS)}개")
     print(f"출력 폴더: {DASHBOARD_DIR}")
 
     return 0

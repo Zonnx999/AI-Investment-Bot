@@ -106,3 +106,65 @@ def test_poll_loop_callback_approves_end_to_end(fresh_db, owner_set, monkeypatch
     assert edits and edits[0][:2] == ("1", 5) and "✅ 승인됨" in edits[0][2]
     assert any(cid == "100" and "승인되었습니다" in txt for cid, txt in sent)
     assert subscribers.get_updates_offset() == 8
+
+
+# ---------------- READY 순서 / 강등 자진 재시작 (WP-OPS-CORE) ----------------
+
+
+def _record_startup(bot, monkeypatch, order: list[str]):
+    real_ensure = bot.subscribers.ensure_owner
+    real_offset = bot.subscribers.get_updates_offset
+    monkeypatch.setattr(bot.subscribers, "ensure_owner",
+                        lambda *a, **k: (order.append("ensure_owner"), real_ensure(*a, **k))[1])
+    monkeypatch.setattr(bot.subscribers, "get_updates_offset",
+                        lambda *a, **k: (order.append("get_updates_offset"), real_offset(*a, **k))[1])
+    monkeypatch.setattr(bot, "_sd_notify", lambda state: order.append(state))
+
+
+def test_ready_sent_after_schema_init_and_offset(fresh_db, owner_set, monkeypatch):
+    """READY=1 이 스키마 초기화·offset 읽기 뒤 — 초기화 크래시가 '기동 성공' 으로 안 찍히게."""
+    bot = _load_bot()
+    order: list[str] = []
+    _record_startup(bot, monkeypatch, order)
+    monkeypatch.setattr(bot, "get_updates", _one_batch_then_stop([]))
+    assert bot.main() == 0
+    assert order.index("ensure_owner") < order.index("READY=1")
+    assert order.index("get_updates_offset") < order.index("READY=1")
+    assert order.index("READY=1") < order.index("WATCHDOG=1")
+
+
+def test_ready_not_sent_when_schema_init_crashes(fresh_db, owner_set, monkeypatch):
+    bot = _load_bot()
+    order: list[str] = []
+    monkeypatch.setattr(bot, "_sd_notify", lambda state: order.append(state))
+
+    def boom(*a, **k):
+        raise RuntimeError("schema init 실패")
+
+    monkeypatch.setattr(bot.subscribers, "ensure_owner", boom)
+    with pytest.raises(RuntimeError):
+        bot.main()
+    assert "READY=1" not in order
+
+
+def test_degraded_start_exits_3_after_deadline(fresh_db, owner_set, monkeypatch):
+    """init_sync=timeout(오프라인 강등)으로 떴으면 deadline 뒤 SystemExit(3) → systemd 재프로브."""
+    bot = _load_bot()
+    store = storage_mod.get_storage()
+    store.init_sync = "timeout"                       # 강등 상태 모사 (프로브 타임아웃)
+    monkeypatch.setattr(bot, "DEGRADED_RESTART_SEC", 0)
+    polled: list[int] = []
+    monkeypatch.setattr(bot, "get_updates",
+                        lambda offset=None, timeout=0: polled.append(1) or [])
+    with pytest.raises(SystemExit) as exc:
+        bot.main()
+    assert exc.value.code == 3
+    assert polled == []                               # deadline 이 지났으면 폴링 전에 종료
+
+
+def test_healthy_start_has_no_restart_deadline(fresh_db, owner_set, monkeypatch):
+    bot = _load_bot()
+    assert storage_mod.get_storage().init_sync == "local"
+    monkeypatch.setattr(bot, "DEGRADED_RESTART_SEC", 0)
+    monkeypatch.setattr(bot, "get_updates", _one_batch_then_stop([]))
+    assert bot.main() == 0                            # 강등 아님 → 자진 종료 없음
