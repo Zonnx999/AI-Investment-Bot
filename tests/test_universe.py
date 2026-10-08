@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -487,3 +487,748 @@ def test_discover_upsert_preserves_enrichment_freshness(fresh_db):
     conn.commit()
     after = universe.symbols_needing_enrichment(timedelta(days=7))
     assert any("OLDY" in str(row) for row in after)
+
+
+# ======================================================================
+# 수정 라운드 (WP-UNIVERSE) — US 보통주 분류기 · 스키마 마이그레이션 · 제외 처리 ·
+# TTM 보강 · 중단 규칙 · KR 지배주주/위생 · pick_top/freshness/yf_symbol
+# (전부 오프라인 — 실응답 픽스처 + 합성, 네트워크 없음)
+# ======================================================================
+
+import json as _json
+from pathlib import Path as _Path
+
+from src.exceptions import ApiAuthorizationError, RateLimitError
+
+_FIXTURES = _Path(__file__).parent / "fixtures"
+
+
+def _screener_fixture() -> dict:
+    return _json.loads((_FIXTURES / "screener_us_rows.json").read_text(encoding="utf-8"))
+
+
+def _dart_fixture() -> dict:
+    return _json.loads((_FIXTURES / "dart_fnlttSinglAcntAll_trimmed.json").read_text(encoding="utf-8"))
+
+
+def _nrow(symbol, name, price, adv, exchange="NYSE", industry="x"):
+    return {"symbol": symbol, "name": name, "price": price, "industry": industry,
+            "exchange": exchange, "adv_usd": adv}
+
+
+# ---------------- classify_us_securities ----------------
+
+
+def test_classify_fixture_rows_match_expected_reasons():
+    """실응답 61행(상장채·우선주·OTC·형제·저유동 + 감시 정상주) — 기대 사유와 정확히 일치."""
+    fx = _screener_fixture()
+    norm = [universe.normalize_screener_row(r) for r in fx["rows"]]
+    got = universe.classify_us_securities(norm)
+    for sym, expected in fx["expected_reason"].items():
+        assert got.get(sym) == expected, f"{sym}: got {got.get(sym)!r}, expected {expected!r}"
+    assert got["MGR"] == "sibling" and got["AFGE"] == "sibling"
+    assert "AMG" not in got and "AFG" not in got
+
+
+def test_classify_false_positive_guards():
+    rows = [
+        _nrow("GOOGL", "Alphabet Inc.", 359.68, 8.9e9), _nrow("GOOG", "Alphabet Inc.", 347.37, 6.2e9),
+        _nrow("BRK-A", "Berkshire Hathaway Inc.", 7.4e5, 1.1e9), _nrow("BRK-B", "Berkshire Hathaway Inc.", 490.0, 1.6e9),
+        _nrow("FOX", "Fox Corporation", 52.0, 6e7), _nrow("FOXA", "Fox Corporation", 57.0, 1.5e8),
+        _nrow("NWS", "News Corporation", 31.0, 2e7), _nrow("NWSA", "News Corporation", 27.0, 8e7),
+        _nrow("UA", "Under Armour, Inc.", 5.5, 1.5e7), _nrow("UAA", "Under Armour, Inc.", 6.0, 4e7),
+        _nrow("PFBC", "Preferred Bank", 103.03, 1.25e7),
+        _nrow("BKD", "Brookdale Senior Living Inc.", 7.0, 2e7),
+        _nrow("PTRN", "Pattern Group Inc. Series A Common Stock", 17.71, 3e7),
+        _nrow("BMNR", "Bitmine Immersion Technologies, Inc.", 24.66, 9.46e8),
+        _nrow("BMNP", "Bitmine Immersion Technologies, Inc.", 99.69, 3.86e6),
+    ]
+    got = universe.classify_us_securities(rows)
+    assert got == {"BMNP": "sibling"}        # 정상 이중클래스·'Preferred Bank'·'Series A Common Stock' 보호
+
+
+def test_classify_whitelist_overrides():
+    rows = [_nrow("AMG", "Affiliated Managers Group, Inc.", 377.09, 1.04e8),
+            _nrow("MGR", "Affiliated Managers Group, Inc.", 18.73, 5.9e5)]
+    assert universe.classify_us_securities(rows) == {"MGR": "sibling"}
+    assert universe.classify_us_securities(rows, whitelist=frozenset({"MGR"})) == {}
+    monkey_wl = frozenset({"MGR"})
+    assert universe.classify_us_securities(rows, whitelist=monkey_wl) == {}
+
+
+def test_classify_skips_rules_when_fields_missing():
+    """exchange/adv_usd 가 None 이면 otc·sibling·illiquid 는 건너뜀 (name/suffix 만) — 오탐 방지."""
+    rows = [_nrow("AFG", "American Financial Group, Inc.", 139.02, None, exchange=None),
+            _nrow("AFGE", "American Financial Group, Inc.", 16.83, None, exchange=None),
+            _nrow("OAK-PA", "Oaktree Capital Group", 25.0, None, exchange=None),
+            _nrow("TBB", "AT&T Inc. 5.350% Global Notes due 2066", 24.0, None, exchange=None)]
+    got = universe.classify_us_securities(rows)
+    assert got == {"OAK-PA": "suffix", "TBB": "name"}
+    # adv 가 주어지면 형제 규칙 적용
+    rows2 = [_nrow("AFG", "American Financial Group, Inc.", 139.02, 5.3e7),
+             _nrow("AFGE", "American Financial Group, Inc.", 16.83, 1.7e5)]
+    assert universe.classify_us_securities(rows2) == {"AFGE": "sibling"}
+
+
+def test_classify_boundaries():
+    assert universe.classify_us_securities([_nrow("A", "Alpha Co", 10.0, 1_000_000)]) == {}
+    assert universe.classify_us_securities([_nrow("B", "Beta Co", 10.0, 999_999)]) == {"B": "illiquid"}
+    # 형제: 주력 ADV 가 후보의 정확히 5배 → 적용, 4.9배 → 미적용 (가격 조건 충족 상태)
+    prim = _nrow("P", "Gamma Co", 100.0, 5_000_000)
+    assert universe.classify_us_securities([prim, _nrow("C", "Gamma Co", 20.0, 1_000_000)]) == {"C": "sibling"}
+    prim49 = _nrow("P", "Gamma Co", 100.0, 4_900_000)
+    assert universe.classify_us_securities([prim49, _nrow("C", "Gamma Co", 20.0, 1_000_000)]) == {}
+    # 가격 상한 29.99 vs 30.0 (주력 100, ADV 지배 충족, thin 아님)
+    big = _nrow("P", "Delta Co", 100.0, 1e9)
+    assert universe.classify_us_securities([big, _nrow("D1", "Delta Co", 29.99, 1e8)]) == {"D1": "sibling"}
+    assert universe.classify_us_securities([big, _nrow("D2", "Delta Co", 30.0, 1e8)]) == {}
+
+
+def test_name_is_noncommon_patterns():
+    assert universe.name_is_noncommon("Prudential Financial, Inc. 5.95")       # 잘린 이름 소수
+    assert universe.name_is_noncommon("Southern Company (The) Series 2")        # WEAK series
+    assert not universe.name_is_noncommon("Pattern Group Inc. Series A Common Stock")
+    assert not universe.name_is_noncommon("Preferred Bank")
+    assert not universe.name_is_noncommon("C3.ai, Inc.")
+
+
+def test_normalize_screener_row_prefers_avg_volume():
+    r = {"symbol": "X", "companyName": "X Co", "price": 10.0, "avgVolume": 100, "volume": 1,
+         "exchangeShortName": "NYSE", "industry": "y"}
+    assert universe.normalize_screener_row(r)["adv_usd"] == 1000.0
+    r.pop("avgVolume")
+    assert universe.normalize_screener_row(r)["adv_usd"] == 10.0
+    r.pop("volume")
+    assert universe.normalize_screener_row(r)["adv_usd"] is None
+
+
+# ---------------- discover(US) 통합 ----------------
+
+
+def test_discover_us_integration_marks_excluded_and_reevaluates(fresh_db, monkeypatch):
+    fx = _screener_fixture()
+    monkeypatch.setattr("src.data_fetcher.fetch_company_screener", lambda **kw: fx["rows"])
+    n = universe.discover(markets=("US",))["US"]
+    assert n == len(fx["rows"])
+
+    conn = universe._conn()
+    row = conn.execute("SELECT exchange, adv_value, excluded, seen_at FROM screened "
+                       "WHERE symbol='MGR' AND market='US'").fetchone()
+    assert row[0] == "NYSE" and row[1] == pytest.approx(18.73 * 31566) and row[2] == "sibling"
+    assert row[3] is not None
+    assert conn.execute("SELECT excluded FROM screened WHERE symbol='AMG'").fetchone()[0] is None
+
+    # 보강 대상·스캔·선정에서 제외 행이 빠짐 (보강 완료 표시 후 확인)
+    conn.execute("UPDATE screened SET enriched=1, total_score=90, value_score=90, health_score=90")
+    conn.commit()
+    assert "MGR" not in {s for s, _ in universe.symbols_needing_enrichment(timedelta(days=0))}
+    scanned = {r.symbol for r in universe.scan(market="US", limit=1000)}
+    assert "MGR" not in scanned and "AFGE" not in scanned and "AMG" in scanned
+    assert "MGR" not in universe.top_symbols(n=100, market="US")
+    assert universe.stats()["US_excluded"] == len(fx["expected_reason"]) - sum(
+        1 for v in fx["expected_reason"].values() if v is None)
+
+    # lookup 은 제외 행도 반환 (사유 노출)
+    mgr = universe.lookup("MGR")
+    assert mgr is not None and mgr.excluded == "sibling" and mgr.exchange == "NYSE"
+    assert mgr.price_asof is not None and mgr.fund_asof is not None
+
+    # 두 번째 발굴에서 WHITELIST 변경 → 재평가로 NULL 복귀 (점수는 보존)
+    monkeypatch.setattr(universe, "WHITELIST", frozenset({"MGR"}))
+    universe.discover(markets=("US",))
+    row = conn.execute("SELECT excluded, total_score FROM screened WHERE symbol='MGR'").fetchone()
+    assert row[0] is None and row[1] == 90
+
+
+def test_discover_us_does_not_auto_exclude_unseen_rows(fresh_db, monkeypatch, caplog):
+    conn = universe._conn()
+    _seed_stock(conn, "HG", "US", 88)                   # 오늘 응답에 없는 기존 행
+    fx = _screener_fixture()
+    monkeypatch.setattr("src.data_fetcher.fetch_company_screener",
+                        lambda **kw: [r for r in fx["rows"] if r["symbol"] != "HG"])
+    universe.discover(markets=("US",))
+    assert conn.execute("SELECT excluded FROM screened WHERE symbol='HG'").fetchone()[0] is None
+    assert any("미확인" in rec.getMessage() for rec in caplog.records)
+
+
+def test_build_upsert_reclassify_us_updates_only_changed(fresh_db, monkeypatch):
+    fx = _screener_fixture()
+    monkeypatch.setattr("src.data_fetcher.fetch_company_screener", lambda **kw: fx["rows"])
+    universe.discover(markets=("US",))
+    conn = universe._conn()
+    assert universe.reclassify_us(conn)["changed"] == 0            # 같은 규칙 → 변경 0
+    monkeypatch.setattr(universe, "WHITELIST", frozenset({"MGR", "AFGE"}))
+    out = universe.reclassify_us(conn)
+    assert out["changed"] == 2 and "MGR" not in out["excluded_symbols"]
+    assert conn.execute("SELECT excluded FROM screened WHERE symbol='AFGE'").fetchone()[0] is None
+
+
+# ---------------- 스키마 마이그레이션 (구 DB, 멱등, PRAGMA 가드) ----------------
+
+_OLD_SCHEMA = """
+CREATE TABLE screened (
+    symbol TEXT NOT NULL, market TEXT NOT NULL, name TEXT, sector TEXT, industry TEXT,
+    price REAL, market_cap REAL, dividend_yield REAL, roe REAL, ev_to_sales REAL,
+    fcf_yield REAL, net_debt_ebitda REAL, health_score INTEGER, value_score INTEGER,
+    total_score INTEGER, enriched INTEGER NOT NULL DEFAULT 0, discovered_at TEXT,
+    updated_at TEXT, per REAL, pbr REAL, detail TEXT,
+    PRIMARY KEY (symbol, market)
+);
+"""
+
+
+def test_migration_adds_columns_idempotently(fresh_db):
+    raw = storage_mod.get_storage().conn
+    raw.executescript(_OLD_SCHEMA)
+    raw.execute("INSERT INTO screened (symbol, market, name, enriched, total_score, value_score, "
+                "health_score, market_cap, price, updated_at) VALUES "
+                "('OLD','US','Old Co',1,70,70,70,1e9,10.0,'2026-07-10T00:00:00+00:00')")
+    raw.commit()
+    before = universe._cols(raw)
+    assert not (set(universe._NEW_COLS) & before)
+    conn = universe._conn()
+    assert set(universe._NEW_COLS) <= universe._cols(conn)
+    universe._conn()                                                # 두 번째 호출 멱등
+    rows = universe.scan(market="US")
+    assert [r.symbol for r in rows] == ["OLD"]
+    assert rows[0].excluded is None and rows[0].exchange is None and rows[0].price_asof is None
+    assert rows[0].fund_asof == "2026-07-10"
+
+
+def test_scan_without_new_columns_uses_pragma_guard(fresh_db, monkeypatch):
+    """stale 레플리카(PRAGMA 에 새 컬럼 없음)를 흉내 — SELECT 가 새 컬럼을 참조하지 않아야 함."""
+    conn = universe._conn()
+    _seed_stock(conn, "AAA", "US", 80)
+    old_cols = universe._cols(conn) - set(universe._NEW_COLS)
+    monkeypatch.setattr(universe, "_cols", lambda c: old_cols)
+    assert universe._excluded_clause(old_cols) == ""
+    assert "excluded" not in universe._scan_select(old_cols)
+    rows = universe.scan(market="US")
+    assert rows and rows[0].symbol == "AAA" and rows[0].excluded is None
+    assert universe.lookup("AAA").excluded is None
+    assert universe.stats()["US_excluded"] == 0
+    assert universe.freshness("US")["price_asof"] is None
+    assert universe.reclassify_us(conn)["changed"] == 0            # 컬럼 없으면 스킵
+    assert [s for s, _ in universe.symbols_needing_enrichment(timedelta(days=0))] == ["AAA"]
+
+
+def test_scanrow_positional_construction_compat():
+    r = universe.ScanRow("A", "US", "A Co", "Tech", 1.0, 2.0, 50, 50, 50, 1.0, None, None)
+    assert r.exchange is None and r.excluded is None and r.flags == ()
+    assert r.fund_asof is None and r.price_asof is None
+
+
+# ---------------- _compute_enrich (TTM 계약 소비 — monkeypatch) ----------------
+
+_TTM_FAKE = {
+    "returnOnEquity": 0.20, "returnOnInvestedCapital": 0.15, "grossProfitMargin": 0.40,
+    "evToSales": 2.0, "evToEBITDA": 9.0, "priceToBookRatio": 1.5, "freeCashFlowYield": 0.05,
+    "netDebtToEBITDA": 1.0, "earningsYield": 0.08, "currentRatio": 2.0, "incomeQuality": 1.0,
+    "dividendPerShare": 4.08, "marketCap": 7.6e10, "_basis": "ttm",
+}
+
+
+def test_compute_enrich_uses_ttm_basis_flags_and_dividend(fresh_db, monkeypatch):
+    conn = universe._conn()
+    universe._upsert_universe_row(conn, symbol="EOG", market="US", name="EOG", sector="Energy",
+                                  industry="Oil & Gas E&P", price=120.0, market_cap=7.6e10,
+                                  dividend_yield=1.0)
+    universe._upsert_universe_row(conn, symbol="HG", market="US", name="Hamilton",
+                                  sector="Financial Services", industry="Insurance - Reinsurance",
+                                  price=20.0, market_cap=2e9, dividend_yield=0.0)
+    conn.commit()
+    captured = {}
+
+    def fake_latest(ticker, *, basis="ttm"):
+        captured[ticker] = basis
+        return dict(_TTM_FAKE)
+
+    monkeypatch.setattr("src.screener.latest_fundamentals", fake_latest)
+    seen_quote = {}
+    real_value = universe._scorecards
+
+    def spy_scorecards(quote_like, m, is_fin):
+        seen_quote[quote_like.get("sector")] = (dict(quote_like), is_fin)
+        return real_value(quote_like, m, is_fin)
+
+    monkeypatch.setattr(universe, "_scorecards", spy_scorecards)
+
+    cols = universe._compute_enrich(conn, "EOG", "US")
+    assert captured["EOG"] == "ttm"
+    detail = _json.loads(cols["detail"])
+    assert detail["basis"] == "ttm" and detail["fin"] is False and "fin_neutral" not in detail["flags"]
+    assert seen_quote["Energy"][0]["lastAnnualDividend"] == 4.08       # TTM dividendPerShare 우선
+    assert seen_quote["Energy"][1] is False
+    assert cols["roe"] == pytest.approx(20.0)
+
+    cols_hg = universe._compute_enrich(conn, "HG", "US")
+    assert "fin_neutral" in _json.loads(cols_hg["detail"])["flags"]
+    assert seen_quote["Financial Services"][1] is True
+
+
+def test_compute_enrich_roe_missing_is_none_and_outlier_flags(fresh_db, monkeypatch):
+    conn = universe._conn()
+    universe._upsert_universe_row(conn, symbol="AFGE", market="US", name="AFG", sector="Financial Services",
+                                  industry="Insurance - Property & Casualty", price=16.8,
+                                  market_cap=1.4e9, dividend_yield=5.0)
+    conn.commit()
+    m = dict(_TTM_FAKE)
+    m.pop("returnOnEquity"); m.pop("dividendPerShare")
+    m["earningsYield"] = 0.596; m["freeCashFlowYield"] = 0.99; m["currentRatio"] = 0
+    monkeypatch.setattr("src.screener.latest_fundamentals", lambda ticker, *, basis="ttm": m)
+    cols = universe._compute_enrich(conn, "AFGE", "US")
+    assert cols["roe"] is None                                           # 결측 ≠ 0 (UNI-10)
+    flags = _json.loads(cols["detail"])["flags"]
+    assert {"ey_outlier", "fcf_outlier", "cr_missing", "fin_neutral"} <= set(flags)
+
+
+def test_compute_enrich_falls_back_to_annual_signature(fresh_db, monkeypatch):
+    """WP-SCORE 병합 전(구 시그니처 basis 없음)에도 동작 — 전환기 호환."""
+    conn = universe._conn()
+    universe._upsert_universe_row(conn, symbol="OLD", market="US", name="Old", sector="Tech",
+                                  industry="x", price=10.0, market_cap=2e9, dividend_yield=0.0)
+    conn.commit()
+    annual = {k: v for k, v in _TTM_FAKE.items() if k != "_basis"}
+    monkeypatch.setattr("src.screener.latest_fundamentals", lambda ticker: annual)
+    cols = universe._compute_enrich(conn, "OLD", "US")
+    assert _json.loads(cols["detail"])["basis"] == "annual"
+
+
+# ---------------- enrich 중단 규칙 ----------------
+
+
+def _seed_many(conn, n):
+    for i in range(n):
+        universe._upsert_universe_row(conn, symbol=f"S{i:02d}", market="US", name=f"S{i}",
+                                      sector="Tech", industry="x", price=10.0,
+                                      market_cap=1e9 * (n - i), dividend_yield=0.0)
+    conn.commit()
+
+
+def test_enrich_aborts_after_consecutive_rate_limits(fresh_db, monkeypatch):
+    conn = universe._conn()
+    _seed_many(conn, 8)
+    calls = []
+
+    def boom(ticker, *, basis="ttm"):
+        calls.append(ticker)
+        raise RateLimitError("429", source="FMP")
+
+    monkeypatch.setattr("src.screener.latest_fundamentals", boom)
+    stats = universe.enrich()
+    assert stats["aborted"] is True and stats["failed"] == universe.ABORT_AFTER_RATE_LIMITS
+    assert len(calls) == 5 and "S05" not in calls                       # 6번째는 호출 안 됨
+
+
+def test_enrich_consecutive_counter_resets_on_success(fresh_db, monkeypatch):
+    conn = universe._conn()
+    _seed_many(conn, 10)
+    calls = []
+
+    def flaky(ticker, *, basis="ttm"):
+        calls.append(ticker)
+        if ticker == "S03":
+            return dict(_TTM_FAKE)
+        raise RateLimitError("429", source="FMP")
+
+    monkeypatch.setattr("src.screener.latest_fundamentals", flaky)
+    stats = universe.enrich()
+    assert stats["aborted"] is True and stats["enriched"] == 1
+    assert len(calls) == 9                                              # 3 실패 + 1 성공 + 5 실패
+    assert universe.lookup("S03") is not None                           # 중단 전 분 flush 됨
+
+
+def test_enrich_aborts_immediately_on_authorization_error(fresh_db, monkeypatch):
+    conn = universe._conn()
+    _seed_many(conn, 4)
+    calls = []
+
+    def forbidden(ticker, *, basis="ttm"):
+        calls.append(ticker)
+        raise ApiAuthorizationError("403", source="FMP")
+
+    monkeypatch.setattr("src.screener.latest_fundamentals", forbidden)
+    stats = universe.enrich()
+    assert stats["aborted"] is True and len(calls) == 1
+
+
+# ---------------- KR: 지배주주 귀속 점수 (실응답 픽스처) ----------------
+
+
+def _kr_comp(sc, side, label):
+    return next(c for c in sc["detail"][side]["components"] if c[0] == label)
+
+
+def test_kr_scores_fnf_holdings_attributed_golden():
+    import src.data_fetcher as df
+
+    fin = df._parse_dart_all(_dart_fixture()["FNF_holdings"]["list"], "CFS")
+    sc = universe.calculate_kr_scores(fin, 644_995_911_830, name="F&F홀딩스")
+    assert sc["per"] == pytest.approx(5.13, abs=0.01)
+    assert sc["pbr"] == pytest.approx(0.28, abs=0.005)
+    assert sc["roe"] == pytest.approx(5.44, abs=0.01)
+    assert sc["total_score"] == 84 and "holding" in sc["flags"]
+    # 부채비율은 총자본(equity_total) 분모: (assets-equity_total)/equity_total
+    expected_debt_ratio = fin["debt"] / fin["equity_total"] * 100
+    assert _kr_comp(sc, "health", "부채비율")[3] == f"{expected_debt_ratio:.0f}%"
+
+
+def test_kr_scores_sm_one_off_guard_golden():
+    import src.data_fetcher as df
+
+    fin = df._parse_dart_all(_dart_fixture()["SM"]["list"], "CFS")
+    sc = universe.calculate_kr_scores(fin, 1_913_996_084_000, name="에스엠")
+    assert sc["per"] == pytest.approx(12.68, abs=0.01)                  # 5.33 → 12.68 (3년 평균)
+    assert "one_off" in sc["flags"]
+    assert "3년평균" in _kr_comp(sc, "value", "PER")[3]
+    # 스펙 골든 78 은 6/12 시총 기준, 여기 시총은 7/10 DB 값 → ±1 허용 (구 점수 90 에서 하락)
+    assert 78 <= sc["total_score"] <= 79
+
+
+def test_kr_scores_cuckoo_unchanged_by_guard():
+    import src.data_fetcher as df
+
+    fin = df._parse_dart_all(_dart_fixture()["cuckoo"]["list"], "CFS")
+    sc = universe.calculate_kr_scores(fin, 1e12, name="쿠쿠홈시스")
+    assert sc["flags"] == []                                             # 정상 종목은 안 건드림
+
+
+def test_kr_scores_old_dict_falls_back_equity_for_debt_ratio():
+    old = {"net_income": 1e10, "equity": 1e11, "debt": 5e10, "revenue": 2e11, "op_income": 2e10}
+    sc = universe.calculate_kr_scores(old, 5e11)
+    assert _kr_comp(sc, "health", "부채비율")[3] == "50%"
+    assert sc["flags"] == []
+
+
+def test_kr_scores_financial_neutralizes_debt_and_margin():
+    fin = {"net_income": 5e11, "equity": 5e12, "equity_total": 5.2e12, "debt": 4.5e13,
+           "assets": 5e13, "revenue": 1e13, "op_income": 7e11}
+    sc = universe.calculate_kr_scores(fin, 3e12, name="삼성증권")
+    assert "fin_neutral" in sc["flags"]
+    assert _kr_comp(sc, "health", "부채비율")[1] == 15.0 and _kr_comp(sc, "health", "부채비율")[3] == "금융중립"
+    assert _kr_comp(sc, "health", "영업이익률")[1] == 10.0
+    non_fin = universe.calculate_kr_scores(fin, 3e12, name="아시아나항공")
+    assert _kr_comp(non_fin, "health", "부채비율")[1] == 0.0               # 부채비율 865% → 0점
+
+
+def test_kr_scores_attrib_total_flag():
+    fin = {"net_income": 1e10, "equity": 1e11, "equity_total": 1e11, "debt": 5e10,
+           "revenue": 2e11, "op_income": 2e10, "attrib": "total"}
+    assert "attrib_total" in universe.calculate_kr_scores(fin, 5e11)["flags"]
+
+
+@pytest.mark.parametrize("name, ratio, expected", [
+    ("삼성증권", 0.90, True), ("아시아나항공", 0.93, False), ("KB금융", 0.92, True),
+    ("현대해상", 0.90, True), ("삼성증권", 0.50, False), ("다우기술", 0.9, False),
+])
+def test_kr_is_financial(name, ratio, expected):
+    assert universe.kr_is_financial(name, ratio * 100.0, 100.0) is expected
+
+
+def test_kr_is_financial_missing_values():
+    assert universe.kr_is_financial("삼성증권", None, 100.0) is False
+    assert universe.kr_is_financial("삼성증권", 90.0, 0.0) is False
+    assert universe.kr_is_financial(None, 90.0, 100.0) is False
+
+
+@pytest.mark.parametrize("name, expected", [
+    ("F&F홀딩스", True), ("영원무역홀딩스", True), ("SK", False), ("한국금융지주", False),
+    ("KB금융지주", False), ("대웅", False), ("CJ Holdings", True), (None, False),
+])
+def test_kr_is_holding(name, expected):
+    assert universe.kr_is_holding(name) is expected
+
+
+@pytest.mark.parametrize("today, expected", [
+    (date(2026, 10, 8), 2025), (date(2027, 2, 15), 2025),
+    (date(2027, 3, 31), 2025), (date(2027, 4, 1), 2026),
+])
+def test_dart_target_year(today, expected):
+    assert universe.dart_target_year(today) == expected
+
+
+# ---------------- KR 위생 (ADR / not_listed / halted / below_floor) ----------------
+
+
+def _krx_row(code, name, price, mcap, trdval="1000000", sect="", mkt="KOSPI"):
+    return {"ISU_CD": code, "ISU_NM": name, "TDD_CLSPRC": str(price), "MKTCAP": str(mcap),
+            "ACC_TRDVAL": trdval, "SECT_TP_NM": sect, "MKT_NM": mkt}
+
+
+def _base(code):
+    return {"ISU_SRT_CD": code, "SECUGRP_NM": "주권", "KIND_STKCERT_TP_NM": "보통주"}
+
+
+def _seed_kr(conn, *symbols):
+    for s in symbols:
+        universe._upsert_universe_row(conn, symbol=s, market="KR", name=s, sector="", industry="",
+                                      price=1.0, market_cap=1e12, dividend_yield=0.0)
+    conn.commit()
+
+
+def _excluded_map(conn):
+    return dict(conn.execute("SELECT symbol, excluded FROM screened WHERE market='KR'").fetchall())
+
+
+def test_discover_kr_hygiene_rules(fresh_db, monkeypatch):
+    conn = universe._conn()
+    _seed_kr(conn, "KT", "PKX", "SSNLF", "0126Z0", "057050", "006380", "035720", "005930")
+    big = universe.KR_MARKET_CAP_FLOOR * 2
+    kospi = [_krx_row("005930", "삼성전자", 70000, big), _krx_row("0126Z0", "삼성에피스홀딩스", 1000, big),
+             _krx_row("006380", "카프로", 100, big, trdval="0"),
+             _krx_row("035720", "소형", 10, universe.KR_MARKET_CAP_FLOOR / 10)]
+    # 목록 크기 가드(≥1500)를 넘기기 위한 더미 행 (보통주 아님 → upsert 대상 아님, 목록에는 포함)
+    kosdaq = [_krx_row(f"D{i:05d}", "dummy", 1, 1, mkt="KOSDAQ") for i in range(1500)]
+    monkeypatch.setattr("src.data_fetcher.fetch_krx_daily",
+                        lambda market, bas_dd: kospi if market == "KOSPI" else kosdaq)
+    monkeypatch.setattr("src.data_fetcher.fetch_krx_base_info",
+                        lambda market, bas_dd: [_base(c) for c in ("005930", "0126Z0", "006380", "035720")]
+                        if market == "KOSPI" else [])
+
+    n = universe.discover(markets=("KR",))["KR"]
+    assert n == 2                                                        # 005930, 0126Z0
+    ex = _excluded_map(conn)
+    assert ex["KT"] == "kr_adr" and ex["PKX"] == "kr_adr" and ex["SSNLF"] == "kr_adr"
+    assert ex["0126Z0"] is None and ex["005930"] is None               # 알파뉴메릭 6자리 정상
+    assert ex["057050"] == "not_listed"
+    assert ex["006380"] == "halted"
+    assert ex["035720"] == "below_floor"
+    row = conn.execute("SELECT price, market_cap, exchange, seen_at FROM screened "
+                       "WHERE symbol='035720'").fetchone()
+    assert row[0] == 10.0 and row[1] == universe.KR_MARKET_CAP_FLOOR / 10   # 가격·시총은 갱신
+    assert row[2] == "KOSPI" and len(row[3]) == 10                       # seen_at = KRX 기준일
+
+    # 복귀: 거래 재개·시총 회복·재상장 → NULL
+    kospi2 = [_krx_row("005930", "삼성전자", 70000, big), _krx_row("0126Z0", "삼성에피스홀딩스", 1000, big),
+              _krx_row("006380", "카프로", 100, big, trdval="5000"),
+              _krx_row("035720", "소형", 10, big), _krx_row("057050", "현대홈쇼핑", 100, big)]
+    monkeypatch.setattr("src.data_fetcher.fetch_krx_daily",
+                        lambda market, bas_dd: kospi2 if market == "KOSPI" else kosdaq)
+    monkeypatch.setattr("src.data_fetcher.fetch_krx_base_info",
+                        lambda market, bas_dd: [_base(c) for c in ("005930", "0126Z0", "006380", "035720", "057050")]
+                        if market == "KOSPI" else [])
+    assert universe.discover(markets=("KR",))["KR"] == 5
+    ex = _excluded_map(conn)
+    assert ex["006380"] is None and ex["035720"] is None and ex["057050"] is None
+    assert ex["KT"] == "kr_adr"
+
+
+def test_discover_kr_not_listed_requires_full_list(fresh_db, monkeypatch, caplog):
+    conn = universe._conn()
+    _seed_kr(conn, "057050")
+    big = universe.KR_MARKET_CAP_FLOOR * 2
+    monkeypatch.setattr("src.data_fetcher.fetch_krx_daily",
+                        lambda market, bas_dd: [_krx_row("005930", "삼성전자", 70000, big)]
+                        if market == "KOSPI" else [])
+    monkeypatch.setattr("src.data_fetcher.fetch_krx_base_info",
+                        lambda market, bas_dd: [_base("005930")] if market == "KOSPI" else [])
+    universe.discover(markets=("KR",))
+    assert _excluded_map(conn)["057050"] is None                         # 목록 부분 수신 → 보류
+    assert any("판정 보류" in rec.getMessage() for rec in caplog.records)
+
+
+def test_discover_kr_missing_trdval_is_not_halted(fresh_db, monkeypatch):
+    conn = universe._conn()
+    big = universe.KR_MARKET_CAP_FLOOR * 2
+    row = _krx_row("005930", "삼성전자", 70000, big)
+    row.pop("ACC_TRDVAL")
+    monkeypatch.setattr("src.data_fetcher.fetch_krx_daily",
+                        lambda market, bas_dd: [row] if market == "KOSPI" else [])
+    monkeypatch.setattr("src.data_fetcher.fetch_krx_base_info",
+                        lambda market, bas_dd: [_base("005930")] if market == "KOSPI" else [])
+    assert universe.discover(markets=("KR",))["KR"] == 1
+    assert _excluded_map(conn)["005930"] is None
+
+
+# ---------------- enrich_kr / rescore_kr_offline / refresh_kr_prices ----------------
+
+
+def test_enrich_kr_stores_raw_and_uses_target_year(fresh_db, monkeypatch):
+    conn = universe._conn()
+    universe._upsert_universe_row(conn, symbol="007700", market="KR", name="F&F홀딩스", sector="",
+                                  industry="", price=1.0, market_cap=644_995_911_830, dividend_yield=0.0)
+    conn.commit()
+    fin = __import__("src.data_fetcher", fromlist=["_parse_dart_all"])._parse_dart_all(
+        _dart_fixture()["FNF_holdings"]["list"], "CFS")
+    years = []
+
+    def fake_fin(corp_code, year):
+        years.append((corp_code, year))
+        return fin
+
+    monkeypatch.setattr("src.data_fetcher.fetch_dart_corp_codes", lambda: {"007700": "00126487"})
+    monkeypatch.setattr("src.data_fetcher.fetch_dart_financials", fake_fin)
+    stats = universe.enrich_kr()
+    assert stats["enriched"] == 1 and years == [("00126487", universe.dart_target_year())]
+    detail = universe.lookup_detail("007700")
+    assert detail["raw"]["equity_total"] == fin["equity_total"] and detail["basis"].startswith("FY")
+    row = universe.lookup("007700")
+    assert row.per == pytest.approx(5.13, abs=0.01) and "holding" in row.flags
+
+
+def test_rescore_kr_offline_without_dart_calls(fresh_db, monkeypatch):
+    import src.data_fetcher as df
+
+    conn = universe._conn()
+    fin = df._parse_dart_all(_dart_fixture()["FNF_holdings"]["list"], "CFS")
+    universe._upsert_universe_row(conn, symbol="007700", market="KR", name="F&F홀딩스", sector="",
+                                  industry="", price=1.0, market_cap=644_995_911_830, dividend_yield=0.0)
+    universe._upsert_universe_row(conn, symbol="999999", market="KR", name="구형", sector="",
+                                  industry="", price=1.0, market_cap=1e12, dividend_yield=0.0)
+    sc = universe.calculate_kr_scores(fin, 644_995_911_830, name="F&F홀딩스")
+    universe._flush_updates(conn, [
+        universe._build_update(universe._kr_update_cols(sc, fin, 2025), "007700", "KR"),
+        universe._build_update({"enriched": 1, "total_score": 50, "value_score": 50, "health_score": 50,
+                                "detail": '{"health": {}, "value": {}}', "updated_at": universe._utcnow()},
+                               "999999", "KR"),
+    ])
+
+    def must_not_call(*a, **k):
+        raise AssertionError("DART 호출되면 안 됨")
+
+    monkeypatch.setattr("src.data_fetcher.fetch_dart_financials", must_not_call)
+    out = universe.rescore_kr_offline({"007700": 644_995_911_830 * 2})
+    assert out == {"rescored": 1, "skipped": 1}
+    row = universe.lookup("007700")
+    assert row.per == pytest.approx(10.26, abs=0.02)                      # 시총 2배 → PER 2배
+    assert universe.lookup("999999").total_score == 50                    # raw 없는 구형 행은 건너뜀
+
+
+def test_refresh_kr_prices_combines_discover_and_rescore(fresh_db, monkeypatch):
+    import src.data_fetcher as df
+
+    conn = universe._conn()
+    fin = df._parse_dart_all(_dart_fixture()["FNF_holdings"]["list"], "CFS")
+    universe._upsert_universe_row(conn, symbol="007700", market="KR", name="F&F홀딩스", sector="",
+                                  industry="", price=1.0, market_cap=644_995_911_830, dividend_yield=0.0)
+    sc = universe.calculate_kr_scores(fin, 644_995_911_830, name="F&F홀딩스")
+    universe._flush_updates(conn, [universe._build_update(universe._kr_update_cols(sc, fin, 2025), "007700", "KR")])
+    new_mcap = 644_995_911_830 * 2
+    monkeypatch.setattr("src.data_fetcher.fetch_krx_daily",
+                        lambda market, bas_dd: [_krx_row("007700", "F&F홀딩스", 30000, new_mcap)]
+                        if market == "KOSPI" else [])
+    monkeypatch.setattr("src.data_fetcher.fetch_krx_base_info",
+                        lambda market, bas_dd: [_base("007700")] if market == "KOSPI" else [])
+    monkeypatch.setattr("src.data_fetcher.fetch_dart_financials",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("DART 호출 금지")))
+    out = universe.refresh_kr_prices()
+    assert out["discovered"] == 1 and out["rescored"] == 1
+    row = universe.lookup("007700")
+    assert row.per == pytest.approx(10.26, abs=0.02) and row.market_cap == new_mcap
+
+
+# ---------------- pick_top / top_symbols / freshness ----------------
+
+
+def test_pick_top_us_sector_cap(fresh_db):
+    conn = universe._conn()
+    for i, (sym, sector, total) in enumerate([
+        ("E1", "Energy", 95), ("E2", "Energy", 94), ("E3", "Energy", 93), ("E4", "Energy", 92),
+        ("E5", "Energy", 91), ("T1", "Tech", 90), ("F1", "Financial", 89), ("H1", "Health", 88),
+    ]):
+        _seed_stock(conn, sym, "US", total, sector=sector, mcap=1e10 - i)
+    picked = universe.pick_top("US", 6)
+    assert [r.symbol for r in picked] == ["E1", "E2", "T1", "F1", "H1"]   # 에너지 2개 상한, 나머지 채움
+    assert universe.top_symbols(n=6, market="US") == [r.symbol for r in picked]
+    assert [r.symbol for r in universe.pick_top("US", 6, max_per_sector=None)][:5] == ["E1", "E2", "E3", "E4", "E5"]
+
+
+def test_pick_top_kr_holding_cap(fresh_db):
+    conn = universe._conn()
+    for i, (sym, name, total) in enumerate([
+        ("H1", "A홀딩스", 95), ("H2", "B지주", 94), ("H3", "C홀딩스", 93), ("H4", "D Holdings", 92),
+        ("N1", "삼성전자", 91), ("N2", "에스엠", 90), ("F1", "KB금융지주", 89),
+    ]):
+        universe._upsert_universe_row(conn, symbol=sym, market="KR", name=name, sector="우량기업부",
+                                      industry="", price=1.0, market_cap=1e12 - i, dividend_yield=0.0)
+        conn.execute("UPDATE screened SET enriched=1, total_score=?, value_score=?, health_score=? "
+                     "WHERE symbol=? AND market='KR'", (total, total, total, sym))
+    conn.commit()
+    picked = [r.symbol for r in universe.pick_top("KR", 6)]
+    assert picked == ["H1", "H2", "N1", "N2", "F1"]        # 지주 2개 상한 (금융지주는 지주 아님), 섹터 상한 미적용
+    assert [r.symbol for r in universe.pick_top("KR", 6, max_holding=None)][:4] == ["H1", "H2", "H3", "H4"]
+
+
+def test_pick_top_uses_detail_holding_flag(fresh_db):
+    conn = universe._conn()
+    for sym, name, flags in [("X1", "대웅", ["holding"]), ("X2", "한화", ["holding"]), ("X3", "CJ", ["holding"]),
+                             ("Y1", "현대차", [])]:
+        universe._upsert_universe_row(conn, symbol=sym, market="KR", name=name, sector="", industry="",
+                                      price=1.0, market_cap=1e12, dividend_yield=0.0)
+        conn.execute("UPDATE screened SET enriched=1, total_score=90, value_score=90, health_score=90, "
+                     "detail=? WHERE symbol=? AND market='KR'",
+                     (_json.dumps({"health": {}, "value": {}, "flags": flags}), sym))
+    conn.commit()
+    picked = universe.pick_top("KR", 6)
+    assert sum("holding" in r.flags for r in picked) == 2 and "Y1" in [r.symbol for r in picked]
+
+
+def test_pick_top_empty_and_min_total(fresh_db):
+    assert universe.pick_top("US", 6) == [] and universe.top_symbols(6, "US") == []
+    conn = universe._conn()
+    _seed_stock(conn, "LOW", "US", 40)
+    assert universe.pick_top("US", 6, min_total=50) == []
+
+
+def test_freshness_reports_dates_and_age(fresh_db):
+    conn = universe._conn()
+    _seed_stock(conn, "A", "US", 80)
+    _seed_stock(conn, "X", "US", 99)
+    conn.execute("UPDATE screened SET updated_at='2026-07-10T16:50:00+00:00', seen_at='2026-07-10T10:00:00+00:00'")
+    conn.execute("UPDATE screened SET excluded='sibling', updated_at='2026-09-01T00:00:00+00:00' WHERE symbol='X'")
+    conn.commit()
+    f = universe.freshness("US")
+    assert f["fund_asof"] == "2026-07-10" and f["price_asof"] == "2026-07-10"       # 제외 행은 범위 밖
+    assert f["age_days"] == (datetime.now(timezone.utc).date() - date(2026, 7, 10)).days
+    assert universe.freshness("KR") == {"fund_asof": None, "price_asof": None, "age_days": None}
+
+
+# ---------------- yf_symbol ----------------
+
+
+@pytest.mark.parametrize("args, expected", [
+    (("007700", "KR", "KOSPI"), "007700.KS"),
+    (("041510", "KR", "KOSDAQ"), "041510.KQ"),
+    (("007700", "KR", None, ""), "007700.KS"),
+    (("041510", "KR", None, "우량기업부"), "041510.KQ"),
+    (("0126Z0", "KR", None, ""), "0126Z0.KS"),
+    (("BRK-B", "US"), "BRK-B"),
+    (("BTC", "CRYPTO"), "BTC-USD"),
+])
+def test_yf_symbol(args, expected):
+    assert universe.yf_symbol(*args) == expected
+
+
+def test_yf_symbol_alternates():
+    assert universe.yf_symbol_alternates("041510", "KR", "KOSDAQ") == ["041510.KS"]
+    assert universe.yf_symbol_alternates("007700", "KR", None, "") == ["007700.KQ"]
+    assert universe.yf_symbol_alternates("BRK-B", "US") == []
+
+
+# ---------------- scripts/build_universe.py 보조 (종료코드 규칙) ----------------
+
+
+def test_build_universe_helpers():
+    from scripts import build_universe as bu
+
+    assert bu._enrich_outcome({"enriched": 10, "no_data": 0, "failed": 0, "aborted": False}) is False
+    assert bu._enrich_outcome({"enriched": 1, "no_data": 0, "failed": 0, "aborted": True}) is True
+    assert bu._enrich_outcome({"enriched": 7, "no_data": 0, "failed": 3, "aborted": False}) is True   # 30% > 20%
+    assert bu._enrich_outcome({"enriched": 8, "no_data": 1, "failed": 1, "aborted": False}) is False  # 10%
+    assert bu._enrich_outcome({"enriched": 0, "no_data": 0, "failed": 0, "aborted": False}) is False  # 대상 0
+    assert bu._parse_markets(None) == ("US", "KR", "CRYPTO")
+    assert bu._parse_markets("us, kr") == ("US", "KR")
+    with pytest.raises(SystemExit):
+        bu._parse_markets("US,MARS")
+    assert bu.EXIT_PARTIAL == 5 and bu.EXIT_REMOTE_UNAVAILABLE == 2
+
+
+def test_build_universe_require_remote_guard(fresh_db, monkeypatch):
+    """WP-OPS-CORE 계약 require_remote — 없으면 True(진행), 있으면 그 결과를 따름."""
+    from scripts import build_universe as bu
+
+    store = storage_mod.get_storage()
+    monkeypatch.setattr(type(store), "require_remote", lambda self, what: False, raising=False)
+    assert bu._require_remote("x") is False
+    monkeypatch.setattr(type(store), "require_remote", lambda self, what: True, raising=False)
+    assert bu._require_remote("x") is True
