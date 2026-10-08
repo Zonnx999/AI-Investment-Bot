@@ -219,6 +219,40 @@ def test_fetch_missing_key_raises(monkeypatch):
         object.__setattr__(df.settings, "dart_api_key", prev)
 
 
+_MAINT_XML = (b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><result><status>800</status>'
+              b"<message>\xec\x8b\x9c\xec\x8a\xa4\xed\x85\x9c \xec\xa0\x90\xea\xb2\x80</message></result>")
+
+
+class _BytesResp:
+    status_code, ok = 200, True
+
+    def __init__(self, content):
+        self.content = content
+
+
+def test_corp_codes_non_zip_maps_dart_status(monkeypatch, dart_key):
+    """실관측(2026-10-08): corpCode.xml 이 점검 중 status 800 XML 을 줌 — '키 확인' 오판 대신 상태코드 노출."""
+    monkeypatch.setattr(df, "get_http_session",
+                        lambda: type("S", (), {"get": lambda self, *a, **k: _BytesResp(_MAINT_XML)})())
+    with pytest.raises(DataValidationError) as ei:
+        df.fetch_dart_corp_codes()
+    assert "800" in str(ei.value)
+    monkeypatch.setattr(df, "get_http_session",
+                        lambda: type("S", (), {"get": lambda self, *a, **k: _BytesResp(
+                            _MAINT_XML.replace(b"800", b"020"))})())
+    with pytest.raises(RateLimitError):
+        df.fetch_dart_corp_codes()
+    monkeypatch.setattr(df, "get_http_session",
+                        lambda: type("S", (), {"get": lambda self, *a, **k: _BytesResp(b"not xml at all")})())
+    with pytest.raises(DataValidationError):
+        df.fetch_dart_corp_codes()
+
+
+def test_dart_error_xml_parsing():
+    assert df._dart_error_xml(_MAINT_XML) == {"status": "800", "message": "시스템 점검"}
+    assert df._dart_error_xml(b"<<broken") == {"status": None, "message": None}
+
+
 def test_fetch_cache_namespace_is_dart_financials_all():
     """구형 'dart_financials' 캐시(귀속 개념 없음)를 신형 코드가 읽지 않도록 네임스페이스 분리 (§4.10 #2)."""
     src = inspect.getsource(df)

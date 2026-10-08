@@ -778,6 +778,21 @@ _DART_PL_DIVS = ("IS", "CIS")
 _DART_BS_DIVS = ("BS",)
 
 
+def _dart_error_xml(content: bytes) -> dict:
+    """DART 에러 XML(<result><status>..</status><message>..</message></result>) → dict.
+
+    파싱 실패나 status 없음은 {"status": None} (호출부가 일반 오류로 처리).
+    """
+    import xml.etree.ElementTree as ET
+
+    try:
+        root = ET.fromstring(content)
+    except ET.ParseError:
+        return {"status": None, "message": None}
+    return {"status": (root.findtext("status") or "").strip() or None,
+            "message": (root.findtext("message") or "").strip() or None}
+
+
 @cached("dart_corp_codes", TTL_DART_CORP, "json")
 def fetch_dart_corp_codes() -> dict[str, str]:
     """DART corpCode.xml(zip) → {6자리 종목코드: 8자리 corp_code} (상장사만)."""
@@ -801,14 +816,16 @@ def fetch_dart_corp_codes() -> dict[str, str]:
             f"DART corpCode: HTTP {response.status_code}",
             status_code=response.status_code, source="DART",
         )
+    if response.content[:2] != b"PK":
+        # zip 이 아니면 DART 가 에러 XML 을 준 것 — <status>/<message> 를 읽어 상태코드 매핑
+        # (실관측 2026-10-08: status 800 '시스템 점검으로 인한 서비스가 중지 중입니다' — 키 문제 아님)
+        _dart_status_check(_dart_error_xml(response.content), "corpCode")
+        raise DataValidationError("DART corpCode 응답이 zip 이 아님", source="DART")
     try:
         z = zipfile.ZipFile(io.BytesIO(response.content))
         root = ET.fromstring(z.read(z.namelist()[0]))
-    except (zipfile.BadZipFile, ET.ParseError, KeyError) as e:
-        # 키 오류 등은 zip 대신 에러 XML/JSON 이 옴
-        raise DataValidationError(
-            "DART corpCode 응답이 zip 이 아님 (키 확인)", source="DART"
-        ) from e
+    except (zipfile.BadZipFile, ET.ParseError, KeyError, IndexError) as e:
+        raise DataValidationError("DART corpCode zip 해석 실패", source="DART") from e
     mapping: dict[str, str] = {}
     for it in root.iter("list"):
         stock_code = (it.findtext("stock_code") or "").strip()
