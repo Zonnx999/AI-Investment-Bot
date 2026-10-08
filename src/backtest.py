@@ -3,11 +3,16 @@ src/backtest.py
 ===============
 백테스트 프레임워크 (ROADMAP §2.1) — Phase 5 신호 / Phase 6 예측의 과거 성과 검증.
 
-세 가지 도구:
-  1. ``run_backtest``          — 가격 + 포지션 시리즈 → 성과 지표 (벡터화 단일 자산)
-  2. ``walk_forward_topn``     — 팩터 점수 상위 N 종목 주기 리밸런싱 워크포워드
-  3. ``evaluate_lead_lag_oos`` — 선행지표 예측의 아웃오브샘플 방향 적중률
-     (predictors.analyze_lead_lag 가 찾은 lag 를 입력으로 받아 검증)
+도구:
+  1. ``run_backtest``              — 가격 + 포지션 시리즈 → 성과 지표 (벡터화 단일 자산)
+  2. ``walk_forward_topn``         — 운영 모멘텀 점수 상위 N 종목 월 리밸런싱 워크포워드
+     (벤치 = 같은 리밸런스일·같은 비용 동일가중, 일 초과 t·블록 부트스트랩 CI·월별 순위 IC)
+  3. ``walk_forward_lead_lag``     — 선행지표 무선견 워크포워드 (매 달 t-1 까지로만 lag 선택·적합)
+     + ``summarize_lead_lag`` / ``judge_lead_lag`` (짝지은 부호검정 · Holm · 전/후반 안정성)
+  4. ``excess_significance``       — 일 초과수익의 t · 원형 블록 부트스트랩 95% CI
+
+  (구) ``evaluate_lead_lag_oos`` / ``LeadLagBacktest`` / ``momentum_score_fn`` 은 deprecated —
+  lag 를 전체표본으로 미리 골라 넣는 구조라 선견편향이 남음. 하위호환용으로만 유지.
 
 설계 (CLAUDE.md §4.4): 이 모듈은 **순수 함수만** — 네트워크/외부 API 호출 없음.
 데이터 fetch 는 scripts/check_backtest.py 오케스트레이터가 담당.
@@ -23,7 +28,7 @@ src/backtest.py
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Callable, Sequence
 
 import numpy as np
 import pandas as pd
@@ -46,6 +51,24 @@ MOMENTUM_SKIP_D = 21             # 스킵-먼스 (Jegadeesh-Titman)
 MIN_TRAIN_MONTHS = 24            # lead-lag OOS 최소 학습 표본 (predictors 와 동일)
 MIN_OOS_MONTHS = 6               # lead-lag OOS 최소 평가 표본
 _EPS = 1e-12                     # 부동소수 0 판정 (턴오버/변동성)
+
+# --- 선행지표 무선견 검증 판정 상수 (코드 상수 — 임의 조정 금지, 바꾸면 이력과 비교 불가) ---
+LL_MAX_LAG = 12                  # lag 탐색 상한 (개월)
+LL_MIN_TRAIN = 36                # 매 시점 적합에 필요한 최소 학습 표본(개월)
+LL_MIN_OOS = 60                  # 판정에 필요한 최소 OOS 개월 수
+LL_MIN_DISAGREE = 10             # 베이스라인과 예측이 갈린 달이 이보다 적으면 검정력 부족
+LL_MIN_EDGE_PP = 3.0             # 적중률 우위 최소치 (%p, 두 베이스라인 중 높은 쪽 대비)
+LL_ALPHA = 0.05                  # Holm 보정 후 유의수준
+BOOT_N = 2000                    # 블록 부트스트랩 반복 수
+BOOT_BLOCK_D = 21                # 일 단위 초과수익 블록 길이 (≈1개월)
+BOOT_BLOCK_M = 6                 # 월 단위 초과수익 블록 길이
+BOOT_SEED = 20260711             # 결정성 고정 시드
+MOM_MIN_POINTS = 252 + 21 + 1    # signals.MOMENTUM_12M_D + SKIP_D + 1 — 12-1개월 성분이 항상 계산되는 최소 가격 수
+SIGNIFICANT_T = 2.0              # 일 초과 |t| 유의 기준
+
+VERDICT_PASS = "통과"
+VERDICT_UNPROVEN = "미입증"      # '입증 못함' ≠ '예측력 없음' — 문구 고정
+VERDICT_UNDECIDED = "판정 불가"
 
 
 # ----------------------------------------------------------------------
@@ -100,14 +123,64 @@ class BacktestResult:
 
 
 @dataclass
+class ExcessStats:
+    """일(또는 기간) 초과수익의 통계적 불확실성 — t · 블록 부트스트랩 CI · (선택) 월별 순위 IC."""
+
+    n: int                                  # 초과수익 표본 수
+    mean_ann_pct: float                     # 평균 초과수익 연환산 (%p)
+    ci_ann_pct: tuple[float, float]         # 95% 원형 블록 부트스트랩 CI (연환산 %p)
+    t_stat: float                           # 평균/표준오차 (표준편차 0 → nan)
+    verdict: str                            # '유의한 초과' / '유의한 열위' / '판정 불가'
+    ic_mean: float = float("nan")           # 월별 순위 IC 평균
+    ic_t: float = float("nan")
+    n_ic: int = 0
+
+    @property
+    def undecided(self) -> bool:
+        return self.verdict == VERDICT_UNDECIDED
+
+    def to_dict(self) -> dict:
+        def _r(v: float, nd: int = 3):
+            return None if v is None or not np.isfinite(v) else round(float(v), nd)
+
+        return {
+            "n": self.n,
+            "mean_ann_pct": _r(self.mean_ann_pct, 2),
+            "ci_ann_pct": [_r(self.ci_ann_pct[0], 2), _r(self.ci_ann_pct[1], 2)],
+            "t_stat": _r(self.t_stat, 2),
+            "verdict": self.verdict,
+            "ic_mean": _r(self.ic_mean),
+            "ic_t": _r(self.ic_t, 2),
+            "n_ic": self.n_ic,
+        }
+
+    def summary_line(self) -> str:
+        """한 줄 요약 — 값이 없으면(nan) '계산 불가' 로 정직하게."""
+        def _f(v: float, fmt: str) -> str:
+            return fmt.format(v) if np.isfinite(v) else "계산 불가"
+
+        line = (
+            f"일 초과 t={_f(self.t_stat, '{:+.2f}')} | 연환산 초과 {_f(self.mean_ann_pct, '{:+.1f}')}%p"
+            f" 95%CI [{_f(self.ci_ann_pct[0], '{:+.1f}')}, {_f(self.ci_ann_pct[1], '{:+.1f}')}]"
+        )
+        if self.n_ic:
+            line += (
+                f" | 월별 순위 IC {_f(self.ic_mean, '{:+.3f}')}"
+                f" (t {_f(self.ic_t, '{:+.2f}')}, {self.n_ic}개월)"
+            )
+        return f"{line} → {self.verdict}"
+
+
+@dataclass
 class WalkForwardResult:
-    """워크포워드 top-N 전략 vs 동일가중 매수후보유 벤치마크."""
+    """워크포워드 top-N 전략 vs 같은 리밸런스·같은 비용 동일가중 벤치마크."""
 
     strategy: BacktestResult
     benchmark: BacktestResult
     picks: list[tuple[pd.Timestamp, tuple[str, ...]]]   # (리밸런스일, 선택 종목들)
     top_n: int
     rebalance: str
+    stats: ExcessStats | None = None                     # 초과수익 유의성 (walk_forward_topn 이 채움)
 
     def to_dict(self) -> dict:
         return {
@@ -116,20 +189,29 @@ class WalkForwardResult:
             "top_n": self.top_n,
             "rebalance": self.rebalance,
             "picks": [(str(d.date()), list(t)) for d, t in self.picks],
+            "stats": self.stats.to_dict() if self.stats is not None else None,
         }
 
     def __str__(self) -> str:
         excess = self.strategy.total_return_pct - self.benchmark.total_return_pct
-        return (
+        text = (
             f"{self.strategy}\n{self.benchmark}\n"
             f"  초과수익 {excess:+.1f}%p (top-{self.top_n}, 리밸런스 {self.rebalance},"
             f" 리밸런스 {len(self.picks)}회)"
         )
+        if self.stats is not None:
+            text += f"\n  {self.stats.summary_line()}"
+        return text
 
 
 @dataclass
 class LeadLagBacktest:
-    """선행지표 예측의 아웃오브샘플(확장 윈도우) 방향 적중률 검증 결과."""
+    """선행지표 예측의 아웃오브샘플(확장 윈도우) 방향 적중률 검증 결과.
+
+    .. deprecated:: lag 를 전체표본으로 먼저 골라 넣는 ``evaluate_lead_lag_oos`` 의 결과
+       형식 — 선견편향이 남는다. 새 코드는 ``walk_forward_lead_lag`` + ``summarize_lead_lag``
+       (``LeadLagWF``) 를 쓸 것. 하위호환용으로만 유지.
+    """
 
     leading_name: str
     target_name: str
@@ -264,6 +346,135 @@ def _result_from_returns(
 
 
 # ----------------------------------------------------------------------
+# 통계 헬퍼 — 유의성 (부호검정 · Holm · 블록 부트스트랩)
+# ----------------------------------------------------------------------
+
+
+def sign_test_paired(pred_up, base_up, actual_up) -> tuple[int, int, float]:
+    """예측이 베이스라인과 **다른 달만** 비교하는 정확 이항 단측 부호검정.
+
+    예측과 베이스라인이 같은 방향을 낸 달은 두 방법을 구별해 주지 못하므로 제외한다.
+    다른 달에는 둘 중 정확히 하나가 맞으므로 '예측이 맞힌 횟수 ≥ wins' 를 p=0.5 이항분포로 검정.
+
+    Returns
+    -------
+    (wins, n_diff, p_value)
+        n_diff == 0 이면 (0, 0, 1.0) — 비교 불가.
+    """
+    from scipy.stats import binomtest
+
+    pred = np.asarray(pred_up, dtype=bool)
+    base = np.asarray(base_up, dtype=bool)
+    actual = np.asarray(actual_up, dtype=bool)
+    diff = pred != base
+    n = int(diff.sum())
+    if n == 0:
+        return 0, 0, 1.0
+    wins = int((pred[diff] == actual[diff]).sum())
+    return wins, n, float(binomtest(wins, n, 0.5, alternative="greater").pvalue)
+
+
+def holm_adjust(pvalues: Sequence[float], n_tests: int | None = None) -> list[float]:
+    """Holm(step-down) 보정 p값. 입력 순서 유지.
+
+    n_tests 가 주어지면 그 수(m)를 전체 검정 수로 본다 — 일부 검정이 실행 실패로 빠져도
+    보정 강도를 낮추지 않기 위함 (빠진 검정은 p=1 로 간주하는 것과 동일).
+    adj_(j) = min(1, max_{l<=j} (m-l+1)·p_(l)), p_(1) <= p_(2) <= ... (오름차순 순위 j).
+    """
+    p = [float(v) for v in pvalues]
+    m = max(len(p), int(n_tests)) if n_tests is not None else len(p)
+    order = sorted(range(len(p)), key=lambda i: p[i])
+    adj = [1.0] * len(p)
+    running = 0.0
+    for rank, i in enumerate(order):
+        running = max(running, (m - rank) * p[i])
+        adj[i] = min(1.0, running)
+    return adj
+
+
+def block_bootstrap_ci(
+    x, block: int, n_boot: int = BOOT_N, seed: int = BOOT_SEED, alpha: float = 0.05
+) -> tuple[float, float, float]:
+    """평균의 원형(circular) 블록 부트스트랩 신뢰구간 → (평균, 하한, 상한).
+
+    자기상관이 있는 일/월 수익률에서 iid 부트스트랩이 CI 를 과소추정하는 것을 막기 위해
+    길이 ``block`` 의 연속 구간을 통째로 재표집한다. ``seed`` 고정 → 결정적.
+    표본이 2*block 미만이면 CI 는 (nan, nan).
+    """
+    arr = np.asarray(x, dtype=float)
+    arr = arr[~np.isnan(arr)]
+    n = len(arr)
+    if n == 0:
+        return float("nan"), float("nan"), float("nan")
+    if n < 2 * block:
+        return float(arr.mean()), float("nan"), float("nan")
+    rng = np.random.default_rng(seed)
+    n_blocks = int(np.ceil(n / block))
+    starts = rng.integers(0, n, size=(n_boot, n_blocks))
+    idx = (starts[:, :, None] + np.arange(block)[None, None, :]) % n        # 원형 블록
+    means = arr[idx.reshape(n_boot, -1)[:, :n]].mean(axis=1)
+    return (
+        float(arr.mean()),
+        float(np.quantile(means, alpha / 2)),
+        float(np.quantile(means, 1 - alpha / 2)),
+    )
+
+
+def excess_significance(
+    excess: pd.Series,
+    *,
+    periods_per_year: int = TRADING_DAYS_PER_YEAR,
+    block: int = BOOT_BLOCK_D,
+    n_boot: int = BOOT_N,
+    seed: int = BOOT_SEED,
+) -> ExcessStats:
+    """초과수익 시리즈(전략 - 벤치, 같은 주기) → t · 블록 부트스트랩 CI · 판정.
+
+    판정: ``|t| < 2`` 이거나 95% CI 가 0 을 포함하거나 계산 불가(nan)면 '판정 불가'.
+    둘 다 한쪽으로 벗어났을 때만 '유의한 초과' / '유의한 열위'.
+
+    Raises
+    ------
+    InsufficientDataError
+        표본이 2개 미만.
+    """
+    x = excess.dropna()
+    n = len(x)
+    if n < 2:
+        raise InsufficientDataError(
+            f"초과수익 표본 {n}개 — 통계 계산 불가", n_points=n, required=2
+        )
+    mean, lo, hi = block_bootstrap_ci(x.to_numpy(), block, n_boot=n_boot, seed=seed)
+    sd = float(x.std(ddof=1))
+    t = float(x.mean() / (sd / np.sqrt(n))) if sd > _EPS else float("nan")
+    scale = periods_per_year * 100.0
+    if (
+        not np.isfinite(t)
+        or abs(t) < SIGNIFICANT_T
+        or not (np.isfinite(lo) and np.isfinite(hi))
+        or lo <= 0.0 <= hi
+    ):
+        verdict = VERDICT_UNDECIDED
+    else:
+        verdict = "유의한 초과" if t > 0 else "유의한 열위"
+    return ExcessStats(
+        n=n,
+        mean_ann_pct=mean * scale,
+        ci_ann_pct=(lo * scale, hi * scale),
+        t_stat=t,
+        verdict=verdict,
+    )
+
+
+def returns_from_equity(equity: pd.Series) -> pd.Series:
+    """에쿼티 커브(1.0 기준 누적) → 기간 수익률. 첫 값은 (equity[0] - 1)."""
+    r = equity.pct_change()
+    if len(r):
+        r.iloc[0] = float(equity.iloc[0]) - 1.0
+    return r
+
+
+# ----------------------------------------------------------------------
 # 1. 벡터화 단일 자산 백테스터
 # ----------------------------------------------------------------------
 
@@ -379,6 +590,10 @@ def momentum_score_fn(
 ) -> float:
     """기본 스코어 — 스킵-먼스 모멘텀 수익률 (signals.momentum_score A 성분과 동일 규약).
 
+    .. deprecated:: 126일 간이 모멘텀은 운영 신호(12-1개월 + 200일선)와 달라서 운영 신호
+       검증이 되지 못한다. ``walk_forward_topn`` 의 기본 점수는 이제 ``operational_momentum_fn``.
+       하위호환(명시 ``score_fn=momentum_score_fn``)용으로만 유지.
+
     p[-skip] / p[-(lookback+skip)] - 1. 높을수록 좋음.
 
     Raises
@@ -396,6 +611,86 @@ def momentum_score_fn(
     return float(p.iloc[-skip] / p.iloc[-required] - 1.0)
 
 
+def operational_momentum_fn(prices: pd.Series) -> float:
+    """운영 ``signals.momentum_score`` 그대로 + 연속 타이브레이크 (12-1개월 원수익률 × 1e-4).
+
+    운영 점수는 0~100 정수로 반올림/클램프돼 상위권이 100 으로 포화한다. 그대로 정렬하면 동점이
+    티커 알파벳순으로 깨져 '모멘텀 순위' 가 아닌 '알파벳 순위' 를 검증하게 되므로(BT-04),
+    소수점 이하 자리에서만 원수익률로 구분한다 (정수 점수의 순서는 바뀌지 않음).
+
+    ``signals`` 는 지연 import — backtest 모듈 자체는 가볍게 유지 (모듈 수준 import 금지).
+
+    Raises
+    ------
+    InsufficientDataError
+        가격이 MOM_MIN_POINTS(274) 미만 — 12-1개월 성분이 항상 계산되는 최소 표본.
+    """
+    from src.signals import MOMENTUM_12M_D, MOMENTUM_SKIP_D, momentum_score
+
+    p = prices.dropna()
+    if len(p) < MOM_MIN_POINTS:
+        raise InsufficientDataError(
+            f"운영 모멘텀: 가격 {len(p)}개 — 최소 {MOM_MIN_POINTS}개 필요",
+            n_points=len(p), required=MOM_MIN_POINTS,
+        )
+    score, _ = momentum_score(p)
+    raw = float(p.iloc[-MOMENTUM_SKIP_D] / p.iloc[-(MOMENTUM_12M_D + MOMENTUM_SKIP_D)] - 1.0)
+    return float(score) + 1e-4 * max(-1.0, min(raw, 50.0))
+
+
+def _simulate(
+    panel: pd.DataFrame,
+    weight_events: dict[pd.Timestamp, pd.Series],
+    d0: pd.Timestamp,
+    eval_idx: pd.Index,
+    cost_bps: float,
+) -> tuple[pd.Series, pd.Series, int]:
+    """리밸런스 이벤트(날짜→목표 비중) → (비용 차감 후 일 수익률, 총수익률, 매매 횟수).
+
+    전략과 벤치마크가 **같은 함수·같은 비용 규약**을 쓰도록 공통화 (BT-03: 무리밸런싱·무비용
+    벤치가 전략을 구조적으로 불리하게 만들던 비대칭 제거). t 종가 비중은 t→t+1 수익률부터 적용.
+    """
+    weights = pd.DataFrame(weight_events).T.reindex(panel.index).ffill().fillna(0.0)
+    returns = panel.pct_change()
+    gross = (weights.shift(1) * returns).sum(axis=1)               # NaN 수익률은 skipna
+    turnover = weights.diff().abs().sum(axis=1)
+    turnover.loc[d0] = float(weights.loc[d0].abs().sum())          # 최초 진입도 거래
+    gross_e = gross.reindex(eval_idx)
+    turn_e = turnover.reindex(eval_idx).copy()
+    turn_e.iloc[0] += float(turnover.loc[d0])                      # 진입 비용을 첫 평가 기간에
+    net = gross_e - turn_e * (cost_bps / 1e4)
+    n_trades = int((turnover.loc[d0:] > _EPS).sum())
+    return net, gross_e, n_trades
+
+
+def _monthly_rank_ic(
+    panel: pd.DataFrame, scores_by_date: dict[pd.Timestamp, dict[str, float]]
+) -> tuple[float, float, int]:
+    """리밸런스일 점수 vs 다음 리밸런스일까지 수익률의 스피어만 순위상관 → (평균 IC, t, 개월 수)."""
+    from scipy.stats import spearmanr
+
+    dates = list(scores_by_date)
+    rhos: list[float] = []
+    for a, b in zip(dates[:-1], dates[1:]):
+        sc = scores_by_date[a]
+        if len(sc) < 5 or len(set(sc.values())) < 2:
+            continue                                               # 순위 정의 불가
+        names = list(sc)
+        fwd = (panel.loc[b, names] / panel.loc[a, names] - 1.0).to_numpy()
+        x = np.array([sc[t] for t in names], dtype=float)
+        ok = np.isfinite(fwd)
+        if ok.sum() < 5 or len(set(x[ok])) < 2 or len(set(fwd[ok])) < 2:
+            continue
+        rho = float(spearmanr(x[ok], fwd[ok]).statistic)
+        if np.isfinite(rho):
+            rhos.append(rho)
+    if not rhos:
+        return float("nan"), float("nan"), 0
+    ic = np.array(rhos)
+    t = float(ic.mean() / (ic.std(ddof=1) / np.sqrt(len(ic)))) if len(ic) > 2 and ic.std(ddof=1) > _EPS else float("nan")
+    return float(ic.mean()), t, len(ic)
+
+
 def walk_forward_topn(
     prices: dict[str, pd.Series],
     score_fn: Callable[[pd.Series], float] | None = None,
@@ -405,21 +700,27 @@ def walk_forward_topn(
     risk_free_rate: float = 0.0,
     min_points: int = MIN_BACKTEST_POINTS,
 ) -> WalkForwardResult:
-    """리밸런스일마다 스코어 상위 N 종목을 동일가중 보유하는 워크포워드 평가.
+    """리밸런스일마다 점수 상위 N 종목을 동일가중 보유하는 워크포워드 평가.
 
-    각 리밸런스일에 '그 시점까지의 데이터만' 으로 스코어 산출 (룩어헤드 없음).
-    스코어 불가 종목(InsufficientDataError / NaN)은 그 회차에서 제외.
-    유효 스코어가 top_n 미만인 회차는 직전 보유를 유지 (첫 유효 회차 전은 평가 제외).
+    각 리밸런스일에 '그 시점까지의 데이터만' 으로 점수 산출 (룩어헤드 없음).
+    점수 불가 종목(InsufficientDataError / NaN)은 그 회차에서 제외.
+    유효 점수가 top_n 미만인 회차는 직전 보유를 유지 (첫 유효 회차 전은 평가 제외).
 
-    벤치마크: 첫 리밸런스일 기준 동일가중 매수후보유 (무비용 — 1회 진입이라
-    비용 영향이 미미해 생략, 전략 쪽만 비용 부과로 보수적 비교).
+    기본 점수 = ``operational_momentum_fn`` (운영 ``signals.momentum_score`` 어댑터).
+
+    벤치마크: **같은 리밸런스일에 점수가 계산된 종목 전체의 동일가중**을 **같은 비용**으로
+    월 리밸런스. (옛 벤치는 무리밸런싱·무비용이라 전략 쪽에 구조적 불이익 → BT-03.)
+    top_n 이 점수 계산 가능 종목 수와 같으면 전략 == 벤치 → 초과수익 정확히 0.
+
+    결과의 ``stats`` 에 일 초과수익 t, 원형 블록 부트스트랩 95% CI, 월별 순위 IC 와
+    '판정 불가' 여부가 들어 있음 (|t|<2 또는 CI 가 0 포함이면 판정 불가).
 
     Parameters
     ----------
     prices : dict[str, pd.Series]
         티커 → 종가 시리즈.
     score_fn : Callable[[pd.Series], float]
-        과거 가격 시리즈 → 스코어 (높을수록 좋음). 기본 momentum_score_fn.
+        과거 가격 시리즈 → 점수 (높을수록 좋음). 기본 operational_momentum_fn.
 
     Raises
     ------
@@ -430,7 +731,8 @@ def walk_forward_topn(
         raise ValueError(f"top_n 은 1 이상이어야 합니다: {top_n}")
     if len(prices) < top_n:
         raise ValueError(f"종목 수 {len(prices)}개 < top_n {top_n}")
-    score = score_fn or momentum_score_fn
+    score = score_fn or operational_momentum_fn
+    is_operational = score is operational_momentum_fn
 
     # 혼합 캘린더(주식/크립토) 정렬 — macro_analyzer.current_drawdown 과 같은 이유로 ffill.
     panel = pd.DataFrame(prices).sort_index().ffill()
@@ -439,9 +741,12 @@ def walk_forward_topn(
     # 리밸런스일 = 각 주기의 마지막 거래일
     reb_dates = panel.index.to_series().resample(rebalance).last().dropna().tolist()
 
-    weights_events: dict[pd.Timestamp, pd.Series] = {}
+    strat_events: dict[pd.Timestamp, pd.Series] = {}
+    bench_events: dict[pd.Timestamp, pd.Series] = {}
+    scores_by_date: dict[pd.Timestamp, dict[str, float]] = {}
     picks: list[tuple[pd.Timestamp, tuple[str, ...]]] = []
     prev_w: pd.Series | None = None
+    prev_b: pd.Series | None = None
     for d in reb_dates:
         scores: dict[str, float] = {}
         for t in tickers:
@@ -452,68 +757,63 @@ def walk_forward_topn(
                 continue
             if pd.notna(s):
                 scores[t] = float(s)
+        scores_by_date[d] = scores
         if len(scores) < top_n:
             if prev_w is not None:
-                weights_events[d] = prev_w      # 스코어 부족 → 직전 보유 유지
+                strat_events[d], bench_events[d] = prev_w, prev_b      # 점수 부족 → 직전 보유 유지
             continue
         chosen = tuple(t for t, _ in sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))[:top_n])
         w = pd.Series(0.0, index=tickers)
         w[list(chosen)] = 1.0 / top_n
-        weights_events[d] = w
-        prev_w = w
+        b = pd.Series(0.0, index=tickers)
+        b[list(scores)] = 1.0 / len(scores)           # 벤치 = 같은 날 점수가 나온 종목 동일가중
+        strat_events[d], bench_events[d] = w, b
+        prev_w, prev_b = w, b
         picks.append((d, chosen))
 
     if not picks:
         raise InsufficientDataError(
-            "유효한 리밸런스 회차 0회 — 데이터 기간이 스코어 룩백보다 짧습니다.",
+            "유효한 리밸런스 회차 0회 — 데이터 기간이 점수 룩백보다 짧습니다.",
             n_points=0, required=1,
         )
 
     d0 = picks[0][0]                             # 첫 실제 포지션 시작일
-    weights = pd.DataFrame(weights_events).T.reindex(panel.index).ffill().fillna(0.0)
-
-    returns = panel.pct_change()
-    gross = (weights.shift(1) * returns).sum(axis=1)              # NaN 수익률은 skipna
-    turnover = weights.diff().abs().sum(axis=1)
-    turnover.loc[d0] = float(weights.loc[d0].abs().sum())         # 최초 진입
-
     eval_idx = panel.index[panel.index > d0]
     if len(eval_idx) < min_points:
         raise InsufficientDataError(
             f"워크포워드 평가 표본 {len(eval_idx)}개 — 최소 {min_points}개 필요",
             n_points=len(eval_idx), required=min_points,
         )
-    gross_eval = gross.reindex(eval_idx)
-    turnover_eval = turnover.reindex(eval_idx).copy()
-    turnover_eval.iloc[0] += float(turnover.loc[d0])              # 진입 비용을 첫 기간에
-    net = gross_eval - turnover_eval * (cost_bps / 1e4)
-    n_trades = int((turnover.loc[d0:] > _EPS).sum())
+
+    net_s, gross_s, n_trades_s = _simulate(panel, strat_events, d0, eval_idx, cost_bps)
+    net_b, gross_b, n_trades_b = _simulate(panel, bench_events, d0, eval_idx, cost_bps)
 
     strategy = _result_from_returns(
-        f"모멘텀 top-{top_n} 워크포워드", net,
-        gross_returns=gross_eval,
-        n_trades=n_trades,
+        f"모멘텀(운영 함수) top-{top_n}" if is_operational else f"모멘텀 top-{top_n} 워크포워드",
+        net_s,
+        gross_returns=gross_s,
+        n_trades=n_trades_s,
+        cost_bps=cost_bps,
+        risk_free_rate=risk_free_rate,
+        min_points=min_points,
+    )
+    benchmark = _result_from_returns(
+        f"동일가중 월 리밸런스 ({len(tickers)}종목, 동일 비용)",
+        net_b,
+        gross_returns=gross_b,
+        n_trades=n_trades_b,
         cost_bps=cost_bps,
         risk_free_rate=risk_free_rate,
         min_points=min_points,
     )
 
-    # 벤치마크 — d0 시점 가격이 있는 종목 동일가중 매수후보유
-    base = panel.loc[d0]
-    eligible = [t for t in tickers if pd.notna(base[t])]
-    bench_equity = (panel.loc[d0:, eligible] / base[eligible]).mean(axis=1)
-    bench_ret = bench_equity.pct_change().reindex(eval_idx)
-    benchmark = _result_from_returns(
-        f"동일가중 매수후보유 ({len(eligible)}종목)", bench_ret,
-        n_trades=0,
-        cost_bps=0.0,
-        risk_free_rate=risk_free_rate,
-        min_points=min_points,
-    )
+    stats = excess_significance((net_s - net_b).dropna())
+    ic_mean, ic_t, n_ic = _monthly_rank_ic(panel, scores_by_date)
+    stats.ic_mean, stats.ic_t, stats.n_ic = ic_mean, ic_t, n_ic
 
     return WalkForwardResult(
         strategy=strategy, benchmark=benchmark,
-        picks=picks, top_n=top_n, rebalance=rebalance,
+        picks=picks, top_n=top_n, rebalance=rebalance, stats=stats,
     )
 
 
@@ -535,6 +835,11 @@ def evaluate_lead_lag_oos(
     publication_lag_months: int = 1,
 ) -> LeadLagBacktest:
     """확장 윈도우 아웃오브샘플로 lead-lag 예측의 방향 적중률을 검증.
+
+    .. deprecated:: ``lag`` 를 호출자가 (보통 전체표본 ``analyze_lead_lag`` 로) 미리 골라
+       넣으므로 선택 자체의 선견편향이 남고, 베이스라인 1종·유의성 검정도 없다.
+       새 코드는 ``walk_forward_lead_lag`` / ``summarize_lead_lag`` / ``judge_lead_lag`` 를 쓸 것.
+       하위호환(기존 호출·테스트)용으로만 유지.
 
     predictors.analyze_lead_lag 는 전체 표본으로 lag·회귀를 적합 (인샘플) —
     여기서는 매 시점 t 마다 't 이전 데이터만' 으로 회귀를 다시 적합해
@@ -641,3 +946,258 @@ def evaluate_lead_lag_oos(
         buyhold_return_pct=buyhold_ret_pct,
         equity_curve=equity,
     )
+
+
+# ----------------------------------------------------------------------
+# 4. 선행지표 무선견 워크포워드 검증 (walk_forward_lead_lag / summarize / judge)
+# ----------------------------------------------------------------------
+
+
+@dataclass
+class LeadLagWF:
+    """선행지표 1개의 무선견 워크포워드 검증 요약 + 판정 (judge_lead_lag 가 verdict 를 채움)."""
+
+    name: str
+    pub_lag: int
+    n_oos: int
+    start: str
+    end: str
+    acc: float                      # 방향 적중률 (%)
+    base_up: float                  # '항상 상승' 베이스라인 적중률 (%)
+    base_mom: float                 # '직전 12M 수익률 부호' 베이스라인 적중률 (%)
+    edge_pp: float                  # acc - max(두 베이스라인) (%p)
+    p_up: float                     # 짝지은 부호검정 p (vs 항상 상승)
+    p_mom: float                    # 짝지은 부호검정 p (vs 12M 모멘텀)
+    n_diff_up: int
+    n_diff_mom: int
+    half_edges: tuple[float, float]  # 전반/후반 우위 (%p)
+    strat_pct: float                # 예측 추종 long/flat 총수익 (비용 차감, %)
+    bh_pct: float                   # 같은 기간 매수후보유 총수익 (%)
+    sharpe_s: float
+    sharpe_b: float
+    exc_mean_pct: float             # 월 평균 초과수익 (%)
+    exc_ci_pct: tuple[float, float]  # 월 평균 초과수익 95% 블록 부트스트랩 CI (%)
+    pct_long: float                 # 롱 비중 (%)
+    lag_mode: int                   # 가장 자주 선택된 lag (개월)
+    research_only: bool = False
+    p_adj: float = float("nan")     # Holm 보정 p (judge_lead_lag 가 채움)
+    verdict: str = ""
+    reasons: list[str] = field(default_factory=list)
+
+    @property
+    def passed(self) -> bool:
+        return self.verdict == VERDICT_PASS
+
+    @property
+    def p_test(self) -> float:
+        """두 베이스라인을 모두 이겨야 하므로 큰 쪽 p 가 이 가설의 p."""
+        return max(self.p_up, self.p_mom)
+
+    def to_dict(self) -> dict:
+        def _r(v: float, nd: int = 3):
+            return None if v is None or not np.isfinite(v) else round(float(v), nd)
+
+        return {
+            "name": self.name, "pub_lag": self.pub_lag, "n_oos": self.n_oos,
+            "start": self.start, "end": self.end,
+            "acc": _r(self.acc, 1), "base_up": _r(self.base_up, 1), "base_mom": _r(self.base_mom, 1),
+            "edge_pp": _r(self.edge_pp, 1),
+            "p_up": _r(self.p_up), "p_mom": _r(self.p_mom), "p_adj": _r(self.p_adj),
+            "n_diff_up": self.n_diff_up, "n_diff_mom": self.n_diff_mom,
+            "half_edges": [_r(v, 1) for v in self.half_edges],
+            "strat_pct": _r(self.strat_pct, 1), "bh_pct": _r(self.bh_pct, 1),
+            "sharpe_s": _r(self.sharpe_s, 2), "sharpe_b": _r(self.sharpe_b, 2),
+            "exc_mean_pct": _r(self.exc_mean_pct, 2),
+            "exc_ci_pct": [_r(v, 2) for v in self.exc_ci_pct],
+            "pct_long": _r(self.pct_long, 0), "lag_mode": self.lag_mode,
+            "research_only": self.research_only,
+            "verdict": self.verdict, "reasons": list(self.reasons),
+        }
+
+
+def _month_end_series(s: pd.Series) -> pd.Series:
+    """월말(ME) 라벨로 정렬 (같은 달 중복은 마지막 값)."""
+    out = s.dropna().sort_index()
+    if not isinstance(out.index, pd.DatetimeIndex):
+        out.index = pd.to_datetime(out.index)
+    return out.resample("ME").last().dropna()
+
+
+def walk_forward_lead_lag(
+    lead_yoy: pd.Series,
+    target_monthly: pd.Series,
+    *,
+    pub_lag: int,
+    max_lag: int = LL_MAX_LAG,
+    min_train: int = LL_MIN_TRAIN,
+    cost_bps: float = DEFAULT_COST_BPS,
+) -> pd.DataFrame:
+    """선행지표의 **무선견** 월간 방향 예측 워크포워드.
+
+    매 평가월 t 에서 **t-1 월말까지 알 수 있는 정보만** 으로
+      1) lag k ∈ [1+pub_lag, max_lag] 중 |상관| 최대인 k 선택  (공표 지연 pub_lag 개월 반영 —
+         월 t-k 값은 월 t-k+pub_lag 말에 공표되므로 k >= 1+pub_lag 라야 t-1 말에 이미 존재)
+      2) 그 k 로 OLS 적합 (학습 쌍은 모두 t-1 이전 월의 수익률)
+      3) 월 t 의 수익률 부호를 L_{t-k} 로 예측.
+    타깃은 **다음 1개월 수익률**(비중첩) — 12개월 중첩 YoY 의 동시상관을 '선행' 으로 착각하던
+    옛 방식(BT-02/05) 대체.
+
+    ``lead_yoy``: 선행지표 YoY(%) 월말 시리즈 / ``target_monthly``: 목표 자산 **월말 가격**
+    (진행 중인 달은 호출자가 ``to_monthly(complete_only=True)`` 로 제외).
+
+    반환 DataFrame(index = 평가월, 모두 t-1 이전 정보로만 계산 → **접두 불변**: 입력을 T 에서
+    잘라 돌린 결과 == 전체 결과의 T 이전 행):
+      pred(예측 수익률) · r(실제 다음달 수익률) · mom12(t-1 말 직전 12M 수익률) ·
+      k(선택 lag) · pos(롱=1/현금=0) · net(비용 차감 후 전략 월수익률)
+
+    Raises
+    ------
+    ValueError
+        pub_lag < 0 또는 1+pub_lag > max_lag.
+    """
+    from scipy.stats import linregress
+
+    if pub_lag < 0:
+        raise ValueError(f"pub_lag 는 0 이상: {pub_lag}")
+    if 1 + pub_lag > max_lag:
+        raise ValueError(f"1+pub_lag({1 + pub_lag}) > max_lag({max_lag}) — 탐색할 lag 가 없음")
+
+    cols = ["pred", "r", "mom12", "k", "pos", "net"]
+    lead = _month_end_series(lead_yoy)
+    tgt = _month_end_series(target_monthly)
+    if lead.empty or tgt.empty:
+        return pd.DataFrame(columns=cols, dtype=float)
+
+    idx = pd.date_range(min(lead.index.min(), tgt.index.min()),
+                        max(lead.index.max(), tgt.index.max()), freq="ME")
+    L = lead.reindex(idx).to_numpy(dtype=float)
+    P = tgt.reindex(idx)
+    R = P.pct_change(fill_method=None).to_numpy(dtype=float)
+    P12 = (P / P.shift(12) - 1.0).to_numpy(dtype=float)       # 직전 12개월 수익률 (TSMOM 베이스라인)
+    n = len(idx)
+    Lk = {k: np.concatenate([np.full(k, np.nan), L[:-k]]) for k in range(1, max_lag + 1)}
+
+    rows: list[tuple] = []
+    prev_pos = 0.0
+    for i in range(1, n):
+        if np.isnan(R[i]):
+            continue
+        best = None
+        for k in range(1 + pub_lag, max_lag + 1):
+            x, y = Lk[k][:i], R[:i]                            # 학습 쌍은 월 <= i-1 만
+            m = ~np.isnan(x) & ~np.isnan(y)
+            if m.sum() < min_train:
+                continue
+            xs, ys = x[m], y[m]
+            if np.ptp(xs) < _EPS or np.ptp(ys) < _EPS:
+                continue                                       # 상수 입력 — 상관 정의 불가
+            c = np.corrcoef(xs, ys)[0, 1]
+            if np.isfinite(c) and (best is None or abs(c) > abs(best[1])):
+                best = (k, c, xs, ys)
+        if best is None:
+            continue
+        k, _, xs, ys = best
+        x_now = Lk[k][i]                                       # L_{t-k}: 결정 시점(t-1 말)에 이미 공표됨
+        if np.isnan(x_now) or np.isnan(P12[i - 1]):
+            continue
+        reg = linregress(xs, ys)
+        pred = float(reg.slope * x_now + reg.intercept)
+        pos = 1.0 if pred > 0 else 0.0
+        net = pos * R[i] - abs(pos - prev_pos) * (cost_bps / 1e4)
+        prev_pos = pos
+        rows.append((idx[i], pred, float(R[i]), float(P12[i - 1]), float(k), pos, float(net)))
+
+    if not rows:
+        return pd.DataFrame(columns=cols, dtype=float)
+    return pd.DataFrame(rows, columns=["t", *cols]).set_index("t")
+
+
+def summarize_lead_lag(
+    df: pd.DataFrame, name: str, pub_lag: int, *, research_only: bool = False
+) -> LeadLagWF:
+    """walk_forward_lead_lag 결과 → 적중률·베이스라인 2종·짝지은 부호검정·전/후반 안정성·전략 성과.
+
+    판정(verdict)은 Holm 보정이 필요하므로 ``judge_lead_lag`` 가 여러 지표를 모아서 채움.
+
+    Raises
+    ------
+    InsufficientDataError
+        OOS 행이 4개 미만 (전/후반 분할 불가).
+    """
+    n = len(df)
+    if n < 4:
+        raise InsufficientDataError(f"{name}: OOS {n}개월 — 요약 불가", n_points=n, required=4)
+
+    pred_up = (df["pred"] > 0).to_numpy()
+    act = (df["r"] > 0).to_numpy()
+    base_up = np.ones(n, dtype=bool)
+    mom = (df["mom12"] > 0).to_numpy()
+
+    def _acc(a: np.ndarray, sl: slice | None = None) -> float:
+        sl = sl or slice(None)
+        return float((a[sl] == act[sl]).mean()) * 100.0
+
+    acc, b_up, b_mom = _acc(pred_up), _acc(base_up), _acc(mom)
+    _, n1, p1 = sign_test_paired(pred_up, base_up, act)
+    _, n2, p2 = sign_test_paired(pred_up, mom, act)
+    half = n // 2
+    half_edges = tuple(
+        _acc(pred_up, sl) - max(_acc(base_up, sl), _acc(mom, sl))
+        for sl in (slice(0, half), slice(half, None))
+    )
+
+    net = df["net"].to_numpy(dtype=float)
+    bh = df["r"].to_numpy(dtype=float)
+
+    def _sharpe(x: np.ndarray) -> float:
+        sd = float(x.std(ddof=1))
+        return float(x.mean() / sd * np.sqrt(12)) if sd > _EPS else 0.0
+
+    exc_mean, exc_lo, exc_hi = block_bootstrap_ci(net - bh, BOOT_BLOCK_M)
+    return LeadLagWF(
+        name=name, pub_lag=pub_lag, n_oos=n,
+        start=str(df.index[0].date()), end=str(df.index[-1].date()),
+        acc=acc, base_up=b_up, base_mom=b_mom, edge_pp=acc - max(b_up, b_mom),
+        p_up=p1, p_mom=p2, n_diff_up=n1, n_diff_mom=n2,
+        half_edges=(float(half_edges[0]), float(half_edges[1])),
+        strat_pct=float((1.0 + net).prod() - 1.0) * 100.0,
+        bh_pct=float((1.0 + bh).prod() - 1.0) * 100.0,
+        sharpe_s=_sharpe(net), sharpe_b=_sharpe(bh),
+        exc_mean_pct=exc_mean * 100.0, exc_ci_pct=(exc_lo * 100.0, exc_hi * 100.0),
+        pct_long=float(df["pos"].mean()) * 100.0,
+        lag_mode=int(df["k"].mode().iloc[0]),
+        research_only=research_only,
+    )
+
+
+def judge_lead_lag(
+    results: Sequence[LeadLagWF],
+    *,
+    n_tests: int | None = None,
+    alpha: float = LL_ALPHA,
+) -> list[LeadLagWF]:
+    """여러 선행지표 요약에 Holm 보정을 걸고 판정(verdict/reasons/p_adj)을 채워 반환.
+
+    통과 = Holm 보정 p < alpha (두 베이스라인 모두 이김) ∧ 적중률 우위 ≥ LL_MIN_EDGE_PP ∧
+           베이스라인과 다른 달 ≥ LL_MIN_DISAGREE ∧ 전/후반 우위 모두 > 0 ∧ OOS ≥ LL_MIN_OOS.
+    그 외는 '미입증' — '입증 못함' 이지 '예측력 없음' 이 아니다 (문구 고정).
+    ``n_tests``: 전체 검정 수(실패로 빠진 지표 포함) — 기본 len(results).
+    """
+    out = list(results)
+    adj = holm_adjust([r.p_test for r in out], n_tests=n_tests)
+    for r, pa in zip(out, adj):
+        r.p_adj = pa
+        r.reasons = []
+        if r.n_oos < LL_MIN_OOS:
+            r.reasons.append(f"OOS {r.n_oos}개월 < {LL_MIN_OOS}")
+        n_diff = min(r.n_diff_up, r.n_diff_mom)
+        if n_diff < LL_MIN_DISAGREE:
+            r.reasons.append(f"다른 달 {n_diff} < {LL_MIN_DISAGREE}")
+        if not pa < alpha:
+            r.reasons.append(f"Holm 보정 p {pa:.3f} ≥ {alpha:g}")
+        if r.edge_pp < LL_MIN_EDGE_PP:
+            r.reasons.append(f"적중률 우위 {r.edge_pp:+.1f}%p < +{LL_MIN_EDGE_PP:g}%p")
+        if min(r.half_edges) <= 0:
+            r.reasons.append(f"전/후반 우위 불일치 ({r.half_edges[0]:+.1f}/{r.half_edges[1]:+.1f}%p)")
+        r.verdict = VERDICT_PASS if not r.reasons else VERDICT_UNPROVEN
+    return out

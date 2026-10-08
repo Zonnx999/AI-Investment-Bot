@@ -29,6 +29,7 @@ fetch 는 predict_* 오케스트레이터만 담당.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Callable
 
 import numpy as np
 import pandas as pd
@@ -76,12 +77,30 @@ class LeadLagResult:
 # ----------------------------------------------------------------------
 
 
-def to_monthly(series: pd.Series) -> pd.Series:
-    """일/주간 시리즈를 월말(ME) 기준 마지막 값으로 리샘플. 월간이면 그대로 정렬."""
+def drop_incomplete_month(monthly: pd.Series, as_of: pd.Timestamp | None = None) -> pd.Series:
+    """월말 라벨 시리즈에서 아직 끝나지 않은 달(라벨 월말일 >= as_of)을 제외.
+
+    진행 중인 달의 '마지막 값' 은 월말 값이 아니라 오늘까지의 값(위키는 부분월 평균) —
+    이를 완성된 월처럼 쓰면 마지막 관측이 왜곡된다. as_of 기본 = 오늘(타임존 없음).
+    """
+    ref = pd.Timestamp(as_of) if as_of is not None else pd.Timestamp.today()
+    ref = ref.tz_localize(None).normalize() if ref.tzinfo is not None else ref.normalize()
+    return monthly[monthly.index.normalize() < ref]
+
+
+def to_monthly(
+    series: pd.Series, *, complete_only: bool = False, as_of: pd.Timestamp | None = None
+) -> pd.Series:
+    """일/주간 시리즈를 월말(ME) 기준 마지막 값으로 리샘플. 월간이면 그대로 정렬.
+
+    ``complete_only=True`` 면 아직 끝나지 않은 달(월말일 >= as_of, 기본 오늘)을 제외 —
+    검증(백테스트)에서 부분월 값이 '그 달의 월말 값' 으로 쓰이는 것을 막는다.
+    """
     s = series.dropna()
     if not isinstance(s.index, pd.DatetimeIndex):
         s.index = pd.to_datetime(s.index)
-    return s.resample("ME").last().dropna()
+    out = s.resample("ME").last().dropna()
+    return drop_incomplete_month(out, as_of) if complete_only else out
 
 
 def yoy_growth(monthly: pd.Series, periods: int = YOY_PERIODS) -> pd.Series:
@@ -311,13 +330,110 @@ def predict_btc_from_wikipedia(
     )
 
 
-# 사용 가능한 예측 관계 레지스트리 (스크립트/오케스트레이터가 순회)
-PREDICTORS: dict[str, callable] = {
-    "M2 → 비트코인": predict_btc_from_m2,
-    "한국수출 → 반도체(SOXX)": predict_semis_from_korea_exports,
-    "건축허가 → 주택건설(XHB)": predict_homebuilders_from_permits,
-    "소비자심리 → 소비재(XLY)": predict_consumer_from_sentiment,
-    "달러 → 신흥국(EEM)": predict_em_from_dollar,
-    "구리/금 → 경기(SPY)": predict_cyclicals_from_copper_gold,
-    "위키관심 → 비트코인": predict_btc_from_wikipedia,
+# ----------------------------------------------------------------------
+# 검증용 빌더 — (선행지표 YoY, 목표 월말 가격) 쌍. backtest.walk_forward_lead_lag 의 입력.
+# 모든 시리즈에서 진행 중인 달은 제외 (complete_only). fetch 는 여기서만.
+# ----------------------------------------------------------------------
+
+
+def _complete_monthly(series: pd.Series) -> pd.Series:
+    return to_monthly(series, complete_only=True)
+
+
+def _prices_monthly(ticker: str) -> pd.Series:
+    from src.data_fetcher import fetch_prices
+    from src.utils import close_series
+
+    return _complete_monthly(close_series(fetch_prices(ticker, period="max")))
+
+
+def _build_m2_btc() -> tuple[pd.Series, pd.Series]:
+    from src.data_fetcher import fetch_macro
+
+    return yoy_growth(_complete_monthly(fetch_macro("M2SL", start="2014-01-01"))), _prices_monthly("BTC-USD")
+
+
+def _build_korea_exports_soxx() -> tuple[pd.Series, pd.Series]:
+    from src import data_fetcher as dfm
+
+    trade = dfm.fetch_korea_trade(start="2014-01-01")
+    # 위치(iloc[:, 0])가 아니라 이름으로 선택 — fetch_korea_trade 는 실패한 시리즈를 건너뛰므로
+    # 수출 조회가 실패하면 첫 컬럼이 '수입' 이 되어 엉뚱한 시리즈를 검증하게 된다 (ALR-09 동일 패턴).
+    label = getattr(dfm, "KOREA_EXPORTS_LABEL", "수출(금액, USD)")
+    exports = trade.get(label) if not trade.empty else None
+    if exports is None or exports.dropna().empty:
+        raise InsufficientDataError("한국 수출 시계열 없음", n_points=0, required=1)
+    return yoy_growth(_complete_monthly(exports.dropna())), _prices_monthly("SOXX")
+
+
+def _build_permits_xhb() -> tuple[pd.Series, pd.Series]:
+    from src.data_fetcher import fetch_macro
+
+    return yoy_growth(_complete_monthly(fetch_macro("PERMIT", start="2013-01-01"))), _prices_monthly("XHB")
+
+
+def _build_sentiment_xly() -> tuple[pd.Series, pd.Series]:
+    from src.data_fetcher import fetch_macro
+
+    return yoy_growth(_complete_monthly(fetch_macro("UMCSENT", start="2013-01-01"))), _prices_monthly("XLY")
+
+
+def _build_dollar_eem() -> tuple[pd.Series, pd.Series]:
+    return yoy_growth(_prices_monthly("DX-Y.NYB")), _prices_monthly("EEM")
+
+
+def _build_copper_gold_spy() -> tuple[pd.Series, pd.Series]:
+    ratio = (_prices_monthly("HG=F") / _prices_monthly("GC=F")).dropna()
+    return yoy_growth(ratio), _prices_monthly("SPY")
+
+
+def _build_wiki_btc(article: str = "Bitcoin") -> tuple[pd.Series, pd.Series]:
+    from src.data_fetcher import fetch_wikipedia_pageviews
+
+    views = fetch_wikipedia_pageviews(article, days=3650)
+    monthly = drop_incomplete_month(views.resample("ME").mean().dropna())     # 월평균 일일 조회수, 부분월 제외
+    return yoy_growth(monthly), _prices_monthly("BTC-USD")
+
+
+@dataclass(frozen=True)
+class PredictorSpec:
+    """선행지표 관계 1개의 단일 정의 — 운영 예측(``predict``)과 무선견 검증(``build``)이 공유.
+
+    ``pub_lag_months``: 선행지표가 해당 월 말 이후 공표되기까지의 지연(개월).
+    walk_forward_lead_lag 가 k >= 1+pub_lag 인 lag 만 쓰게 해 미공표 데이터 선견을 막는다.
+    ``research_only``: True 면 운영 ``PREDICTORS`` 에서 제외 (검증 표에는 유지).
+    ``build``: () -> (선행지표 YoY 월말 시리즈, 목표 자산 월말 가격 시리즈) — 네트워크 fetch 포함.
+    """
+
+    name: str
+    leading_label: str
+    target_label: str
+    pub_lag_months: int
+    build: Callable[[], tuple[pd.Series, pd.Series]]
+    research_only: bool = False
+    predict: Callable[[], LeadLagResult] | None = None
+
+
+# 선행지표 관계 전수 (7개). pub_lag: M2·건축허가·소비자심리 1 / 한국수출 3 / 달러·구리금·위키 0
+PREDICTOR_SPECS: tuple[PredictorSpec, ...] = (
+    PredictorSpec("M2 → 비트코인", "M2 증가율", "BTC 수익률", 1, _build_m2_btc, predict=predict_btc_from_m2),
+    PredictorSpec("한국수출 → 반도체(SOXX)", "한국 수출 증가율", "SOXX 수익률", 3,
+                  _build_korea_exports_soxx, predict=predict_semis_from_korea_exports),
+    PredictorSpec("건축허가 → 주택건설(XHB)", "건축허가 증가율", "XHB 수익률", 1,
+                  _build_permits_xhb, predict=predict_homebuilders_from_permits),
+    PredictorSpec("소비자심리 → 소비재(XLY)", "소비자심리 증가율", "XLY 수익률", 1,
+                  _build_sentiment_xly, predict=predict_consumer_from_sentiment),
+    PredictorSpec("달러 → 신흥국(EEM)", "달러지수 증가율", "EEM 수익률", 0,
+                  _build_dollar_eem, predict=predict_em_from_dollar),
+    PredictorSpec("구리/금 → 경기(SPY)", "구리/금 비율 증가율", "SPY 수익률", 0,
+                  _build_copper_gold_spy, predict=predict_cyclicals_from_copper_gold),
+    # 위키→BTC: 레벨 회귀의 절편이 BTC 과거 초고수익을 담아 선행지표와 무관하게 '상승' 을 내는 구조 (PRED-03)
+    # → 운영 노출 금지, 검증 표에는 연구용으로만 유지.
+    PredictorSpec("위키관심 → 비트코인", "위키 관심 증가율", "BTC 수익률", 0,
+                  _build_wiki_btc, research_only=True, predict=predict_btc_from_wikipedia),
+)
+
+# 운영에서 쓰는 예측 관계 레지스트리 (스크립트/오케스트레이터가 순회) — research_only 제외
+PREDICTORS: dict[str, Callable[[], LeadLagResult]] = {
+    spec.name: spec.predict for spec in PREDICTOR_SPECS if not spec.research_only and spec.predict is not None
 }

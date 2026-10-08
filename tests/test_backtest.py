@@ -333,3 +333,202 @@ def test_lead_lag_rejects_negative_publication_lag():
     target = leading.shift(3).dropna()
     with pytest.raises(ValueError):
         evaluate_lead_lag_oos(leading, target, lag=3, publication_lag_months=-1)
+
+
+
+# ---------------- WP-VALID: 운영 모멘텀 어댑터 · 공통 시뮬레이터 · 유의성 ----------------
+
+
+def _random_walk(n: int = 400, seed: int = 0, drift: float = 0.0005, vol: float = 0.01) -> pd.Series:
+    rng = np.random.default_rng(seed)
+    return _prices(100.0 * np.cumprod(1.0 + rng.normal(drift, vol, n)))
+
+
+def test_operational_momentum_equals_signals_momentum_plus_tiebreak():
+    """동등성: 운영 signals.momentum_score 정수 점수 + 1e-4 × 12-1개월 원수익률."""
+    from src.backtest import operational_momentum_fn
+    from src.signals import MOMENTUM_12M_D, MOMENTUM_SKIP_D, momentum_score
+
+    for seed in range(5):
+        p = _random_walk(seed=seed)
+        score, _ = momentum_score(p)
+        raw = float(p.iloc[-MOMENTUM_SKIP_D] / p.iloc[-(MOMENTUM_12M_D + MOMENTUM_SKIP_D)] - 1.0)
+        got = operational_momentum_fn(p)
+        assert got == pytest.approx(score + 1e-4 * raw, abs=1e-12)
+        assert round(got - 1e-4 * raw) == score              # 타이브레이크는 정수 점수를 못 바꿈
+
+
+def test_operational_momentum_breaks_saturation_ties_by_raw_return():
+    from src.backtest import operational_momentum_fn
+    from src.signals import momentum_score
+
+    slow, fast = _geometric(0.004, 300), _geometric(0.005, 300)
+    assert momentum_score(slow)[0] == momentum_score(fast)[0] == 100     # 운영 점수는 포화
+    assert operational_momentum_fn(fast) > operational_momentum_fn(slow)
+
+
+def test_operational_momentum_min_points_and_constant():
+    from src.backtest import MOM_MIN_POINTS, operational_momentum_fn
+    from src.signals import MOMENTUM_12M_D, MOMENTUM_SKIP_D
+
+    assert MOM_MIN_POINTS == 274 == MOMENTUM_12M_D + MOMENTUM_SKIP_D + 1
+    with pytest.raises(InsufficientDataError):
+        operational_momentum_fn(_geometric(0.001, MOM_MIN_POINTS - 1))
+    operational_momentum_fn(_geometric(0.001, MOM_MIN_POINTS))           # 경계에서는 계산됨
+
+
+def test_walk_forward_default_score_is_operational_and_picks_winner():
+    result = walk_forward_topn(_wf_universe(420), top_n=1, cost_bps=0.0)
+    assert result.picks and all(chosen == ("A",) for _, chosen in result.picks)
+    assert "운영 함수" in result.strategy.name
+    assert result.stats is not None
+    assert result.to_dict()["stats"]["n"] == result.stats.n
+
+
+def test_walk_forward_top_n_all_means_zero_excess():
+    """전 종목 보유 == 같은 날 동일가중 벤치 → 초과수익이 정확히 0, 판정 불가."""
+    result = walk_forward_topn(_wf_universe(), score_fn=_short_momentum, top_n=3, cost_bps=10.0)
+    assert result.strategy.total_return_pct == pytest.approx(result.benchmark.total_return_pct, abs=1e-9)
+    assert result.stats.mean_ann_pct == pytest.approx(0.0, abs=1e-9)
+    assert result.stats.verdict == "판정 불가"
+
+
+def test_walk_forward_benchmark_uses_same_cost_and_rebalance():
+    kwargs = {"score_fn": _short_momentum, "top_n": 1}
+    free = walk_forward_topn(_wf_universe(), cost_bps=0.0, **kwargs)
+    costly = walk_forward_topn(_wf_universe(), cost_bps=100.0, **kwargs)
+    assert costly.benchmark.cost_bps == costly.strategy.cost_bps == 100.0
+    assert costly.benchmark.total_return_pct < free.benchmark.total_return_pct     # 벤치도 비용을 낸다
+    assert costly.benchmark.n_trades >= 1                                          # 같은 진입 거래
+
+
+def test_walk_forward_rank_ic_positive_when_momentum_persists():
+    rng = np.random.default_rng(7)
+    n = 700
+    universe = {
+        f"S{i}": _prices(100.0 * np.cumprod(1.0 + rng.normal((i - 3.5) * 0.0006, 0.002, n)))
+        for i in range(8)
+    }
+    result = walk_forward_topn(universe, top_n=2)
+    assert result.stats.n_ic > 10
+    assert result.stats.ic_mean > 0.3
+    assert result.picks[-1][1][0] == "S7"                                   # 드리프트 최고 종목이 상위
+
+
+def test_excess_stats_summary_line_handles_nan():
+    from src.backtest import ExcessStats
+
+    line = ExcessStats(10, float("nan"), (float("nan"), float("nan")), float("nan"), "판정 불가").summary_line()
+    assert "계산 불가" in line and "nan" not in line
+
+
+def test_deprecated_apis_are_marked_but_still_importable():
+    import src.backtest as bt
+
+    for fn in (bt.evaluate_lead_lag_oos, bt.momentum_score_fn, bt.LeadLagBacktest):
+        assert "deprecated" in (fn.__doc__ or "").lower()
+
+
+def test_check_backtest_table_is_wide_char_aligned():
+    import scripts.check_backtest as cb
+
+    assert cb._width("M2 -> BTC") == 9
+    assert cb._width("한국수출") == 8
+    assert cb._width(cb._pad("한국수출", 12)) == 12
+
+
+# ---------------- check_backtest.main() 계약: 종료코드 / --save / 원장 폴백 ----------------
+
+
+def _ll_case(seed: int = 0, n: int = 200) -> tuple[pd.Series, pd.Series]:
+    """합성 선행지표/목표 쌍 (잡음 — 통과 여부는 무관, 파이프라인만 돌린다)."""
+    rng = np.random.default_rng(seed)
+    idx = pd.date_range("2005-01-31", periods=n, freq="ME")
+    lead = pd.Series(rng.normal(0, 1, n), index=idx)
+    target = pd.Series(100 * np.cumprod(1 + rng.normal(0.01, 0.05, n)), index=idx)
+    return lead, target
+
+
+class _FakeStore:
+    def __init__(self):
+        self.calls: list[tuple[str, str]] = []
+
+    def put_state(self, ns, key, value):
+        self.calls.append((ns, key))
+
+
+class _FakeWF:
+    def to_dict(self):
+        return {"ok": True}
+
+
+@pytest.fixture
+def cb_env(monkeypatch):
+    """check_backtest.main() 을 네트워크·DB 없이 돌리는 환경. (모듈, 가짜 저장소) 반환."""
+    import sys
+
+    import scripts.check_backtest as cb
+    from src import storage
+    from src.predictors import PredictorSpec
+
+    specs = tuple(
+        PredictorSpec(f"S{i}", f"선행{i} 증가율", f"T{i} 수익률", 1, lambda i=i: _ll_case(seed=i))
+        for i in range(2)
+    )
+    store = _FakeStore()
+    monkeypatch.setattr(cb, "PREDICTOR_SPECS", specs)
+    monkeypatch.setattr(cb, "_section_walk_forward", lambda *a, **k: _FakeWF())
+    monkeypatch.setattr(cb, "_section_trend", lambda *a, **k: None)
+    monkeypatch.setattr(storage, "get_storage", lambda: store)
+    monkeypatch.setitem(sys.modules, "src.ledger", None)   # 원장 모듈 없음
+    cb._LOGGED_ONCE.clear()
+    return cb, store
+
+
+def test_check_backtest_main_exit_zero_and_no_save_by_default(cb_env, capsys):
+    cb, store = cb_env
+    assert cb.main([]) == 0                     # '통과 0/N' 은 실패가 아님
+    assert store.calls == []                    # --save 없으면 state 쓰기 0회
+    out = capsys.readouterr().out
+    assert "원장 없음" in out and "관측 대기" in out   # 원장 모듈이 없을 때 폴백
+
+
+def test_check_backtest_main_save_writes_validation_state(cb_env):
+    cb, store = cb_env
+    assert cb.main(["--save"]) == 0
+    assert store.calls == [("validation", "lead_lag"), ("validation", "walk_forward")]
+
+
+def test_check_backtest_main_infra_failure_returns_one(cb_env, capsys):
+    from src.exceptions import DataFetchError
+    from src.predictors import PredictorSpec
+
+    cb, _ = cb_env
+
+    def boom():
+        raise DataFetchError("FRED 장애", source="FRED")
+
+    cb.PREDICTOR_SPECS = cb.PREDICTOR_SPECS + (PredictorSpec("B", "고장 증가율", "X 수익률", 0, boom),)
+    assert cb.main([]) == 1
+    assert "DataFetchError" in capsys.readouterr().out
+
+
+def test_check_backtest_ledger_wiring(cb_env, monkeypatch, capsys):
+    """원장 모듈이 있으면 format_report 출력, 함수 이름 불일치는 '연동 오류' (원장 없음과 구분)."""
+    import sys
+    import types
+
+    cb, _ = cb_env
+    good = types.ModuleType("src.ledger")
+    good.format_report = lambda market: f"LEDGER-{market}"
+    monkeypatch.setitem(sys.modules, "src.ledger", good)
+    cb._section_ledger()
+    out = capsys.readouterr().out
+    assert "LEDGER-us" in out and "LEDGER-kr" in out and "원장 없음" not in out
+
+    bad = types.ModuleType("src.ledger")           # 모듈은 있으나 기대한 함수가 없음
+    monkeypatch.setitem(sys.modules, "src.ledger", bad)
+    cb._section_ledger()
+    cb._section_universe_ic()
+    out = capsys.readouterr().out
+    assert out.count("원장 연동 오류") == 2 and "원장 없음" not in out
