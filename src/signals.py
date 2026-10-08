@@ -805,6 +805,26 @@ def select_screened_tickers(n: int = 6, market: str = "US") -> list[str]:
     return [r["symbol"] for r in rows[:n]]
 
 
+# 복제본 동기화 상태(WP-OPS-CORE 계약 Storage.init_sync) 중 '로컬이 원격과 맞다' 로 볼 값.
+# "local" = Turso 미사용(로컬 sqlite3 가 곧 원본), "ok" = 시작 시 동기화 성공.
+_SYNCED_INIT_STATES = ("ok", "local")
+
+
+def _replica_unsynced(store) -> bool:
+    """로컬 복제본이 원격과 동기화되지 않았을 수 있으면 True (§4.10 #9).
+
+    Turso 임베디드 레플리카가 init_sync 타임아웃·오프라인으로 비어 있거나 낡으면
+    get_state 는 오류 없이 '행 없음' 을 돌려준다 — 진짜 첫 실행과 구분 불가.
+    WP-OPS-CORE 의 연결 상태 API(``init_sync``·``degraded``)가 있을 때만 판단하고,
+    없는 버전(속성 없음)이면 False — 종전 동작 유지. 문자열/bool 이 아닌 값(테스트
+    목 등)은 신뢰하지 않고 무시한다.
+    """
+    if getattr(store, "degraded", False) is True:
+        return True
+    init_sync = getattr(store, "init_sync", None)
+    return isinstance(init_sync, str) and init_sync not in _SYNCED_INIT_STATES
+
+
 def _today_kst() -> str:
     return datetime.now(KST).strftime("%Y-%m-%d")
 
@@ -848,7 +868,8 @@ def generate_signal_report(
     baseline_missing = False
     prev: dict | None = None
     try:
-        raw_prev = get_storage().get_state(_STATE_NS, STATE_KEY, strict=True)
+        store = get_storage()
+        raw_prev = store.get_state(_STATE_NS, STATE_KEY, strict=True)
     except StorageError:
         logger.warning("신호 상태 읽기 실패 — 변화 알림 생략, 커밋 차단", exc_info=True)
         baseline_missing = True
@@ -856,6 +877,14 @@ def generate_signal_report(
     else:
         if isinstance(raw_prev, dict) and raw_prev.get("v") == STATE_VERSION:
             prev = raw_prev
+        elif raw_prev is None and _replica_unsynced(store):
+            # '행 없음' 이 진짜 첫 실행인지 동기화 안 된 복제본인지 모름 → 시딩 상태로
+            # 원격의 기존 경보 에피소드·pending 을 덮어쓰지 않도록 커밋 차단.
+            logger.warning("신호 상태 없음 + 복제본 동기화 실패(init_sync=%s, degraded=%s) "
+                           "— 변화 알림 생략, 커밋 차단",
+                           getattr(store, "init_sync", None), getattr(store, "degraded", None))
+            baseline_missing = True
+            data_issues.append("상태 동기화 실패 — 변화 알림 생략")
         elif raw_prev is not None:
             logger.warning("신호 상태 형식이 예상과 다름 — 첫 실행으로 취급")
     first_run = prev is None   # baseline_missing 도 '비교 기준 없음' → 변화 알림 생략

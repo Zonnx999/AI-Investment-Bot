@@ -658,6 +658,61 @@ def test_generate_signal_report_baseline_read_failure_blocks_commit(fresh_state_
     assert sig.commit_signal_state(r) is False
 
 
+@pytest.mark.parametrize("attrs", [
+    {"init_sync": "timeout"},
+    {"init_sync": "offline"},
+    {"init_sync": "error"},
+    {"init_sync": "ok", "degraded": True},
+])
+def test_unsynced_replica_without_state_blocks_commit(fresh_state_db, monkeypatch, attrs):
+    """복제본 동기화 실패 + 상태 행 없음 = 첫 실행으로 단정하지 않음 (§4.10 #9).
+
+    시딩 상태로 원격 global:v2(기존 경보·pending)를 덮어쓰지 않도록 커밋 차단.
+    """
+    import src.signals as sig
+    from src.storage import get_storage
+
+    _wire_market(monkeypatch, {"비트코인": -30.0})
+    store = get_storage()
+    for name, value in attrs.items():
+        monkeypatch.setattr(store, name, value, raising=False)
+    r = sig.generate_signal_report(tickers=(), today_kst="2026-10-08")
+    assert r.baseline_missing is True and r.first_run is True and r.alerts == []
+    assert r.pending_state is None
+    assert "상태 동기화 실패 — 변화 알림 생략" in r.data_issues
+    assert sig.commit_signal_state(r) is False
+    assert get_storage().get_state("signals", "global:v2") is None
+
+
+@pytest.mark.parametrize("attrs", [{}, {"init_sync": "local"}, {"init_sync": "ok"},
+                                   {"init_sync": object(), "degraded": object()}])
+def test_synced_or_unknown_replica_state_seeds_normally(fresh_state_db, monkeypatch, attrs):
+    """동기화 정상·연결 상태 API 없음(구버전)·해석 불가 값이면 종전대로 첫 실행 시딩."""
+    import src.signals as sig
+    from src.storage import get_storage
+
+    _wire_market(monkeypatch, {"비트코인": -30.0})
+    store = get_storage()
+    for name, value in attrs.items():
+        monkeypatch.setattr(store, name, value, raising=False)
+    r = sig.generate_signal_report(tickers=(), today_kst="2026-10-08")
+    assert r.baseline_missing is False and r.pending_state is not None
+
+
+def test_unsynced_replica_with_existing_state_still_compares(fresh_state_db, monkeypatch):
+    """상태 행이 읽히면 동기화 상태와 무관하게 비교(알림) 진행 — 행 없음일 때만 차단."""
+    import src.signals as sig
+    from src.storage import get_storage
+
+    _wire_market(monkeypatch, {"금": -1.0})
+    assert sig.commit_signal_state(sig.generate_signal_report(tickers=(), today_kst="2026-10-07"))
+    monkeypatch.setattr(get_storage(), "init_sync", "timeout", raising=False)
+    _wire_market(monkeypatch, {"금": -12.0})
+    r = sig.generate_signal_report(tickers=(), today_kst="2026-10-08")
+    assert r.baseline_missing is False
+    assert [a.key for a in r.alerts] == ["dd:금:enter"]
+
+
 def test_generate_signal_report_data_issues_and_alr08(fresh_state_db, monkeypatch):
     """자산·국면·신용 조회 실패가 data_issues 로 노출되고, 실패 자산 상태는 유지."""
     import src.signals as sig
