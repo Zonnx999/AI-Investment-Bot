@@ -333,3 +333,105 @@ def test_lead_lag_rejects_negative_publication_lag():
     target = leading.shift(3).dropna()
     with pytest.raises(ValueError):
         evaluate_lead_lag_oos(leading, target, lag=3, publication_lag_months=-1)
+
+
+
+# ---------------- WP-VALID: 운영 모멘텀 어댑터 · 공통 시뮬레이터 · 유의성 ----------------
+
+
+def _random_walk(n: int = 400, seed: int = 0, drift: float = 0.0005, vol: float = 0.01) -> pd.Series:
+    rng = np.random.default_rng(seed)
+    return _prices(100.0 * np.cumprod(1.0 + rng.normal(drift, vol, n)))
+
+
+def test_operational_momentum_equals_signals_momentum_plus_tiebreak():
+    """동등성: 운영 signals.momentum_score 정수 점수 + 1e-4 × 12-1개월 원수익률."""
+    from src.backtest import operational_momentum_fn
+    from src.signals import MOMENTUM_12M_D, MOMENTUM_SKIP_D, momentum_score
+
+    for seed in range(5):
+        p = _random_walk(seed=seed)
+        score, _ = momentum_score(p)
+        raw = float(p.iloc[-MOMENTUM_SKIP_D] / p.iloc[-(MOMENTUM_12M_D + MOMENTUM_SKIP_D)] - 1.0)
+        got = operational_momentum_fn(p)
+        assert got == pytest.approx(score + 1e-4 * raw, abs=1e-12)
+        assert round(got - 1e-4 * raw) == score              # 타이브레이크는 정수 점수를 못 바꿈
+
+
+def test_operational_momentum_breaks_saturation_ties_by_raw_return():
+    from src.backtest import operational_momentum_fn
+    from src.signals import momentum_score
+
+    slow, fast = _geometric(0.004, 300), _geometric(0.005, 300)
+    assert momentum_score(slow)[0] == momentum_score(fast)[0] == 100     # 운영 점수는 포화
+    assert operational_momentum_fn(fast) > operational_momentum_fn(slow)
+
+
+def test_operational_momentum_min_points_and_constant():
+    from src.backtest import MOM_MIN_POINTS, operational_momentum_fn
+    from src.signals import MOMENTUM_12M_D, MOMENTUM_SKIP_D
+
+    assert MOM_MIN_POINTS == 274 == MOMENTUM_12M_D + MOMENTUM_SKIP_D + 1
+    with pytest.raises(InsufficientDataError):
+        operational_momentum_fn(_geometric(0.001, MOM_MIN_POINTS - 1))
+    operational_momentum_fn(_geometric(0.001, MOM_MIN_POINTS))           # 경계에서는 계산됨
+
+
+def test_walk_forward_default_score_is_operational_and_picks_winner():
+    result = walk_forward_topn(_wf_universe(420), top_n=1, cost_bps=0.0)
+    assert result.picks and all(chosen == ("A",) for _, chosen in result.picks)
+    assert "운영 함수" in result.strategy.name
+    assert result.stats is not None
+    assert result.to_dict()["stats"]["n"] == result.stats.n
+
+
+def test_walk_forward_top_n_all_means_zero_excess():
+    """전 종목 보유 == 같은 날 동일가중 벤치 → 초과수익이 정확히 0, 판정 불가."""
+    result = walk_forward_topn(_wf_universe(), score_fn=_short_momentum, top_n=3, cost_bps=10.0)
+    assert result.strategy.total_return_pct == pytest.approx(result.benchmark.total_return_pct, abs=1e-9)
+    assert result.stats.mean_ann_pct == pytest.approx(0.0, abs=1e-9)
+    assert result.stats.verdict == "판정 불가"
+
+
+def test_walk_forward_benchmark_uses_same_cost_and_rebalance():
+    kwargs = {"score_fn": _short_momentum, "top_n": 1}
+    free = walk_forward_topn(_wf_universe(), cost_bps=0.0, **kwargs)
+    costly = walk_forward_topn(_wf_universe(), cost_bps=100.0, **kwargs)
+    assert costly.benchmark.cost_bps == costly.strategy.cost_bps == 100.0
+    assert costly.benchmark.total_return_pct < free.benchmark.total_return_pct     # 벤치도 비용을 낸다
+    assert costly.benchmark.n_trades >= 1                                          # 같은 진입 거래
+
+
+def test_walk_forward_rank_ic_positive_when_momentum_persists():
+    rng = np.random.default_rng(7)
+    n = 700
+    universe = {
+        f"S{i}": _prices(100.0 * np.cumprod(1.0 + rng.normal((i - 3.5) * 0.0006, 0.002, n)))
+        for i in range(8)
+    }
+    result = walk_forward_topn(universe, top_n=2)
+    assert result.stats.n_ic > 10
+    assert result.stats.ic_mean > 0.3
+    assert result.picks[-1][1][0] == "S7"                                   # 드리프트 최고 종목이 상위
+
+
+def test_excess_stats_summary_line_handles_nan():
+    from src.backtest import ExcessStats
+
+    line = ExcessStats(10, float("nan"), (float("nan"), float("nan")), float("nan"), "판정 불가").summary_line()
+    assert "계산 불가" in line and "nan" not in line
+
+
+def test_deprecated_apis_are_marked_but_still_importable():
+    import src.backtest as bt
+
+    for fn in (bt.evaluate_lead_lag_oos, bt.momentum_score_fn, bt.LeadLagBacktest):
+        assert "deprecated" in (fn.__doc__ or "").lower()
+
+
+def test_check_backtest_table_is_wide_char_aligned():
+    import scripts.check_backtest as cb
+
+    assert cb._width("M2 -> BTC") == 9
+    assert cb._width("한국수출") == 8
+    assert cb._width(cb._pad("한국수출", 12)) == 12
