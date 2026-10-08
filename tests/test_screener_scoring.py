@@ -345,10 +345,26 @@ def test_ttm_usable_requires_enough_finite_core_keys():
     assert ttm_usable({}) is False
     assert ttm_usable({"marketCap": 1e9, "symbol": "NEW"}) is False   # 신규상장: marketCap 만
     assert ttm_usable({"evToEBITDA": 5.0, "evToSales": 2.0}) is False  # 2개 < 3
-    assert ttm_usable({"evToEBITDA": 5.0, "evToSales": 2.0, "earningsYield": 0.0}) is True  # 정당한 0 포함
+    assert ttm_usable({"evToEBITDA": 5.0, "evToSales": 2.0, "earningsYield": 0.07}) is True
+    # 0 은 세지 않음: FMP 는 결측을 0 으로 주기도 함 → 0 이 섞이면 0 아닌 값이 3개 이상이어야 함
+    assert ttm_usable({"evToEBITDA": 5.0, "evToSales": 2.0, "earningsYield": 0.0}) is False
+    assert ttm_usable({"evToEBITDA": 5.0, "evToSales": 2.0, "earningsYield": 0.0,
+                       "returnOnEquity": 0.12}) is True
+    assert ttm_usable({k: 0 for k in screener.TTM_CORE_KEYS}) is False   # 전부 0 인 빈 TTM 행
     assert ttm_usable({"evToEBITDA": float("nan"), "evToSales": None,
                        "earningsYield": "N/A", "returnOnEquity": True}) is False
     assert ttm_usable({"evToEBITDA": float("inf"), "evToSales": 1, "earningsYield": 1}) is False
+
+
+def test_ev_sales_zero_or_negative_gets_zero_points():
+    """EV/Sales ≤ 0 (음수 EV·FMP 결측=0) 은 '저평가 만점'이 아니라 0점 (§4.10 #5)."""
+    for bad in (0.0, -1.0):
+        card = value_scorecard({"price": 10.0}, dict(GOOD, evToSales=bad), is_fin=False)
+        comp = next(c for c in card.components if c.label == "EV/Sales")
+        assert comp.points == 0.0
+        assert "EV 음수/결측" in comp.detail
+    card = value_scorecard({"price": 10.0}, dict(GOOD, evToSales=2.0), is_fin=False)
+    assert next(c for c in card.components if c.label == "EV/Sales").points == 11.0
 
 
 # ---------------- latest_fundamentals 폴백 / _basis ----------------

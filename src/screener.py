@@ -106,11 +106,17 @@ def merge_ttm(km_row: dict | None, rt_row: dict | None) -> dict:
 
 
 def ttm_usable(metrics: dict, min_core: int = TTM_MIN_CORE) -> bool:
-    """TTM 병합 결과가 점수 계산에 쓸 만한지 (핵심 키 중 유한 숫자가 min_core 개 이상)."""
+    """TTM 병합 결과가 점수 계산에 쓸 만한지 (핵심 키 중 0 이 아닌 유한 숫자가 min_core 개 이상).
+
+    0 은 세지 않는다: FMP 는 결측을 0 으로 주는 경우가 실측됨(HG·MGR currentRatioTTM=0 등).
+    핵심 키가 전부 0 인 '빈 TTM 행'을 쓸 만하다고 보면 연간 폴백이 막히고,
+    EV/Sales·순부채/EBITDA 0 이 만점으로 계산된다(§4.10 #5).
+    """
     n = 0
     for k in TTM_CORE_KEYS:
         v = metrics.get(k)
-        if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v):
+        if (isinstance(v, (int, float)) and not isinstance(v, bool)
+                and math.isfinite(v) and v != 0):
             n += 1
     return n >= min_core
 
@@ -366,13 +372,16 @@ def value_scorecard(quote: dict, metrics: dict, *, is_fin: bool | None = None) -
     # 안 그러면 "25 − (음수)×1.25 > 25" 로 적자기업이 만점 받는 역설.
     ev_ebitda_pts = _clip(25.0 - ev_ebitda * 1.25, 0, 25) if ev_ebitda > 0 else 0.0
     pbr_pts = _clip(15.0 - pbr * 1.5, 0, 15) if pbr > 0 else 0.0
+    # EV/Sales 도 같은 함정: 0 이하(순현금 > 시총인 음수 EV, FMP 의 결측=0)가 만점이 되지 않게.
+    ev_sales_pts = _clip(15.0 - ev_sales * 2.0, 0, 15) if ev_sales > 0 else 0.0
 
     comps = [
         _neutral("EV/EBITDA", 25, FIN_NEUTRAL_LABEL) if is_fin
         else Component("EV/EBITDA", ev_ebitda_pts, 25,
                        f"{ev_ebitda:.1f}x" + ("" if ev_ebitda > 0 else " (적자)")),
         _neutral("EV/Sales", 15, FIN_NEUTRAL_LABEL) if is_fin
-        else Component("EV/Sales", _clip(15.0 - ev_sales * 2.0, 0, 15), 15, f"{ev_sales:.1f}x"),
+        else Component("EV/Sales", ev_sales_pts, 15,
+                       f"{ev_sales:.1f}x" + ("" if ev_sales > 0 else " (EV 음수/결측)")),
         Component("PBR", pbr_pts, 15, f"{pbr:.2f}" + ("" if pbr > 0 else " (자본잠식)")),
         _neutral("이익수익률", 25, f"이상치 {ey * 100:.0f}%→중립") if ey > EY_OUTLIER
         else Component("이익수익률", _clip(ey * 100 * 5.0, 0, 25), 25, f"{ey * 100:.1f}%"),
