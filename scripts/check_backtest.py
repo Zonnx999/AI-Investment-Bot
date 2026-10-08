@@ -92,6 +92,13 @@ def _fmt_p(p: float) -> str:
 # ----------------------------------------------------------------------
 
 
+def _db_errors() -> tuple[type[BaseException], ...]:
+    """storage 의 DB 오류 튜플 (공개 별칭 DB_ERRORS 우선, 없으면 내부 _DB_ERRORS)."""
+    from src import storage
+
+    return tuple(getattr(storage, "DB_ERRORS", None) or getattr(storage, "_DB_ERRORS", ()))
+
+
 def _ledger_call(candidates: tuple[str, ...], *args) -> str | None:
     """src.ledger 의 첫 번째로 존재하는 함수를 호출해 평문을 받는다. 없거나 실패하면 None.
 
@@ -99,17 +106,17 @@ def _ledger_call(candidates: tuple[str, ...], *args) -> str | None:
     """
     try:
         from src import ledger  # 지연 import — 원장 모듈이 없는 환경에서도 리포트가 돈다
-        from src.storage import _DB_ERRORS
     except ImportError as e:
         logger.info("원장 모듈 없음 — %s", e)
         return None
+    db_errors = _db_errors()
     fn = next((getattr(ledger, n) for n in candidates if callable(getattr(ledger, n, None))), None)
     if fn is None:
         logger.info("원장 모듈에 %s 함수 없음", "/".join(candidates))
         return None
     try:
         out = fn(*args)
-    except (QuantBotError, TypeError, ValueError, *_DB_ERRORS) as e:
+    except (QuantBotError, TypeError, ValueError, *db_errors) as e:
         logger.warning("원장 조회 실패 (%s) — %s", candidates[0], e)
         return None
     return str(out).rstrip() if out else None
@@ -165,8 +172,8 @@ def _run_lead_lag() -> tuple[list[LeadLagWF], int]:
 
 
 def _print_lead_lag_table(results: list[LeadLagWF], verbose: bool) -> None:
-    cols = (("관계", 20), ("pub", 4), ("OOS", 4), ("적중%", 6), ("항상상승", 8), ("12M모멘텀", 9),
-            ("우위%p", 7), ("p(상승)", 8), ("p(모멘텀)", 9))
+    cols = (("관계", 20), ("pub", 5), ("OOS", 5), ("적중%", 7), ("항상상승", 10), ("12M모멘텀", 11),
+            ("우위%p", 8), ("p(상승)", 9), ("p(모멘텀)", 11))
     header = "  " + _pad(cols[0][0], cols[0][1]) + "".join(_pad(n, w, right=True) for n, w in cols[1:]) + "  판정"
     print(header)
     for r in results:
@@ -353,7 +360,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.save:
         try:
             _save_state(results, wf_result)
-        except QuantBotError as e:
+        except (QuantBotError, *_db_errors()) as e:
             logger.warning("검증 결과 저장 실패 — %s", e)
             failures += 1
     return 1 if failures else 0
