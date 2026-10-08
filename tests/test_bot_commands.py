@@ -85,7 +85,7 @@ def test_format_scan_lists_rows_and_handles_empty():
     rows = [_row("AAA", total=90), _row("BBB", total=70)]
     out = bc.format_scan("US", rows)
     assert "🇺🇸 미국" in out and "AAA" in out and "BBB" in out
-    assert "발굴 종목이 없" in bc.format_scan("KR", [])
+    assert "후보가 없" in bc.format_scan("KR", [])
 
 
 # ---------------- 핸들러 (DB) ----------------
@@ -106,6 +106,7 @@ def test_handle_scan_market_and_usage(fresh_db):
     _seed(conn, "BBB", market="US", total=60)
     out = bc.handle_scan("us")
     assert "AAA" in out and out.index("AAA") < out.index("BBB")   # 점수 내림차순
+    assert "저평가" not in out and "추천" not in out                # 중립 어휘
     assert "사용법" in bc.handle_scan("jp")       # 미지원 시장
 
 
@@ -151,8 +152,10 @@ def test_menu_alias_is_help():
 
 
 def test_button_labels_map_to_commands():
+    assert bc.BUTTON_TO_COMMAND["🇺🇸 미국 후보"] == "/scan us"
+    assert bc.BUTTON_TO_COMMAND["🇰🇷 한국 후보"] == "/scan kr"
+    # 구버전 키보드('추천') 별칭은 동작 유지 (사용자 폰에 남은 버튼)
     assert bc.BUTTON_TO_COMMAND["🇺🇸 미국 추천"] == "/scan us"
-    assert bc.BUTTON_TO_COMMAND["🇰🇷 한국 추천"] == "/scan kr"
     assert bc.BUTTON_TO_COMMAND["📋 구독자"] == "/subscribers"
 
 
@@ -160,6 +163,7 @@ def test_main_keyboard_owner_gets_admin_row():
     base = bc.main_keyboard(is_owner=False)
     assert base["resize_keyboard"] is True
     flat_user = [b for row in base["keyboard"] for b in row]
+    assert "🇺🇸 미국 후보" in flat_user and not any("추천" in b for b in flat_user)
     assert "📋 구독자" not in flat_user                 # 일반 사용자엔 관리자 버튼 없음
     flat_owner = [b for row in bc.main_keyboard(is_owner=True)["keyboard"] for b in row]
     assert "📋 구독자" in flat_owner and "⏳ 승인 대기" in flat_owner
@@ -451,3 +455,193 @@ def test_news_rate_limit_applies(fresh_db, owner_set, fake_news):
     assert bc.respond("/news AAPL", owner_set, rl) is not None
     assert bc.respond("/news AAPL", owner_set, rl) is None   # 한도 초과 → 드롭
     assert len(fake_news) == 1
+
+
+# ---------------------------------------------------------------------------
+# WP-SURFACE — 점수 표면 정합 (단일 점수·라벨·기준일·제외 사유·후보 어휘)
+# ---------------------------------------------------------------------------
+
+from datetime import date  # noqa: E402
+
+
+def _seed_full(conn, symbol, market="US", name="Co", total=75, value=75, health=75,
+               sector="Tech", detail=None, updated_at="2026-10-08T01:00:00+00:00",
+               seen_at="2026-10-08T00:00:00+00:00", excluded=None, market_cap=5e9):
+    """수정 라운드 컬럼(excluded/seen_at)까지 채우는 시드 (universe._conn 이 마이그레이션 완료)."""
+    conn.execute(
+        "INSERT INTO screened (symbol, market, name, sector, price, market_cap, roe, "
+        "health_score, value_score, total_score, detail, enriched, discovered_at, updated_at, "
+        "excluded, seen_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,?)",
+        (symbol, market, name, sector, 100.0, market_cap, 10.0, health, value, total,
+         json.dumps(detail, ensure_ascii=False) if detail else None, "t", updated_at,
+         excluded, seen_at),
+    )
+    conn.commit()
+
+
+def test_labels_are_single_source():
+    assert bc.LABEL_VALUE == "밸류" and bc.LABEL_HEALTH == "건전성"
+    assert "퀄리티" not in bc.HELP_TEXT and "저평가" not in bc.HELP_TEXT
+
+
+def test_stock_and_scan_show_same_score_and_labels(fresh_db):
+    """CALM 형태: 같은 종목이 /stock·/scan 에서 같은 종합/밸류/건전성 (DB 단일 소스)."""
+    conn = universe._conn()
+    _seed_full(conn, "CALM", name="Cal-Maine Foods", total=92, value=92, health=92,
+               sector="Consumer Defensive", detail=_DETAIL)
+    _seed_full(conn, "OTHER", name="Other Inc", total=70, value=65, health=75, sector="Energy")
+    stock = bc.handle_stock("calm")
+    scan = bc.handle_scan("us")
+    for out in (stock, scan):
+        assert "종합 *92*" in out and "(밸류 92" in out and "건전성 92)" in out
+        assert "퀄리티" not in out
+
+
+def test_scan_uses_pick_top_with_sector_cap(fresh_db):
+    """/scan 은 pick_top(다이제스트와 같은 선정) — 같은 업종 최대 2개."""
+    conn = universe._conn()
+    for i, sym in enumerate(["E1", "E2", "E3", "E4"]):
+        _seed_full(conn, sym, total=90 - i, sector="Energy", market_cap=1e9 + i)
+    for i, sym in enumerate(["T1", "T2", "T3"]):
+        _seed_full(conn, sym, total=60 - i, sector="Tech", market_cap=1e9 + i)
+    out = bc.handle_scan("us")
+    shown = [s for s in ("E1", "E2", "E3", "E4", "T1", "T2", "T3") if f"`{s}`" in out]
+    assert shown == [r.symbol for r in universe.pick_top("US", 6)]
+    assert sorted(shown) == sorted(universe.top_symbols(n=6, market="US"))   # 다이제스트 US 선정과 동일
+    assert sum(1 for s in shown if s.startswith("E")) == 2       # 에너지 상한
+    assert "E3" not in shown and "E4" not in shown
+
+
+def test_scan_kr_holding_cap_and_flag_tag(fresh_db):
+    """F&F홀딩스 형태: flags 'holding' 은 지주사 상한(2)에 걸리고 꼬리표가 붙는다."""
+    conn = universe._conn()
+    hold = {"flags": ["holding", "one_off"], "value": {"total": 90, "components": []},
+            "health": {"total": 90, "components": []}}
+    for i, (sym, nm) in enumerate([("007700", "F&F홀딩스"), ("000001", "가나홀딩스"),
+                                    ("000002", "다라홀딩스")]):
+        _seed_full(conn, sym, "KR", name=nm, total=92 - i, sector="", detail=hold)
+    _seed_full(conn, "000003", "KR", name="일반회사", total=70, sector="KOSDAQ")
+    out = bc.handle_scan("kr")
+    assert "`007700`" in out and "`000001`" in out
+    assert "`000002`" not in out                       # 지주사 3번째는 상한으로 빠짐
+    assert "`000003`" in out                           # 자리는 다음 순위가 채움
+    assert "지주사" in out and "일회성 이익 보정" in out
+    assert "🇰🇷" in out and "지주사 최대 2개" in out
+
+
+def test_scan_n_argument_and_usage(fresh_db):
+    conn = universe._conn()
+    for i in range(8):
+        _seed_full(conn, f"S{i}", total=90 - i, sector=f"Sec{i}", market_cap=1e9 + i)
+    assert bc.respond("/scan us", "1").count("`S") == bc.SCAN_DEFAULT_N     # 기본 6종목
+    assert bc.respond("/scan us 3", "1").count("`S") == 3
+    assert bc.respond("/scan us 99", "1").count("`S") == 8                  # 상한 10 → DB 8개
+    assert "사용법" in bc.respond("/scan us abc", "1")
+    assert bc.parse_command("/scan kr 10") == bc.Command("scan", "kr", "10")
+
+
+def test_scan_footer_has_asof_rule_and_disclaimer(fresh_db):
+    conn = universe._conn()
+    _seed_full(conn, "AAA", total=80, updated_at="2026-10-08T01:00:00+00:00",
+               seen_at="2026-10-09T00:00:00+00:00")
+    out = bc.handle_scan("us")
+    assert "점수 기준일: 재무 2026-10-08 · 가격 2026-10-09" in out
+    assert bc.DISCLAIMER in out
+    assert "추천" not in out and "저평가" not in out
+    assert "점수 상위 후보" in out
+
+
+def test_format_stock_shows_asof_and_stale_warning():
+    fresh = ScanRow(**{**_row("AAA").__dict__, "fund_asof": "2026-10-05", "price_asof": "2026-10-08"})
+    out = bc.format_stock(fresh, None, today=date(2026, 10, 9))
+    assert "재무 2026-10-05 · 가격 2026-10-08" in out
+    assert "⚠️" not in out
+    stale = ScanRow(**{**_row("AAA").__dict__, "fund_asof": "2026-09-30", "price_asof": "2026-10-08"})
+    out = bc.format_stock(stale, None, today=date(2026, 10, 9))
+    assert "9일 전 기준" in out and "⚠️" in out         # 8일 이상이면 경고
+    assert "기준일 정보 없음" in bc.format_stock(_row("AAA"), None)
+    assert bc.DISCLAIMER in out
+
+
+def test_stock_excluded_row_gets_notice_and_leaves_scan(fresh_db):
+    """보통주 아님(sibling) 행: /stock 은 점수 + 제외 안내, /scan 후보에서는 빠짐."""
+    conn = universe._conn()
+    _seed_full(conn, "AFGE", name="American Financial Group", total=85, excluded="sibling")
+    _seed_full(conn, "NORM", name="Normal Co", total=60, sector="Industrials")
+    stock = bc.handle_stock("AFGE")
+    assert "종합 *85*" in stock
+    assert "후보 제외" in stock and "보통주 아님" in stock
+    scan = bc.handle_scan("us")
+    assert "AFGE" not in scan and "NORM" in scan
+    assert "후보 제외" not in bc.handle_stock("NORM")
+
+
+def test_stock_flag_tags_for_kr_row(fresh_db):
+    conn = universe._conn()
+    detail = {"flags": ["fin_neutral", "holding"], "value": {"total": 50, "components": []},
+              "health": {"total": 50, "components": []}}
+    _seed_full(conn, "005830", "KR", name="DB손해보험", total=60, sector="", detail=detail)
+    out = bc.handle_stock("005830")
+    assert "🏷 지주사 · 금융업 일부 항목 중립" in out
+
+
+def test_stock_crypto_labels_are_corrected(fresh_db):
+    """크립토는 value=변동성 / health=순위 로 저장돼 있어 '밸류/건전성' 라벨을 쓰면 안 됨."""
+    conn = universe._conn()
+    _seed_full(conn, "BTC", "CRYPTO", name="Bitcoin", total=76, value=53, health=99, sector="")
+    out = bc.handle_stock("BTC")
+    assert "변동성 53" in out and "순위 99" in out
+    assert "밸류" not in out and "건전성" not in out
+    assert "비교할 수 없" in out
+
+
+def test_dynamic_text_is_markdown_safe():
+    """회사명의 _ * ` [ \\ 는 제거 — legacy Markdown 은 백슬래시 이스케이프를 못 씀 (§4.10 #10)."""
+    row = _row("ABC", name="A_B*C`D[E\\F")
+    out = bc.format_stock(row, None)
+    header = out.splitlines()[0]
+    assert "ABCDEF" in header and header.count("*") == 2      # 굵은 심볼 쌍만 남음
+    for ch in ("_", "`", "[", "\\"):
+        assert ch not in header
+    scan = bc.format_scan("US", [row])
+    assert "A_B" not in scan and "[" not in scan
+
+
+def test_help_text_vocabulary_and_commands():
+    assert "후보" in bc.HELP_TEXT and "/ledger" in bc.HELP_TEXT
+    assert bc.DISCLAIMER in bc.HELP_TEXT
+    assert "추천" not in bc.HELP_TEXT
+
+
+# ---------------- /ledger ----------------
+
+
+def test_ledger_gate_and_plaintext_output(fresh_db, owner_set, monkeypatch):
+    import src.ledger as ledger
+
+    seen = []
+    monkeypatch.setattr(ledger, "report_text", lambda m: seen.append(m) or f"== 원장 {m} ==")
+    assert bc.parse_command("/ledger kr") == bc.Command("ledger", "kr")
+    assert bc.handle_ledger("kr", "999") == bc.GATE_MSG                 # 비구독자 차단
+    out = bc.respond("/ledger kr", owner_set)                           # 소유자 통과
+    assert out.startswith("== 원장 KR ==") and bc.DISCLAIMER in out
+    assert seen == ["KR"]
+    assert "사용법" in bc.handle_ledger("jp", owner_set)
+    bc.handle_ledger(None, owner_set)
+    assert seen[-1] == "US"                                             # 기본 us
+
+
+def test_ledger_truncates_long_report_and_survives_db_error(fresh_db, owner_set, monkeypatch):
+    import sqlite3
+
+    import src.ledger as ledger
+
+    monkeypatch.setattr(ledger, "report_text", lambda m: "x" * 9000)
+    out = bc.handle_ledger("us", owner_set)
+    assert len(out) < 3700 and "이하 생략" in out
+
+    def boom(m):
+        raise sqlite3.OperationalError("locked")
+
+    monkeypatch.setattr(ledger, "report_text", boom)
+    assert "읽지 못했습니다" in bc.handle_ledger("us", owner_set)       # 예외가 새지 않음

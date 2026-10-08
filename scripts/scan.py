@@ -3,7 +3,7 @@ scripts/scan.py
 ===============
 유니버스 전수 스캔 (Phase 8) — 오프라인, API 0콜.
 
-저평가 상위 종목 발굴 + 내가 아는 종목의 순위/점수 확인.
+점수 상위 종목 확인 + 내가 아는 종목의 순위/점수 확인 (시장 내 상대 점수, 투자 권유 아님).
 먼저 `python scripts/build_universe.py` 로 DB 를 채워야 합니다.
 
 예:
@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 
 from src import universe
+from src.bot_commands import DISCLAIMER, LABEL_HEALTH, LABEL_VALUE   # 라벨 단일 소스 (텔레그램과 공유)
 from src.logger import get_logger
 
 logger = get_logger(__name__)
@@ -39,8 +40,10 @@ def _fmt_mcap(market: str, mcap: float) -> str:
     return f"${mcap / 1e9:.1f}B"
 
 
-def _print_rows(rows) -> None:
-    print(f"  {'순위':>3} {'종목':<10} {'시장':<6} {'종합':>4} {'밸류':>4} {'건전':>4} "
+def _print_rows(rows, market: str | None = None) -> None:
+    # 크립토는 value=변동성점수 / health=순위점수 (universe._store_crypto_scored 매핑)
+    vlab, hlab = ("변동성", "순위") if market == "CRYPTO" else (LABEL_VALUE, LABEL_HEALTH)
+    print(f"  {'순위':>3} {'종목':<10} {'시장':<6} {'종합':>4} {vlab:>4} {hlab:>4} "
           f"{'ROE':>7} {'PER':>6} {'PBR':>5}  회사")
     print("  " + "-" * 90)
     for i, r in enumerate(rows, 1):
@@ -70,7 +73,17 @@ def main() -> int:
         per = f"{row.per:.1f}" if row.per else "—"
         pbr = f"{row.pbr:.2f}" if row.pbr else "—"
         print(f"\n[{row.symbol}] {row.name}  ({row.market} · {row.sector or '—'})")
-        print(f"  종합 {row.total_score} (밸류 {row.value_score} / 건전 {row.health_score})")
+        if row.market == "CRYPTO":
+            print(f"  종합 {row.total_score} (변동성 {row.value_score} / 순위 {row.health_score})"
+                  "  ※ 주식 점수와 비교 불가")
+        else:
+            print(f"  종합 {row.total_score} ({LABEL_VALUE} {row.value_score} / "
+                  f"{LABEL_HEALTH} {row.health_score})")
+        if row.excluded:
+            print(f"  ※ 후보 제외 종목 (사유: {row.excluded}) — 일일 리포트·/scan 후보에서 빠짐")
+        if row.flags:
+            print(f"  꼬리표: {', '.join(row.flags)}")
+        print(f"  점수 기준일: 재무 {row.fund_asof or '—'} · 가격 {row.price_asof or '—'}")
         print(f"  ROE {roe}  PER {per}  PBR {pbr}  시총 {mcap}")
         # 같은 시장 내 순위
         peers = universe.scan(market=row.market, limit=100000)
@@ -81,7 +94,7 @@ def main() -> int:
         # 점수 분해 — '왜 이 점수인지' (텔레그램 /stock 과 동일 내용)
         detail = universe.lookup_detail(row.symbol)
         if detail:
-            for key, title in (("health", "🏥 건전성 분해"), ("value", "💰 저평가도 분해")):
+            for key, title in (("health", f"🏥 {LABEL_HEALTH} 분해"), ("value", f"💰 {LABEL_VALUE} 분해")):
                 card = detail.get(key, {})
                 comps = card.get("components", [])
                 if not comps:
@@ -100,7 +113,7 @@ def main() -> int:
     # 시장 지정 시 단일 섹션, 미지정 시 시장별 분리 (점수 체계가 달라 한 랭킹에 못 섞음)
     markets = [args.market] if args.market else ["US", "KR", "CRYPTO"]
     print("=" * 90)
-    print(f" 전수 스캔 — 저평가 상위" + (f" [{args.sector}]" if args.sector else ""))
+    print(" 전수 스캔 — 점수 상위 (시장 내 상대 점수)" + (f" [{args.sector}]" if args.sector else ""))
     print("=" * 90)
     for mkt in markets:
         rows = universe.scan(market=mkt, limit=args.top,
@@ -112,8 +125,9 @@ def main() -> int:
         if not rows:
             print("  (해당 없음)")
         else:
-            _print_rows(rows)
+            _print_rows(rows, mkt)
     print("\n" + "=" * 90)
+    print(f" {DISCLAIMER}")
     return 0
 
 
