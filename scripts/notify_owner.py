@@ -67,6 +67,9 @@ def format_failure(alias: str, unit: str, status: dict[str, str], tail: str, now
         f"시각: {now:%Y-%m-%d %H:%M} KST",
     ]
     if tail:
+        # 마스킹을 '먼저' — 줄 절단(MAX_LINE) 경계에 걸친 키는 앞부분만 남아 전체 문자열 치환에
+        # 안 걸리고 접두부가 DM 으로 샌다 (SEC-01). 마지막 mask_secrets 는 이중 안전망.
+        tail = mask_secrets(tail)
         lines.append("--- 최근 로그 ---")
         lines += [ln[:MAX_LINE] for ln in tail.splitlines()[-TAIL_LINES:]]
     lines.append(f"조치: journalctl -u {unit} -n 50 --no-pager")

@@ -41,7 +41,8 @@ jobs:
           cache: pip
           cache-dependency-path: requirements.lock
 
-      # 서버와 같은 버전 고정 세트(requirements.lock) + libsql(hosting) 포함 → libsql 회귀 테스트 2개도 실행
+      # 버전 고정 세트(requirements.lock) + libsql(hosting) 포함 → libsql 회귀 테스트 2개도 실행.
+      # 서버 .venv 가 이 lock 과 같다는 보장은 없음 — autopull 의 lock_drift 점검이 불일치를 소유자에게 알림.
       - name: Install (locked)
         run: |
           pip install -r requirements.lock

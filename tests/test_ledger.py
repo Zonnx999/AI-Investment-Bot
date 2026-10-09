@@ -822,6 +822,23 @@ def test_cli_snapshot_db_error_exit_2(fresh_db, monkeypatch, capsys):
     assert "실패 — DB 오류" in capsys.readouterr().out
 
 
+def test_cli_refuses_when_storage_degraded(fresh_db, monkeypatch, capsys):
+    """RVOPS-02: 초기 pull 타임아웃 강등(빈 오프라인 파일)이면 score 가 '원장 비어 있음 → 생략'
+    exit 0 으로 실패를 숨기지 않고, 어떤 명령도 실행하지 않은 채 exit 3."""
+    import scripts.ledger as cli
+
+    class _Degraded:
+        init_sync = "timeout"
+
+    called = []
+    monkeypatch.setattr(ledger, "get_storage", lambda: _Degraded())
+    monkeypatch.setattr(ledger, "score", lambda *a, **k: called.append("score") or {})
+    for argv in (["score"], ["report", "us"], ["backfill", "--confirm"]):
+        assert cli.main(argv) == cli.EXIT_DEGRADED
+    assert called == []
+    assert "저장소 강등" in capsys.readouterr().err
+
+
 def test_snapshot_reconstructed_guard(fresh_db):
     _make_screened(updated="2026-10-05T01:00:00+00:00")       # 재점수됨
     res = ledger.snapshot_reconstructed()

@@ -308,6 +308,46 @@ def test_diff_lists_reasons_filter_score_rank():
     assert d.changed and d.swaps == []
 
 
+def _mc(row, mcap):
+    return ScanRow(**{**row.__dict__, "market_cap": mcap})
+
+
+def test_diff_lists_sector_cap_reason_not_rank():
+    """RVM-01: 같은 업종 상한으로 건너뛴 종목(점수는 6위 안)은 '순위 밖' 이 아니라 선정 규칙 사유.
+    상한 사유가 소폭 점수 하락보다 우선하고, 재보강 누락 행은 그 사유로."""
+    fin = "Financial Services"
+    picks = [_mc(_row("CALM", "c", 92, 1, 1, "US", "Consumer Defensive"), 9e9),
+             _mc(_row("HG", "h", 88, 1, 1, "US", fin), 8e9),
+             _mc(_row("EOG", "e", 86, 1, 1, "US", "Energy"), 7e9),
+             _mc(_row("MGR", "m", 86, 1, 1, "US", fin), 6e9),
+             _mc(_row("SM2", "s", 86, 1, 1, "US", "Energy"), 5e9),
+             _mc(_row("VSNT", "v", 84, 1, 1, "US", "Industrials"), 4e9)]
+    prev = _prev(("CALM", 92), ("HG", 88), ("EOG", 86), ("AFGE", 86), ("GONE", 80), ("OLD", 95))
+    dropped_rows = {"AFGE": _mc(_row("AFGE", "a", 85, 1, 1, "US", fin), 3e9),
+                    "GONE": _mc(_row("GONE", "g", 80, 1, 1, "US", fin), 2e9),
+                    "OLD": _mc(_row("OLD", "o", 95, 1, 1, "US", "Tech"), 1e9)}
+    reasons = dg.skip_reasons("US", picks, dropped_rows, lagging_syms=["OLD"])
+    assert reasons == {"AFGE": dg.REASON_SECTOR_CAP, "OLD": dg.REASON_LAGGING}
+    d = dg.diff_lists(prev, picks, dropped_rows, prev_date="2026-10-07", reasons=reasons)
+    assert {x.symbol: x.reason for x in d.dropped} == {
+        "AFGE": "선정 규칙(같은 업종 최대 2개)", "GONE": "순위 밖",
+        "OLD": "점수 갱신 누락 (재보강 실패)"}
+    text = "\n".join(dg.render_candidates("US", [dg.PickView(row=r, kind="keep") for r in picks], d))
+    assert "AFGE 탈락 — 선정 규칙(같은 업종 최대 2개)" in text and "순위 밖" in text
+
+
+def test_skip_reasons_kr_holding_cap_and_rank_boundary():
+    """KR 지주사 상한 — 마지막 선정보다 정렬 키가 앞인 지주사만 상한 사유. 뒤면 진짜 '순위 밖'."""
+    picks = [_mc(_row("H1", "A홀딩스", 95, 1, 1), 9e12), _mc(_row("H2", "B지주", 94, 1, 1), 8e12),
+             _mc(_row("N1", "삼성전자", 90, 1, 1), 7e12)]
+    rows = {"H3": _mc(_row("H3", "C홀딩스", 93, 1, 1), 6e12),
+            "H4": _mc(_row("H4", "D홀딩스", 90, 1, 1), 1e12),        # 동점이지만 시총이 뒤 → 순위 밖
+            "N2": _mc(_row("N2", "현대차", 92, 1, 1), 5e12)}         # 지주사 아님 → 사유 모름
+    assert dg.skip_reasons("KR", picks, rows, top_n=3) == {"H3": dg.REASON_HOLDING_CAP}
+    # 선정이 top_n 을 못 채웠으면 남은 적격 지주사는 전부 상한으로 빠진 것
+    assert dg.skip_reasons("KR", picks, rows, top_n=6)["H4"] == dg.REASON_HOLDING_CAP
+
+
 def test_diff_lists_tie_swap_is_not_a_change():
     """탈락·신규의 total_score 가 같으면(시총 tie-break) '↔ 동점 교체' — 판정 카운트 제외."""
     prev = _prev(("A", 90), ("B", 90))
@@ -596,13 +636,14 @@ def fresh_db(tmp_path, monkeypatch):
 
 
 def _wire(monkeypatch, *, picks, prev=(), starts=None, entries=None, summary=None,
-          report=None, fresh=None, metrics=None, dd_state=None):
+          report=None, fresh=None, metrics=None, dd_state=None, lagging=None):
     """assemble_daily_digest 의 외부 경계 전부 스텁."""
     import src.ledger as ledger_mod
     import src.signals as sig
     import src.universe as uni
 
     monkeypatch.setattr(uni, "pick_top", lambda market, n=6, **k: list(picks))
+    monkeypatch.setattr(uni, "lagging_rows", lambda market, min_total=0, limit=50: list(lagging or []))
     monkeypatch.setattr(uni, "freshness", lambda market="US": fresh or
                         {"fund_asof": "2026-10-05", "price_asof": "2026-10-07", "age_days": 3})
     monkeypatch.setattr(uni, "lookup", lambda s, market=None: None)
@@ -682,6 +723,33 @@ def test_assemble_stale_scores_warn_and_hold(fresh_db, monkeypatch):
     assert b2.record_ledger is False and not b2.hold          # 보류 섹션이지만 발송은 함
 
 
+def test_assemble_one_lagging_row_does_not_hold_market(fresh_db, monkeypatch):
+    """RVQ-1: 재보강에 실패한 1행(옛 점수·옛 날짜)이 상위 점수여도 시장 전체가 '후보 보류' 가
+    되지 않는다 — 그 행은 후보에서 빠지고 소유자 상세에만 '재보강 누락' 으로 남는다 (실제 DB 경로)."""
+    import src.universe as uni
+
+    real = {k: getattr(uni, k) for k in ("pick_top", "freshness", "lagging_rows")}
+    conn = uni._conn()
+    seeds = [("SM", 99, "2026-09-19", "Energy")] + [
+        (f"A{i}", 90 - i, "2026-10-03", f"S{i}") for i in range(6)]
+    for i, (sym, total, day, sector) in enumerate(seeds):
+        uni._upsert_universe_row(conn, symbol=sym, market="US", name=f"{sym} Inc", sector=sector,
+                                 industry="x", price=50.0, market_cap=1e10 - i, dividend_yield=0.0)
+        conn.execute("UPDATE screened SET enriched=1, total_score=?, value_score=?, health_score=?, "
+                     "updated_at=? WHERE symbol=? AND market='US'",
+                     (total, total, total, f"{day}T01:30:00+00:00", sym))
+    conn.commit()
+    _wire(monkeypatch, picks=[], report=_report(market="US"))
+    for k, fn in real.items():
+        monkeypatch.setattr(uni, k, fn)
+    b = dg.assemble_daily_digest("us", now=NOW_US)
+    assert [str(p.symbol) for p in b.picks] == [f"A{i}" for i in range(6)]
+    assert b.score_asof == "2026-10-03" and b.record_ledger and not b.hold
+    assert "후보 보류" not in b.text and "주간 갱신 지연" not in b.text
+    assert "재보강 누락 종목" in b.health.optional_failures
+    assert any("재보강 누락으로 후보 제외 1종목" in x and "SM 99 (09-19)" in x for x in b.owner_extra)
+
+
 def test_assemble_held_day_verdict_is_neutral_even_if_list_differs(fresh_db, monkeypatch):
     """D1 수용: 점수 16일 전 + 직전 원장과 다른 picks → 첫 줄에 매수/탈락/기준 수립 없음, '후보 보류' 포함."""
     rows16 = [ScanRow(**{**r.__dict__, "fund_asof": "2026-09-22"}) for r in KR_ROWS]
@@ -711,7 +779,8 @@ def test_assemble_held_day_verdict_is_neutral_even_if_list_differs(fresh_db, mon
 
 def test_assemble_since_pct_split_safe_and_anomaly_guard(fresh_db, monkeypatch):
     """D2 수용: 진입 후 2:1 분할 — 저장 entry_px 100(분할 전), 프레임 adj 는 50→55 → +10%, dd10 미발화.
-    |선정 후| > 60% 는 이상치 — 표시 52주 위치·dd10 미발화·소유자 상세."""
+    |선정 후| > 60% 는 이상치 — 표시 52주 위치·소유자 상세. 하락 이상치는 침묵 대신 '확인 필요'
+    1회 알림(RVQ-3: 진짜 급락일 수 있음) — 같은 시작일이면 재발화 없음."""
     rows = KR_ROWS[:2]
     prev = _prev(*[(r.symbol, r.total_score) for r in rows])
     split_m = dg.PriceMetrics(price=55.0, asof="2026-10-07", adj_last=55.0, vs_ma200_pct=-5.0,
@@ -729,18 +798,44 @@ def test_assemble_since_pct_split_safe_and_anomaly_guard(fresh_db, monkeypatch):
     lines = b.text.splitlines()
     assert any(ln.startswith("009970 ") and "선정 후 +10.0%" in ln for ln in lines)
     assert any(ln.startswith("007700 ") and "52주 고점比 -70%" in ln and "선정 후" not in ln for ln in lines)
-    assert b.dd10_new == {} and b.verdict.label == "없음"
+    assert b.dd10_new == {"007700": "2026-07-13"} and b.verdict.label == "리스크 점검 1"
+    assert "F&F홀딩스 -70% (확인 필요)" in b.verdict.reasons
+    assert "⚠️ F&F홀딩스 선정 후 -70.0% — 분할·데이터 오류 가능, 가격 확인 필요 (1회 알림)" in b.text
     assert any("선정 후 수익률 이상치 007700 (-70.0%" in x for x in b.owner_extra)
     # 고정 키 — 소유자 DM signature 에 들어가 처음 나타난 날 1회 알림 (구독자 상태 줄에는 안 나감)
     assert "선정 후 수익률 이상치" in b.health.optional_failures
     assert "이상치" not in (b.health.status_line(NOW_KR) or "")
     assert b.owner_extra is b.health.notes                     # D4: 상세는 health.notes 로 흘러간다
+    # 같은 진입(시작일)이 이미 알림 상태에 있으면 재발화 없음 (1회성)
+    _wire(monkeypatch, picks=rows, prev=prev,
+          starts={"009970": "2026-07-13", "007700": "2026-07-13"},
+          entries={"009970": dict(ent), "007700": dict(ent)},
+          metrics={"009970": split_m, "007700": bad_m}, dd_state={"KR": {"007700": "2026-07-13"}})
+    b1 = dg.assemble_daily_digest("kr", now=NOW_KR)
+    assert b1.dd10_new == {} and b1.verdict.label == "없음"
     # 창 밖 진입(프레임이 진입일을 못 덮음) → 저장 entry_px 그대로 (소급 위험은 채점기와 같은 폴백)
     old_ent = {"entry_px": 50.0, "entry_date": "2025-01-02", "first_sent_date": "2025-01-02"}
     _wire(monkeypatch, picks=rows[:1], prev=prev[:1], starts={"009970": "2025-01-02"},
           entries={"009970": old_ent}, metrics={"009970": split_m})
     b2 = dg.assemble_daily_digest("kr", now=NOW_KR)
     assert "선정 후 +10.0%" in b2.text
+
+
+def test_assemble_upside_anomaly_stays_silent(fresh_db, monkeypatch):
+    """RVQ-3 경계: 상승 쪽 이상치(+80%)는 알림 대상 아님 — 표시 제외·소유자 상세만."""
+    rows = KR_ROWS[:1]
+    prev = _prev(("009970", 92))
+    idx = pd.bdate_range("2026-07-13", periods=60)
+    up_m = dg.PriceMetrics(price=180.0, asof="2026-10-07", adj_last=180.0, vs_ma200_pct=5.0,
+                           dd_52w_pct=0.0, mdd_1y_pct=-5.0, vol_pct=30.0,
+                           adj_close=pd.Series([100.0] * 59 + [180.0], index=idx))
+    _wire(monkeypatch, picks=rows, prev=prev, starts={"009970": "2026-07-13"},
+          entries={"009970": {"entry_px": 100.0, "entry_date": "2026-07-13",
+                              "first_sent_date": "2026-07-13"}},
+          metrics={"009970": up_m})
+    b = dg.assemble_daily_digest("kr", now=NOW_KR)
+    assert b.dd10_new == {} and b.verdict.label == "없음"
+    assert any("선정 후 수익률 이상치 009970 (+80.0%" in x for x in b.owner_extra)
 
 
 def test_assemble_entry_must_match_inclusion_round_exactly(fresh_db, monkeypatch):

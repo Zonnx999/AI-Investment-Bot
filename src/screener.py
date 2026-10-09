@@ -313,14 +313,19 @@ def health_scorecard(metrics: dict, *, is_fin: bool = False) -> ScoreCard:
     # 순현금(EBITDA>0, 우량) vs 적자 EBITDA(부실). 후자에 만점을 주는 역설(§4.10 #5)을
     # 막기 위해 evToEBITDA 부호로 EBITDA 부호를 판별(EV>0 가정). 판별 불가(결측)면
     # 보수적으로 0점 — 미확인 순현금에 만점을 주지 않는다.
+    # 정확히 0 도 같은 갈래 (RVQ-2): FMP 는 결측을 0 으로 주므로 nde==0 은 '순부채 0' 과
+    # '데이터 없음' 을 구분 못 한다. EBITDA>0 이 확인될 때만 만점, 아니면 0점 —
+    # 결측(None/키 없음 → default 10.0x → 0점) 과 일관.
     nde_detail = f"{nde:.1f}x"
-    if nde < 0:
-        if _safe(metrics, "evToEBITDA", 0.0) > 0:        # EBITDA>0 → 진짜 순현금
+    if nde <= 0:
+        if _safe(metrics, "evToEBITDA", 0.0) > 0:        # EBITDA>0 → 진짜 순현금/무차입
             nde_pts = _clip(20.0 - nde * 2.5, 0, 20)
-            nde_detail = f"{nde:.1f}x (순현금)"
+            if nde < 0:
+                nde_detail = f"{nde:.1f}x (순현금)"
         else:                                            # EBITDA 적자/불명 → 만점 금지
             nde_pts = 0.0
-            nde_detail = f"{nde:.1f}x (EBITDA 적자/불명)"
+            nde_detail = (f"{nde:.1f}x (EBITDA 적자/불명)" if nde < 0
+                          else f"{nde:.1f}x (결측/EBITDA 적자)")
     else:
         nde_pts = _clip(20.0 - nde * 2.5, 0, 20)
 
