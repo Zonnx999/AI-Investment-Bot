@@ -195,15 +195,29 @@ ci_conclusion() {
         echo unknown
         return 0
     fi
+    # 응답 형태가 기대와 다르면(최상위 비-dict·check_runs 비-list·원소 비-dict) 예외 종료 대신 'unknown'
+    # (set -e 로 스크립트가 죽어 15분마다 OnFailure DM 이 가는 것 방지). GitHub Actions 앱의 체크만 인정
+    # (다른 앱이 같은 이름의 체크를 올려 게이트를 속이는 것 방지).
     "$PY" -c '
 import json, sys
 try:
-    runs = json.loads(sys.stdin.read()).get("check_runs") or []
+    data = json.loads(sys.stdin.read())
 except ValueError:
     print("unknown"); sys.exit(0)
+if not isinstance(data, dict) or not isinstance(data.get("check_runs"), list):
+    print("unknown"); sys.exit(0)
+if not all(isinstance(x, dict) for x in data["check_runs"]):
+    print("unknown"); sys.exit(0)
+def is_actions(x):
+    app = x.get("app")
+    return isinstance(app, dict) and app.get("slug") == "github-actions"
+def rid(x):
+    v = x.get("id")
+    return v if isinstance(v, int) and not isinstance(v, bool) else 0
+runs = [x for x in data["check_runs"] if is_actions(x)]
 if not runs:
     print("missing"); sys.exit(0)
-r = max(runs, key=lambda x: x.get("id", 0))
+r = max(runs, key=rid)
 if r.get("status") != "completed":
     print("pending")
 elif r.get("conclusion") == "success":
@@ -212,7 +226,7 @@ elif r.get("conclusion") in ("cancelled", "skipped", "neutral", "stale"):
     print("missing")
 else:
     print("failure")
-' <<<"$body"
+' <<<"$body" || echo unknown
 }
 
 # $1=deployed $2=remote → 범위 내 '마지막 코드 커밋' (비코드 경로 제외). 없으면 빈 문자열.

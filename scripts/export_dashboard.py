@@ -35,6 +35,7 @@ from zoneinfo import ZoneInfo
 
 from src.exceptions import InsufficientDataError, QuantBotError
 from src.findings import Finding, from_prediction, from_regime
+from src.http import mask_secrets
 from src.logger import get_logger
 from src.storage import DB_ERRORS, StorageError, get_storage
 
@@ -329,7 +330,7 @@ def export_regime() -> bool:
         summary = market_summary(period="6mo")
     except QuantBotError as e:
         logger.warning("시장 국면 조회 실패 — regime_data.json 에 빈 결과 기록: %s", e)
-        payload = {"generated_at": now_str, "error": str(e), "label": None, "panel": [], "correlations": {}}
+        payload = {"generated_at": now_str, "error": mask_secrets(str(e))[:200], "label": None, "panel": [], "correlations": {}}
         _write_json(DASHBOARD_DIR / "regime_data.json", payload)
         return False
 
@@ -337,7 +338,7 @@ def export_regime() -> bool:
         data = regime_to_dict(summary)
     except Exception as e:  # noqa: BLE001 — pandas 직렬화 에러 최후 방어
         logger.warning("시장 국면 직렬화 실패: %s", e, exc_info=True)
-        payload = {"generated_at": now_str, "error": str(e), "label": None, "panel": [], "correlations": {}}
+        payload = {"generated_at": now_str, "error": mask_secrets(str(e))[:200], "label": None, "panel": [], "correlations": {}}
         _write_json(DASHBOARD_DIR / "regime_data.json", payload)
         return False
 

@@ -45,8 +45,10 @@ f=$SIMSTATE/ci_$sha; if [ -f "$f" ]; then c=$(cat $f); else c=none; fi
 case $c in
   none) echo '{"total_count":0,"check_runs":[]}';;
   apierr) exit 22;;
-  pending) echo '{"check_runs":[{"id":1,"name":"pytest","status":"in_progress","conclusion":null}]}';;
-  *) echo "{\"check_runs\":[{\"id\":1,\"name\":\"pytest\",\"status\":\"completed\",\"conclusion\":\"$c\"}]}";;
+  pending) echo '{"check_runs":[{"id":1,"name":"pytest","status":"in_progress","conclusion":null,"app":{"slug":"github-actions"}}]}';;
+  rawbody) cat "$SIMSTATE/body_$sha";;
+  otherapp) echo '{"check_runs":[{"id":1,"name":"pytest","status":"completed","conclusion":"success","app":{"slug":"evil-app"}}]}';;
+  *) echo "{\"check_runs\":[{\"id\":1,\"name\":\"pytest\",\"status\":\"completed\",\"conclusion\":\"$c\",\"app\":{\"slug\":\"github-actions\"}}]}";;
 esac
 """,
     "systemctl": r"""#!/bin/bash
@@ -222,6 +224,41 @@ def test_pending_or_unknown_ci_waits(sim, state):
     r = sim.run()
     assert r.returncode == 0
     assert sim.head() == deployed
+    assert "restart" not in sim.read("calls")
+
+
+@pytest.mark.parametrize("body", [
+    "[]",                                              # 최상위가 list
+    "null",
+    '"x"',
+    '{"check_runs": "oops"}',                          # check_runs 가 list 아님
+    '{"message": "API rate limit exceeded"}',          # check_runs 없음
+    '{"check_runs": [1, "a"]}',                        # 원소가 dict 아님
+    "not json at all",
+    '{"check_runs": [{"id": "x", "status": "completed", "conclusion": "success"}, 5]}',
+])
+def test_malformed_ci_response_is_unknown_not_crash(sim, body):
+    """SEC-05 — 비정상 JSON 이어도 스크립트가 죽지 않고(exit 0) 배포만 보류."""
+    deployed = sim.mark_deployed()
+    sha = sim.commit({"src/a.py": "v = 2\n"})
+    sim.ci(sha, "rawbody")
+    sim.set_text(f"body_{sha}", body)
+    r = sim.run()
+    assert r.returncode == 0, r.stderr
+    assert sim.head() == deployed
+    assert "restart" not in sim.read("calls")
+    assert sim.read("dm") == ""
+    assert "Traceback" not in r.stderr
+
+
+def test_check_from_other_app_is_ignored(sim):
+    """다른 앱이 같은 이름('pytest') 으로 올린 success 체크는 게이트로 인정하지 않는다."""
+    deployed = sim.mark_deployed()
+    sha = sim.commit({"src/a.py": "v = 2\n"})
+    sim.ci(sha, "otherapp")
+    r = sim.run()
+    assert r.returncode == 0
+    assert sim.head() == deployed                      # 배포 안 됨
     assert "restart" not in sim.read("calls")
 
 

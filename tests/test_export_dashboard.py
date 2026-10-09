@@ -521,3 +521,52 @@ def test_index_html_vocabulary_and_banners():
     assert "신뢰</span>" not in html
     assert "판정 보류" in html and "isHold" in html
     assert "투자 자문 아님, 모든 결정은 본인 책임." in html
+
+
+# ---------------------------------------------------------------------------
+# SEC-02 — 공개 regime_data.json 의 error 필드는 마스킹 + 길이 제한
+# ---------------------------------------------------------------------------
+
+def test_regime_error_field_is_masked_and_truncated(export_env, monkeypatch, fake_fmp_key):
+    import src.macro_analyzer as ma
+    from src.exceptions import DataFetchError
+
+    export_env.mkdir(parents=True, exist_ok=True)
+
+    def boom(period="6mo"):
+        raise DataFetchError(f"https://x/?apikey={fake_fmp_key} 실패 " + "가" * 500)
+
+    monkeypatch.setattr(ma, "market_summary", boom)
+    assert ed.export_regime() is False
+    payload = json.loads((export_env / "regime_data.json").read_text(encoding="utf-8"))
+    assert fake_fmp_key not in payload["error"]
+    assert "***REDACTED***" in payload["error"]
+    assert len(payload["error"]) <= 200
+
+
+def test_regime_serialization_error_is_masked(export_env, monkeypatch, fake_fmp_key):
+    import src.macro_analyzer as ma
+
+    export_env.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(ma, "market_summary", lambda period="6mo": object())
+
+    def boom(summary):
+        raise ValueError(f"bad {fake_fmp_key}")
+
+    monkeypatch.setattr(ed, "regime_to_dict", boom)
+    assert ed.export_regime() is False
+    payload = json.loads((export_env / "regime_data.json").read_text(encoding="utf-8"))
+    assert fake_fmp_key not in payload["error"]
+    assert "***REDACTED***" in payload["error"]
+
+
+def test_index_html_numeric_fields_use_helper():
+    """SEC-03 — esc() 없이 보간되던 숫자 필드는 num()/isNum() 헬퍼를 거친다."""
+    html = _INDEX_HTML.read_text(encoding="utf-8")
+    assert "function num(v)" in html and "function isNum(v)" in html
+    for f in ("health_score", "value_score", "total_score", "rank_score", "volatility_score"):
+        assert f"num(it.{f})" in html
+        assert f"it.{f} ??" not in html            # 원시 보간 금지
+    assert "isNum(p.best_lag_months)" in html and "${p.best_lag_months}" not in html
+    assert "isNum(data.available)" in html and "isNum(data.score)" in html
+    assert "typeof p.direction === 'string'" in html
