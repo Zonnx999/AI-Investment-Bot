@@ -30,7 +30,12 @@ import pandas as pd
 
 from src.exceptions import ConfigError, DataFetchError, InsufficientDataError
 from src.logger import get_logger
-from src.screener import calculate_health_score, calculate_value_score, latest_fundamentals
+from src.screener import (
+    calculate_health_score,
+    calculate_value_score,
+    latest_fundamentals,
+    manual_fin_flag,
+)
 from src.storage import StorageError, get_storage
 from src.utils import TRADING_DAYS_PER_YEAR, close_series
 
@@ -809,8 +814,10 @@ def factor_scores(ticker: str) -> FactorScores:
     except DataFetchError as e:
         notes.append(f"fundamentals 미가용 ({type(e).__name__}) — value/quality 점수 불완전")
 
-    value = calculate_value_score(quote, metrics)
-    quality = calculate_health_score(metrics)
+    # 유니버스 DB 와 같은 금융업 중립화 (RVQ-5) — 없으면 None → 기존 동작
+    is_fin = manual_fin_flag(ticker)
+    value = calculate_value_score(quote, metrics, is_fin=is_fin)
+    quality = calculate_health_score(metrics, is_fin=bool(is_fin))
     composite = round(
         momentum * COMPOSITE_WEIGHTS["momentum"]
         + value * COMPOSITE_WEIGHTS["value"]

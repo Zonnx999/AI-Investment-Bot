@@ -626,3 +626,76 @@ def test_score_total_is_int_and_bounded():
             v = value_scorecard(_GOLD["inputs"][sym], m, is_fin=is_fin)
             assert isinstance(h.total, int) and 0 <= h.total <= 100
             assert isinstance(v.total, int) and 0 <= v.total <= 100
+
+
+# ---------------- RVQ-5: 수동 경로 금융업 중립화 (유니버스 DB 와 같은 값) ----------------
+
+import pytest  # noqa: E402
+
+import src.storage as _storage_mod  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _isolated_storage(tmp_path, monkeypatch):
+    """manual_fin_flag 가 읽는 storage 싱글톤을 tmp DB 로 격리 (기본 data/ DB 접근 방지)."""
+    monkeypatch.setenv("QUANT_BOT_DB_PATH", str(tmp_path / "scr.db"))
+    monkeypatch.setattr(_storage_mod, "_storage", None)
+    yield
+    monkeypatch.setattr(_storage_mod, "_storage", None)
+
+
+def _seed_screened(symbol: str, sector: str, industry: str, market: str = "US") -> None:
+    conn = _storage_mod.get_storage().conn
+    conn.executescript(
+        "CREATE TABLE IF NOT EXISTS screened (symbol TEXT NOT NULL, market TEXT NOT NULL, "
+        "name TEXT, sector TEXT, industry TEXT, enriched INTEGER NOT NULL DEFAULT 0, "
+        "PRIMARY KEY (symbol, market));"
+    )
+    conn.execute(
+        "INSERT INTO screened (symbol, market, name, sector, industry, enriched) VALUES (?,?,?,?,?,1)",
+        (symbol, market, symbol, sector, industry),
+    )
+    conn.commit()
+
+
+_FIN_QUOTE = {"price": 100.0, "name": "Bank Co", "marketCap": 5e9, "lastDividend": 2.0}
+
+
+def test_manual_fin_flag_reads_universe_sector_industry():
+    from src.screener import manual_fin_flag
+
+    _seed_screened("BANKX", "Financial Services", "Banks - Regional")
+    _seed_screened("TECHX", "Technology", "Software")
+    assert manual_fin_flag("BANKX") is True
+    assert manual_fin_flag("bankx") is True          # 대소문자 무관
+    assert manual_fin_flag("TECHX") is False
+    assert manual_fin_flag("NOPE") is None           # DB 에 없음 → 기존 동작
+
+
+def test_manual_fin_flag_none_when_table_missing():
+    from src.screener import manual_fin_flag
+
+    assert manual_fin_flag("ANY") is None            # screened 테이블 자체가 없어도 예외 없이 None
+
+
+def test_screen_one_applies_fin_neutral_for_financial_symbol(monkeypatch):
+    from src import screener
+
+    _seed_screened("BANKX", "Financial Services", "Banks - Regional")
+    monkeypatch.setattr("src.screener.fetch_quote", lambda t: dict(_FIN_QUOTE))
+    monkeypatch.setattr("src.screener.latest_fundamentals", lambda t: dict(GOOD))
+    row = screener.screen_one("BANKX")
+    assert row["health_score"] == calculate_health_score(GOOD, is_fin=True)
+    assert row["value_score"] == calculate_value_score(_FIN_QUOTE, GOOD, is_fin=True)
+    # 중립화가 실제로 점수를 바꾸는 입력임을 보증 (테스트가 공회전 아님)
+    assert row["health_score"] != calculate_health_score(GOOD, is_fin=False)
+
+
+def test_screen_one_unchanged_when_symbol_not_in_universe(monkeypatch):
+    from src import screener
+
+    monkeypatch.setattr("src.screener.fetch_quote", lambda t: dict(_FIN_QUOTE))
+    monkeypatch.setattr("src.screener.latest_fundamentals", lambda t: dict(GOOD))
+    row = screener.screen_one("UNKNOWN")
+    assert row["health_score"] == calculate_health_score(GOOD)
+    assert row["value_score"] == calculate_value_score(_FIN_QUOTE, GOOD)
