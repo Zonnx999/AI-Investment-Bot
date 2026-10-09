@@ -1,10 +1,30 @@
-# Deployment — 상시 인터랙티브 봇 호스팅 (Phase 11b)
+# Deployment — 서버 운영 런북 (봇·다이제스트·재점수·자동 배포)
 
-상시 텔레그램 봇(`scripts/bot.py`)을 돌리는 **서버 운영 런북**. 이 Oracle 서버의 systemd 가
-상시 봇과 일일 다이제스트 발송(systemd timer, §5.1)을 **모두** 담당한다. GitHub Actions 예약
-schedule 은 비활성 — 비상시 `workflow_dispatch` 수동 발송 전용 (역할 분담은 §7).
+Oracle 서버의 systemd 가 **상시 봇, 일일 다이제스트 발송, 신호 원장 채점, 유니버스 주간 재점수, 코드 자동 배포**를 모두 담당한다.
+GitHub Actions 는 세 가지만 한다: **CI**(`ci.yml`, 푸시마다 pytest — 서버 배포의 게이트), **Dashboard Export**(`dashboard-export.yml`, 평일 09:30 KST 예약 — 대시보드 JSON 갱신 + Pages 배포),
+**Daily Digest**(`daily-digest.yml`, 예약 비활성 — 비상시 `workflow_dispatch` 수동 발송 전용).
+저장소는 **public** 이다(서버 clone 은 읽기 전용 deploy key, CI 결과 조회는 무인증 공개 API).
 
 > 민감정보(토큰/키/실IP)는 이 문서에 넣지 않음 — OCI 콘솔·`.env`·GitHub Secrets 에만.
+> 유닛 파일의 **원본은 저장소 `deploy/systemd/`** 이다. 서버의 `/etc/systemd/system/` 은 그 복사본 — 바꿀 때는 저장소를 먼저 고치고 다시 복사한다.
+> ⚠️ `deploy/` 만 바뀐 커밋은 autopull 이 CI 없이 반영하지만 **서버 유닛을 자동 설치하지는 않는다** (최소 권한 — 설치는 §5 절차로 수동).
+
+---
+
+## 0. 누가 무엇을 언제 돌리나 (실행 주체 표)
+
+| 무엇 | 어디서 | 언제 | 로컬 레플리카 | 실패 시 누가 아나 |
+|---|---|---|---|---|
+| 상시 봇 `quant-bot.service` | 서버 | 상시 (getUpdates 폴링 단독 소유) | `data/quant_bot.db` | `WatchdogSec=300` 이 얼어붙은 프로세스를 재시작. 반복 재시작은 알림 없음 → `systemctl show quant-bot -p NRestarts` |
+| 한국 다이제스트 `quant-digest-kr.timer` → `quant-digest@kr.service` | 서버 | 평일 08:30 KST | `data/digest_replica.db` | 종료코드 11/12/21/30 → `OnFailure` 소유자 DM. 10(부분 실패)·보류·경고는 앱이 직접 소유자 DM (§5.2) |
+| 미국 다이제스트 `quant-digest-us.timer` → `quant-digest@us.service` | 서버 | 평일 09:00 ET (DST 자동) | `data/digest_replica.db` | 위와 같음 |
+| 신호 원장 채점 (`scripts/ledger.py score`) | 서버 | 다이제스트 직후 `ExecStartPost` | 다이제스트와 같은 레플리카 | 실패는 무시(`-`) — 다음 런이 이어서 채점. 3일 넘게 못 갱신하면 성과 줄이 숨겨지고 `성적표 N일째 미갱신` 푸터 |
+| 유니버스 주간 재점수 `quant-universe.timer` | 서버 | 토 10:00 KST | `data/universe_replica.db` | `OnFailure` 소유자 DM + 종료코드(§5.4) |
+| (선택) KR 가격 갱신 `quant-kr-refresh.timer` | 서버 | 평일 08:10 KST (KR 다이제스트 20분 전) | `data/universe_replica.db` | `OnFailure` 소유자 DM |
+| 코드 자동 배포 `quant-autopull.timer` | 서버 | 15분마다 | (DB 없음) | `OnFailure` DM + CI 실패/대기/fetch 연속 실패/pip 실패 알림 (§6.1) |
+| Dashboard Export | GitHub Actions | 평일 09:30 KST (cron `30 0 * * 1-5` UTC, 수 시간 지연 가능) | 러너 임시 파일 | Actions 실패. **2026-07 이후 비활성(disabled_inactivity)** — 배포 순서에서 재활성화. 이제 `init_sync!="ok"`·빈 DB 이면 `::error::` 로 실패(덮어쓰기 거부) |
+| CI (`pytest` 잡) | GitHub Actions | 푸시·PR 마다 (docs/dashboard/README/CLAUDE.md 변경만이면 건너뜀) | 없음 (오프라인) | GitHub UI. autopull 이 결과를 조회해 배포 여부 결정 |
+| Daily Digest 워크플로 | GitHub Actions | 수동 전용 | 러너 임시 파일 | 사람이 직접 실행할 때만 |
 
 ---
 
@@ -24,151 +44,277 @@ ssh -i <private-key 경로> ubuntu@<PUBLIC_IP>
 ```
 - 인스턴스 생성 시 등록한 키페어의 private key 로 접속. 인바운드는 SSH(22)만 필요(폴링 봇=아웃바운드).
 
-## 3. 코드 (private repo → SSH Deploy Key)
-박스엔 **읽기 전용 deploy key** 로 클론돼 있음: `~/.ssh/github_deploy` (+ `~/.ssh/config` 의 `github.com` 매핑).
-→ `git pull/fetch` 가 이 키로 동작.
+## 3. 코드 (SSH Deploy Key)
+박스엔 **읽기 전용 deploy key** 로 클론돼 있음: `~/.ssh/github_deploy` (+ `~/.ssh/config` 의 `github.com` 매핑). → `git pull/fetch` 가 이 키로 동작.
 - 새 박스라면: `ssh-keygen -t ed25519 -f ~/.ssh/github_deploy -N ""` → 공개키를 GitHub repo **Settings → Deploy keys** 에 등록(write 미체크) → `git clone git@github.com:Zonnx999/AI-Investment-Bot.git`
 
 ## 4. 새 박스 부트스트랩
 ```
 sudo apt update && sudo apt install -y python3-venv python3-pip git
-# (deploy key 설정 후) git clone git@github.com:Zonnx999/AI-Investment-Bot.git
+git clone git@github.com:Zonnx999/AI-Investment-Bot.git
 cd AI-Investment-Bot
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[hosting]"
-cp .env.example .env && nano .env          # §8 키 입력
-# swap (1GB 박스):
-sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.lock
+.venv/bin/pip install --no-deps -e .
+cp .env.example .env
+nano .env
+sudo fallocate -l 2G /swapfile
+sudo chmod 600 /swapfile
+sudo mkswap /swapfile
+sudo swapon /swapfile
 echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 ```
+- `.env` 키는 §8. 이후 §5 의 유닛 설치로 이어진다. (`requirements.lock` 은 `[hosting]`=libsql 포함 — 서버와 CI 가 같은 버전 세트.)
 
-## 5. systemd 서비스 `quant-bot`
-서비스 파일 `/etc/systemd/system/quant-bot.service` — WorkingDirectory=repo, ExecStart=venv python `scripts/bot.py`, `Restart=always`, `RestartSec=5`, enabled(부팅 자동).
+## 5. systemd 유닛
 
-**⚠️ 워치독 필수 (2026-07-06 행 사고 재발 방지)**: libsql 쓰기는 GIL 을 쥔 채 원격 왕복하므로
-네트워크 블랙홀 시 프로세스가 '살아있지만 얼어붙음' — `Restart=always` 는 못 잡는다.
-봇이 매 루프 `WATCHDOG=1` 핑을 보내니 (`scripts/bot.py _sd_notify`) 유닛에 다음을 추가:
+### 5.1 설치 (유닛 원본 → 서버)
+`deploy/systemd/` 의 11개: `quant-bot.service` · `quant-digest@.service` · `quant-digest-kr.timer` · `quant-digest-us.timer` · `quant-autopull.service` · `quant-autopull.timer` ·
+`quant-alert@.service` · `quant-universe.service` · `quant-universe.timer` · (선택) `quant-kr-refresh.service` · `quant-kr-refresh.timer`.
+설치는 **백업 → 복사 → daemon-reload → restart → 확인 → 알림 시험** 순서 (배포 순서 §10 에서 한 줄씩 제공). 확인:
 ```
-[Service]
-Type=notify
-WatchdogSec=300
-NotifyAccess=main
+systemctl status quant-bot --no-pager
+systemctl list-timers --all --no-pager
+sudo systemctl start quant-alert@autopull.service
 ```
-핑이 300초 끊기면 systemd 가 죽이고 재시작 — offset 은 커밋된 지점부터라 텔레그램이
-미확인 업데이트를 재전달하므로 유실 없음. 적용: 유닛 수정 후 `sudo systemctl daemon-reload && sudo systemctl restart quant-bot`.
+마지막 줄은 `OnFailure` 알림 경로 시험 — 소유자 텔레그램에 `[quant-bot 실패] quant-autopull.service …` DM 이 오면 정상.
+
+### 5.2 봇 `quant-bot` — 상시 폴링, 워치독
+`Type=notify` · `NotifyAccess=main` · `WatchdogSec=300` · `TimeoutStartSec=180` · `Restart=always` · `RestartSec=10` + `RestartSteps=5`/`RestartMaxDelaySec=300`(재시작 백오프) · `OOMScoreAdjust=-200` · `QUANT_BOT_SYNC_TIMEOUT=60`.
+- 봇은 스키마 초기화(`ensure_owner`)·offset 읽기가 **끝난 뒤** `READY=1` 을 보내고, 매 루프 `WATCHDOG=1` 핑을 보낸다. 핑이 300초 끊기면 systemd 가 죽이고 재시작 — offset 은 커밋된 지점부터라 텔레그램이 미확인 업데이트를 재전달하므로 유실 없음.
+- libsql 쓰기는 GIL 을 쥔 채 원격 왕복하므로 네트워크 블랙홀 시 프로세스가 '살아있지만 얼어붙음' — `Restart=always` 는 못 잡고 워치독이 최종 안전망 (`CLAUDE.md §4.10 (18)`).
+- 초기 pull 이 타임아웃으로 오프라인 파일에 강등돼 뜨면 600초 응답만 하다가 `exit 3` 으로 자진 종료 → systemd 가 재시작해 Turso 를 다시 프로브. 강등 중 처리한 구독 요청은 그 파일에만 남아 버려질 수 있음(알려진 한계, `scripts/bot.py` docstring).
 ```
-sudo systemctl status quant-bot --no-pager     # 상태
-journalctl -u quant-bot -f                      # 실시간 로그
-sudo systemctl restart quant-bot                # 재시작
+sudo systemctl status quant-bot --no-pager
+journalctl -u quant-bot -f
+sudo systemctl restart quant-bot
 ```
 - `.env` 는 봇이 WorkingDirectory 에서 load_dotenv 로 자동 로드 (EnvironmentFile 불필요).
 
-### 5.1 일일 다이제스트 (systemd timer)
-스케줄 발송은 봇과 **별도 oneshot 프로세스**. libsql 레플리카 동시쓰기 충돌(`wal_insert_begin failed`)
-방지로 **전용 레플리카 경로**(`QUANT_BOT_DB_PATH=.../data/digest_replica.db`)를 씀 — 봇과 같은 Turso 로
-sync 되어 데이터는 일치.
-- 유닛: `quant-digest@.service`(템플릿 `%i`=시장, `Environment=QUANT_BOT_DB_PATH=...digest_replica.db`,
-  `ExecStart=... send_digest.py --no-sync --market %i`) + 타이머 2개.
-  **⚠️ `TimeoutStartSec=900` 를 [Service] 에 추가할 것** — `Type=oneshot` 의 기본
-  타임아웃은 무한이라, libsql 행(위 §5 참조) 시 유닛이 'activating' 에 영원히 붙잡혀
-  **이후 매일의 타이머 발화가 전부 조용히 무시됨** (다이제스트 무한 중단). 900초가
-  지나면 죽고 다음날 타이머는 정상 발화:
-  - `quant-digest-kr.timer`: `OnCalendar=Mon..Fri 08:30 Asia/Seoul`
-  - `quant-digest-us.timer`: `OnCalendar=Mon..Fri 09:00 America/New_York`
-  - systemd OnCalendar 의 **타임존 지정**으로 KST/ET·DST 자동 처리 (UTC 게이트 불필요), `Persistent=true`.
-- 관리:
-  ```
-  systemctl list-timers 'quant-digest-*'         # 다음 발송 시각
-  sudo systemctl start quant-digest@kr.service    # 즉시 1회 발송(테스트)
-  journalctl -u quant-digest@kr.service -n 30
-  ```
-- ⚠️ `.env` 에 `FRED_API_KEY`·`FMP_API_KEY` 필요(US 팩터·국면). KR 은 키 없이도 동작.
-- GitHub Actions 예약 schedule 은 **비활성**(중복 발송 방지) — 비상시 workflow_dispatch 수동.
+### 5.3 일일 다이제스트 `quant-digest@.service` (템플릿 `%i` = kr | us)
+스케줄 발송은 봇과 **별도 oneshot 프로세스**. 전용 레플리카 `data/digest_replica.db`(봇과 같은 Turso 로 sync 되어 데이터는 일치, 파일은 분리 — `wal_insert_begin failed` 방지).
+- `ExecStart` = `flock -w 600 data/.digest.lock … send_digest.py --no-sync --market %i` (kr/us 가 같은 레플리카를 쓰므로 직렬화). `--no-sync` 필수 — 봇과 동시에 getUpdates 폴링하면 offset 경합으로 메시지 분실.
+- `ExecStartPost` = 같은 flock 으로 `timeout 180 … scripts/ledger.py score` — 발송 지연 0, `-` 접두라 실패는 무시.
+- `SuccessExitStatus=10` · `TimeoutStartSec=900`(libsql 행 시 유닛이 'activating' 에 붙잡혀 이후 타이머가 전부 무시되는 것 방지) · `QUANT_BOT_SYNC_TIMEOUT=180` · `OnFailure=quant-alert@digest-%i.service`.
+- 타이머: `OnCalendar=Mon..Fri 08:30 Asia/Seoul` / `Mon..Fri 09:00 America/New_York` — **타임존 지정**으로 KST/ET·DST 자동 처리, `Persistent=true`.
+
+**종료코드** (`src/digest.py` 상수, `scripts/send_digest.py`):
+| 코드 | 의미 | 유닛 | 소유자 알림 |
+|---|---|---|---|
+| 0 | 전원 발송 (또는 dry-run) | 성공 | 변화·경고 있을 때만 앱이 평문 DM |
+| 10 | 일부 전송 실패 | 성공(`SuccessExitStatus`) | 앱이 평문 DM |
+| 11 | 전원 전송 실패 | 실패 | `OnFailure` DM |
+| 12 | 수신자 0 | 실패 | `OnFailure` DM |
+| 20 | 발송 보류 (Turso 강등·후보 0) + 소유자 DM 완료 | 실패 | 앱이 DM → `notify_owner` 가 중복 생략 |
+| 21 | 보류 + 소유자 DM 도 실패 | 실패 | `OnFailure` DM |
+| 30 | 필수 설정 누락 (`ConfigError`) | 실패 | `OnFailure` DM |
+| 1 | 예기치 못한 크래시 | 실패 | `OnFailure` DM |
+
+**헬스 DM**: 정상이고 직전 실행과 문제 목록(`signature`)이 같으면 DM 없음 — 다이제스트 자체가 하트비트. DM 이 가는 경우: 발송 보류 · 발송 실패 · 문제 목록 변화(유니버스 8일↑ 노후, 가격 3영업일↑ 노후, 국면 지표 n/3, Turso 강등, LLM 퇴역, 가격 조회 실패, Markdown 평문 폴백, 원장 기록 실패, 상태 저장 실패).
+`QUANT_BOT_LEDGER_LINE=owner` 이면 성과 줄이 구독자 대신 소유자 DM 에 실리므로 매 런 DM.
+**발송 후 순서**: 브로드캐스트 → (sent ≥ 1 일 때만) `commit_signal_state` → `ledger.record_send`(후보 보류일은 미기록) → 헬스 state → `sync()` → 소유자 DM.
+
+```
+systemctl list-timers 'quant-digest-*'
+sudo systemctl start quant-digest@kr.service
+journalctl -u quant-digest@kr.service -n 30
+```
+- ⚠️ `.env` 에 `FRED_API_KEY`·`FMP_API_KEY` 필요(US 팩터·국면). KR 은 DART/KRX 키가 재점수에 필요.
+- 점검용 미리보기(발송·쓰기 없음): 서버에서 `QUANT_BOT_DB_PATH=/tmp/chk.db`(사본)로 `scripts/send_digest.py --market kr --dry-run`. 운영 레플리카를 직접 열지 말 것(§9).
+
+### 5.4 유니버스 주간 재점수 `quant-universe.service` + `.timer`
+`build_universe.py --max-age 6` (discover + enrich, 7일 신선도 6일로 여유) · `QUANT_BOT_CACHE=off`(원격 캐시 쓰기 0) · `QUANT_BOT_SYNC_TIMEOUT=300` · 전용 레플리카 `data/universe_replica.db` + `flock data/.universe.lock` ·
+`TimeoutStartSec=4h` · `MemoryMax=600M`(봇보다 먼저 OOM 대상, `OOMScoreAdjust=300`) · `Nice=10` · `IOSchedulingClass=idle` · 타이머 `Sat 10:00 Asia/Seoul`, `Persistent=true`. `[Install]` 이 없으므로 `quant-universe.service` 는 직접 enable 하지 않고 **타이머만 enable**.
+- 재점수 직전·직후에 유니버스 스냅샷(`universe_snapshots`)이 저장됨(훅) — 원장의 순위 IC 에 쓰임.
+- 종료코드: 0 정상 / 2 원격 DB 필요한데 연결 불가 / 5 보강 중단(연속 429 5회·인증 오류)·실패율 20% 초과·`--kr-refresh` 발굴 0건 → 모두 `OnFailure` DM.
+- **첫 실행은 수동**으로 소요 시간·메모리를 확인(예상 25~30분): `sudo systemctl start --no-block quant-universe.service` 후 `journalctl -u quant-universe -f`, `systemctl show quant-universe -p MemoryPeak -p ExecMainStatus`.
+- 재점수 도중엔 autopull 이 코드를 교체하지 않는다(다음 주기로 미룸).
+
+### 5.5 (선택) KR 가격 갱신 `quant-kr-refresh`
+평일 08:10 KST — KRX 일별 2콜로 KR 가격·시총 갱신 + 오프라인 PER/PBR 재계산(DART 0콜). KR 아침 메시지의 가격 기준일을 신선하게 하려는 선택 기능. 설치하지 않으면 KR 가격 기준일은 주간 재점수 때만 갱신(`⚙️ 상태` 줄에 가격 노후가 뜰 수 있음).
+`Persistent=false`(놓친 날은 건너뜀). 재점수와 같은 레플리카·락이라 서로 직렬화된다.
+
+### 5.6 소유자 알림 `quant-alert@.service`
+`OnFailure=quant-alert@<별칭>.service` 대상 (`bot`·`digest-kr`·`digest-us`·`universe`·`kr-refresh`·`autopull`). `scripts/notify_owner.py --failed-unit <별칭>` 이 실패 유닛·종료코드·journal 꼬리 12줄을 **평문**(`parse_mode=None`)으로 소유자에게 1통. 키는 `mask_secrets` 로 가림, 3,800자 절단.
+DB/레플리카를 열지 않아(Turso 장애 중에도 알림은 가고, 레플리카 충돌이 없음) 항상 exit 0.
+
+### 5.7 `QUANT_BOT_SYNC_TIMEOUT` 와 유닛 타임아웃 (초기 pull 이 오래 걸리는 정도에 맞춤)
+| 대상 | `QUANT_BOT_SYNC_TIMEOUT` | 유닛 `TimeoutStartSec` / 비고 |
+|---|---|---|
+| 봇 | 60 | 180, `WatchdogSec=300` |
+| 다이제스트 | 180 | 900 |
+| 재점수 | 300 | 4h |
+| KR 가격 갱신 | 300 | 1200 |
+| GitHub Actions (export·수동 digest) | 300 | 워크플로 `timeout-minutes: 20` |
+| 코드 기본값 (노트북 등) | 20 | 레플리카 초기 풀이 60–120s+ 걸리면 강등됨 → `QUANT_BOT_SYNC_TIMEOUT=240` |
 
 ## 6. 업데이트 배포 / 복구
-**코드 업데이트:**
-```
-cd ~/AI-Investment-Bot && git fetch origin && git reset --hard origin/main
-sudo systemctl restart quant-bot
-```
-- editable 설치라 `src/` 변경 자동 반영. **새 의존성**이 추가됐으면 `source .venv/bin/activate && pip install -e ".[hosting]"` 재실행.
-- `git reset --hard` 안전: `.env` 는 미추적이라 보존됨.
 
-### 6.1 자동 업데이트 (server auto-pull timer)
-위 수동 절차를 systemd timer 로 자동화. `scripts/server_autopull.sh` 가 주기적으로 `git fetch`
-후 origin/main 이 앞설 때만 reset + (pyproject 변경 시) pip + 봇 재시작. 변경 없으면 아무 것도
-안 함. **ubuntu 유저로 실행**(deploy key 접근), `restart` 만 passwordless sudo.
-
-1) restart 전용 passwordless sudo — `sudo visudo -f /etc/sudoers.d/quant-autopull`:
+### 6.1 자동 배포 (autopull) — CI 게이트 + 롤백
+`scripts/server_autopull.sh` 가 15분마다 `git fetch` 후 `origin/main` 이 앞설 때 배포한다. **ubuntu 유저**로 실행(deploy key 접근), `restart` 만 passwordless sudo:
 ```
-ubuntu ALL=(root) NOPASSWD: /usr/bin/systemctl restart quant-bot
+sudo visudo -f /etc/sudoers.d/quant-autopull
 ```
-(경로는 `which systemctl` 로 확인 — 보통 `/usr/bin/systemctl`)
+내용 한 줄: `ubuntu ALL=(root) NOPASSWD: /usr/bin/systemctl restart quant-bot` (경로는 `which systemctl` 로 확인).
+- **배포 완료 표식**은 git HEAD 가 아니라 `data/.deployed_sha`. 부분 실패하면 다음 주기에 자동 재시도.
+- **코드가 바뀐 커밋**(비코드 경로 = `dashboard/`·`docs/`·`tests/`·`deploy/`·`.github/`·`README.md`·`CLAUDE.md` 외)은 GitHub **check-run `pytest`**(CI 잡)가 `success` 일 때만 배포.
+  결과를 모르면(API 오류·진행 중·레이트리밋) 배포 안 함. 실패 → 소유자 DM 1회(sha 당) 후 서버는 직전 버전 유지. 결과가 2시간 넘게 없으면 DM 1회.
+  비코드만 바뀐 커밋은 CI 없이 반영하고 재시작도 안 함. `[skip ci]` 데이터 커밋이 끼면 범위 안 '마지막 코드 커밋'의 CI 로 판정.
+- **의존성**: `requirements.lock` 이 바뀐 커밋이면 코드 교체 **전에** `pip install -r`(실패하면 코드 미반영 + DM 1회, 15분마다 재시도). `pyproject.toml` 변경 시엔 editable 재등록만.
+- **롤백**: `reset --hard` → `sudo systemctl restart quant-bot` → 60초 대기 후 active 이고 `NRestarts` 불변이면 `.deployed_sha` 갱신. 실패하면 직전 sha 로 `reset --hard` + 재시작 + `data/.bad_sha` 에 **실효 코드 커밋**을 기록하고 `exit 1` → `OnFailure` DM.
+  `.bad_sha` 코드 커밋은 새 코드 커밋이 올라올 때까지 재배포 안 함(수동 재시도: `rm data/.bad_sha`). 대시보드 커밋이 올라와 remote sha 가 달라져도 같은 불량 코드를 다시 배포하지 않는다.
+- **실행 중 가드**: 다이제스트·재점수·KR 가격 갱신이 도는 중에는 코드를 교체하지 않고 다음 주기로 미룸(지연 import 가 새 코드를 섞어 읽는 것 방지).
+- **fetch 실패**는 조용히 넘기고 연속 8회(≈2시간)째 1회만 DM. 15분마다 실패 알림이 쌓이지 않게 `notify_once` 로 사건당 1회.
+- **비상 수동 반영** (CI 를 건너뜀): `AUTOPULL_SKIP_CI=1 /home/ubuntu/AI-Investment-Bot/scripts/server_autopull.sh`. 즉시 1회 실행: `sudo systemctl start quant-autopull.service`.
+- 이 스크립트는 자기 자신을 배포하므로 CI 가 `bash -n scripts/server_autopull.sh` 를 검사한다(문법 오류 = 배포 영구 정지). 동작은 `tests/test_server_autopull.py` 의 시나리오 테스트가 실제 git/bash 로 검증.
+- ⚠️ `main` 에 push 하면 ~15분 내 박스가 **자동 반영**된다. DB 스키마/마이그레이션 변경은 안전 확인 후 push (`CLAUDE.md §4.10 (9)`).
 
-2) 서비스 `/etc/systemd/system/quant-autopull.service`:
-```
-[Unit]
-Description=quant-bot auto-pull (git fetch + reset + restart on change)
-After=network-online.target
+**의존성 고정 (`requirements.lock`)** — `uv pip compile pyproject.toml --extra hosting --python-version 3.12 --python-platform x86_64-manylinux_2_28` 로 생성(pandas 3.0.x · numpy 2.5 · yfinance 1.7 · libsql-experimental 0.0.55 등). CI·Actions 가 이 세트로 테스트한다.
+**서버 venv 는 06 월 설치본**이라 테스트한 버전과 다를 수 있다 — 아래 중 하나를 사용자 결정(CURRENT_STATE §2.2 #6)으로 정한다.
+- **B (기본): 테스트한 버전을 서버에 설치.** 먼저 현재 상태를 보관하고 설치한다 (autopull 은 이번 전환 push 에서 lock 을 설치하지 않으므로 수동):
+  ```
+  cd ~/AI-Investment-Bot
+  .venv/bin/pip freeze --exclude-editable > ~/freeze-before.txt
+  .venv/bin/pip install -r requirements.lock
+  .venv/bin/pip install --no-deps -e .
+  sudo systemctl restart quant-bot
+  ```
+  문제가 생기면 `.venv/bin/pip install -r ~/freeze-before.txt` 로 복구.
+- **A: 서버 현재 버전을 잠금 파일로.** `~/freeze-before.txt` 내용을 `requirements.lock` 으로 교체해 커밋(사용자가 검토 후). 이 경우 서버 버전은 그대로지만 **CI 가 테스트하는 버전과 달라질 수 있음**을 감수.
+- 어느 쪽이든 이후 `requirements.lock` 변경 push 는 autopull 이 자동 설치한다. `fredapi` 는 코드에서 더 이상 쓰지 않지만 `pyproject.toml` 에 남겨 둠(전환 push 때 의존성 무고정 업그레이드 방지) — **다음 의존성 변경 때 함께 제거**.
 
-[Service]
-Type=oneshot
-User=ubuntu
-WorkingDirectory=/home/ubuntu/AI-Investment-Bot
-ExecStart=/home/ubuntu/AI-Investment-Bot/scripts/server_autopull.sh
-```
-
-3) 타이머 `/etc/systemd/system/quant-autopull.timer` (15분 주기 — 개인 봇엔 충분, 폴링·로그 노이즈↓):
-```
-[Unit]
-Description=Run quant-bot auto-pull every 15 min
-
-[Timer]
-OnBootSec=3min
-OnUnitActiveSec=15min
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-```
-(코드 업데이트는 긴급하지 않으므로 5분은 과함 — 하루 288회→96회. 개발 중 즉시 반영은 아래 강제 실행으로.)
-
-4) 활성화:
-```
-sudo systemctl daemon-reload
-sudo systemctl enable --now quant-autopull.timer
-```
-- 다음 실행 시각: `systemctl list-timers quant-autopull.timer`
-- 마지막 실행 로그: `journalctl -u quant-autopull.service -n 20`
-- 즉시 1회 실행 (테스트 / 개발 중 강제 동기화): `sudo systemctl start quant-autopull.service`
-- 끄기: `sudo systemctl disable --now quant-autopull.timer`
-- ⚠️ 이제 `main` 에 push 하면 ~15분 내 박스가 **자동 반영** → 수동 배포 불필요. 단 자동 재시작이
-  바로 적용되므로 **DB 스키마/마이그레이션 변경은 안전 확인 후** push (CLAUDE §4.10 #9).
-
-**레플리카 손상 복구** (`malformed WAL` 등 — Turso 임베디드 레플리카 파일 깨짐):
+### 6.2 레플리카 손상 복구 (`malformed WAL` 등)
 ```
 sudo systemctl stop quant-bot
 rm -f data/quant_bot.db data/quant_bot.db-wal data/quant_bot.db-shm data/quant_bot.db-info
 sudo systemctl start quant-bot
 ```
-- **데이터 손실 없음** — Turso(클라우드)가 원본, 로컬은 캐시. 재시작 시 깨끗이 재싱크.
+- **데이터 손실 없음** — Turso(클라우드)가 원본, 로컬은 캐시. 재시작 시 깨끗이 재싱크. 다이제스트 레플리카(`digest_replica.db*`)·재점수 레플리카(`universe_replica.db*`)도 같은 방식(해당 유닛이 안 도는 때에).
 
 ## 7. 역할 분담 (중요 — offset 경합 방지)
-- **봇(이 서버)** = `getUpdates` 폴링 **단독 소유**. 구독 명령(/start·/stop·/approve·/deny·/pending) + 조회(/stock·/scan·/help) **실시간** 처리. 조회는 active 구독자(+소유자)만.
-- **다이제스트 timer(이 서버, §5.1)** = 일일 발송만: `send_digest.py --no-sync` + 전용 레플리카 경로.
+- **봇(이 서버)** = `getUpdates` 폴링 **단독 소유**. 구독 명령(/start·/stop·/approve·/deny·/pending) + 조회(/stock·/scan·/ledger·/news·/help) **실시간** 처리. 조회는 active 구독자(+소유자)만.
+- **다이제스트 timer** = 일일 발송만: `send_digest.py --no-sync` + 전용 레플리카 경로.
   - ⚠️ `--no-sync` 필수 — 봇과 동시에 getUpdates 폴링하면 offset 경합으로 메시지 분실.
-  - ⚠️ 봇과 **다른 레플리카 파일** 필수 — 같은 파일이면 WAL 동시쓰기 충돌.
-  - (GitHub Actions 예약 발송은 비활성 — §5.1)
-- 무거운 분석(유니버스 빌드·다이제스트 조립)은 cron/로컬이 Turso 에 사전계산 → 봇은 **DB 읽기 위주(경량)**.
+  - ⚠️ 봇·다이제스트·재점수는 **서로 다른 레플리카 파일** 필수 — 같은 파일이면 WAL 동시쓰기 충돌 (`CLAUDE.md §4.10 (9)`). 같은 레플리카를 쓰는 명령은 `flock` 으로 직렬화.
+- 무거운 분석(유니버스 재점수)은 재점수 타이머가 Turso 에 사전계산 → 봇은 **DB 읽기 위주(경량)**, 다이제스트는 DB 점수 + yfinance 가격 줄.
 
 ## 8. 시크릿 (`.env`)
-봇 필수 4개: `TELEGRAM_BOT_TOKEN` · `TELEGRAM_CHAT_ID`(소유자 겸 승인자) · `TURSO_DATABASE_URL` · `TURSO_AUTH_TOKEN`.
-(FRED/FMP/KRX/DART 는 이 박스에서 다이제스트/유니버스 빌드도 돌릴 때만)
+봇 필수 4개: `TELEGRAM_BOT_TOKEN` · `TELEGRAM_CHAT_ID`(소유자 겸 승인자·알림 수신자) · `TURSO_DATABASE_URL` · `TURSO_AUTH_TOKEN`.
+다이제스트·재점수: `FRED_API_KEY` · `FMP_API_KEY` (+ KR 재점수 `KRX_API_KEY` · `DART_API_KEY`). LLM 요약을 켤 때만 `MINIMAX_API_KEY`(+`MINIMAX_MODEL` 확인).
+키가 들어 있는지만 보기 (값 출력 안 함): `cut -d= -f1 .env`.
 
 ## 9. Gotchas
-- **1GB RAM**: 첫 `/stock` 때 pandas 로드로 메모리 spike → swap 으로 커버. OOM-kill 보이면 swap/메모리 점검.
-- **Turso 일시 장애**: `get_storage()` 실패 → 봇 크래시 → systemd 5s 후 재시작(self-heal). 장기 장애 시 크래시 루프 (로컬 sqlite 폴백은 향후 과제).
-- **libsql 마이그레이션**: 컬럼 추가는 `storage.add_column_if_missing`(중복 컬럼 오류 삼킴) 사용 — 로컬 PRAGMA(stale) vs 원격 ALTER 불일치 크래시 방지.
-- **WAL 사이드카**(`data/*.db-*`)는 gitignore — 절대 커밋 금지(클론 시 레플리카 손상 원인).
-- **초기 레플리카 풀 지연 (노트북/일회성 실행)**: 임베디드 레플리카 초기 동기화가 60-120s+ 걸릴 수 있음 — 20s 기본 프로브 타임아웃이 너무 짧아 오프라인으로 강등됨. 대화형/일회성 실행 시 `QUANT_BOT_SYNC_TIMEOUT=240` 로 늘릴 것. 서버(상시 가동)는 기본값 유지해도 무방.
-- **대량 재점수/유니버스 빌드 시 캐시 끄기**: `QUANT_BOT_CACHE=off python scripts/build_universe.py --enrich --force` — 캐시 on 상태에서는 심볼당 2-3회 Turso 원격 쓰기(태평양 왕복)가 발생해 ~0.1 symbol/s. `QUANT_BOT_CACHE=off` 시 ~1.5 symbol/s (~15x).
+- **1GB RAM**: 첫 `/stock` 때 pandas 로드로 메모리 spike → swap 으로 커버. 재점수는 `MemoryMax=600M` 로 제한(OOM 시 봇보다 먼저 죽음). OOM-kill 보이면 swap/메모리 점검.
+- **Turso 일시 장애**: 다이제스트는 초기 pull 타임아웃 시 오프라인 파일로 강등 → **발송 보류 + 소유자 DM**(종료코드 20). 봇은 600초 뒤 자진 재시작해 재프로브. 장기 장애 시 보류가 이어짐.
+- **libsql 마이그레이션**: 컬럼 추가는 `storage.add_column_if_missing`(중복 컬럼 오류 삼킴) — 로컬 PRAGMA(stale) vs 원격 ALTER 불일치 크래시 방지. 마이그레이션 스모크는 **stale 레플리카에서도**.
+- **WAL 사이드카**(`data/*.db-*`)는 gitignore — 절대 커밋 금지(클론 시 레플리카 손상 원인). `data/` 아래 점파일(`.deployed_sha`·`.bad_sha`·`*.lock` 등 런타임 상태)도 gitignore.
+- **운영 레플리카를 직접 열지 말 것** — 확인용 조회는 `/tmp/chk/` 로 복사한 사본에서(`digest_replica.db`·`-wal`·`-shm` 세 파일을 함께, 사본 만드는 법은 §10 단계 0). 실행 중 프로세스와 같은 파일을 열면 WAL 충돌.
+- **초기 레플리카 풀 지연 (노트북/일회성 실행)**: 60–120s+ 걸릴 수 있음 → `QUANT_BOT_SYNC_TIMEOUT=240`.
+- **대량 재점수/유니버스 빌드 시 캐시 끄기**: `QUANT_BOT_CACHE=off` — 켜면 심볼당 2-3회 Turso 원격 쓰기로 ~0.1 symbol/s, 끄면 ~1.5 symbol/s. 재점수 유닛은 이미 off.
+- **대시보드 JSON 커밋**: Dashboard Export 가 JSON 을 `main` 에 `[skip ci]` 커밋(autopull 은 비코드 커밋으로 처리)한다. main 이 매일 움직이는 churn 은 알려진 사항 — 로컬에서 push 전엔 `git pull --rebase`.
+
+---
+
+## 10. 배포 순서 (수정 라운드 `fix/signal-quality-round`)
+
+> 순서가 중요합니다. 특히 **원장 소급(backfill)은 첫 재점수 전, 첫 실발송 전**에 해야 합니다 (재점수가 `screened.updated_at` 을 바꾸면 소급 가드가 거부하고, 실발송이 원장에 live 행을 만들면 소급이 거부됨).
+> 붙여넣기 명령은 한 줄씩(주석·glob 없음). 서버 명령은 `cd ~/AI-Investment-Bot` 에서.
+
+**0. 사전 점검 (서버)** — 이번 라운드에서 서버를 직접 확인하지 못했습니다. 결과를 확인한 뒤 진행:
+```
+cd ~/AI-Investment-Bot
+git rev-parse --short HEAD
+systemctl list-timers --all --no-pager
+systemctl cat quant-bot.service | grep -E "Type=|WatchdogSec|TimeoutStartSec|Restart=|ExecStart"
+awk -F= '$1=="FRED_API_KEY"||$1=="FMP_API_KEY"||$1=="KRX_API_KEY"||$1=="DART_API_KEY"||$1=="MINIMAX_API_KEY"{print $1, (length($2)>0 ? "SET" : "EMPTY")}' .env
+.venv/bin/pip freeze --exclude-editable
+free -m
+df -h /
+mkdir -p /tmp/chk
+cp data/digest_replica.db data/digest_replica.db-wal data/digest_replica.db-shm /tmp/chk/
+.venv/bin/python -c 'import sqlite3;c=sqlite3.connect("/tmp/chk/digest_replica.db");[print(r) for r in c.execute("select market,count(1),sum(enriched),max(updated_at) from screened group by market")]'
+```
+확인할 것: 서버 코드가 `6403d60` 인지, 재점수 타이머가 없는지(`quant-universe` 없음), 키가 SET 인지, 마지막 두 줄로 **점수 `max(updated_at)` 이 정말 7월 그대로인지**(최근이면 첫 실발송이 원장에 live 행을 만들어 소급이 거부되므로 단계 2 전에 알려 주세요). `pip freeze` 결과는 의존성 결정 #6 에 필요.
+
+**1. 브랜치를 먼저 올려 CI 확인 (이 Mac)** — 브랜치 push 는 서버에 반영되지 않음(autopull 은 `main` 만 봄):
+```
+git push origin fix/signal-quality-round
+```
+GitHub Actions 의 **CI / pytest** 가 녹색인지 확인. (이 단계는 사용자가 직접 — 에이전트는 push 하지 않음.)
+
+**2. main 에 반영 (미국 저녁 메시지 직후 권장)** — 이 push 를 구 autopull 이 15분 안에 서버에 반영한다. `pyproject.toml` 은 바꾸지 않았으므로 의존성은 그대로:
+```
+git checkout main
+git merge --ff-only fix/signal-quality-round
+git push origin main
+```
+서버 반영 확인:
+```
+cd ~/AI-Investment-Bot
+git log -1 --oneline
+journalctl -u quant-autopull.service -n 20 --no-pager
+```
+> 이 시점부터 서버는 **새 코드 + 옛 유닛**. 단계 0 에서 확인한 대로 점수가 7월 그대로(≥15일 노후)라면 다이제스트는 '후보 보류' 로 나가고 원장에 기록하지 않아 소급에 영향 없음. 그래도 3→5 단계는 **다음 다이제스트 시각 전에** 끝낼 것.
+
+**3. 의존성 정렬 (결정 #6)** — §6.1 의 B(설치) 또는 A(freeze 로 lock 교체)를 실행.
+
+**4. systemd 유닛 설치** — 기존 유닛을 백업한 뒤 저장소 원본으로 교체:
+```
+cd ~/AI-Investment-Bot
+systemctl show -p User quant-bot quant-digest@kr
+sudo chown -R ubuntu:ubuntu /home/ubuntu/AI-Investment-Bot
+sudo cp /etc/systemd/system/quant-bot.service /home/ubuntu/quant-bot.service.bak
+sudo cp /etc/systemd/system/quant-digest@.service /home/ubuntu/quant-digest@.service.bak
+sudo cp /etc/systemd/system/quant-autopull.service /home/ubuntu/quant-autopull.service.bak
+sudo cp deploy/systemd/quant-bot.service /etc/systemd/system/quant-bot.service
+sudo cp deploy/systemd/quant-digest@.service /etc/systemd/system/quant-digest@.service
+sudo cp deploy/systemd/quant-digest-kr.timer /etc/systemd/system/quant-digest-kr.timer
+sudo cp deploy/systemd/quant-digest-us.timer /etc/systemd/system/quant-digest-us.timer
+sudo cp deploy/systemd/quant-autopull.service /etc/systemd/system/quant-autopull.service
+sudo cp deploy/systemd/quant-autopull.timer /etc/systemd/system/quant-autopull.timer
+sudo cp deploy/systemd/quant-alert@.service /etc/systemd/system/quant-alert@.service
+sudo cp deploy/systemd/quant-universe.service /etc/systemd/system/quant-universe.service
+sudo cp deploy/systemd/quant-universe.timer /etc/systemd/system/quant-universe.timer
+sudo systemctl daemon-reload
+sudo systemctl restart quant-bot
+systemctl status quant-bot --no-pager
+sudo systemctl start quant-alert@autopull.service
+```
+봇이 `active (running)` 이고 알림 시험 DM 이 오는지 확인. (KR 가격 갱신을 쓰려면 `quant-kr-refresh.service`·`.timer` 도 같은 방식으로 복사하되, 첫 재점수가 끝난 뒤에 enable.)
+
+**5. 원장 소급 기록 (07-13 발송분)** — 다이제스트 시각(08:30 KST, 09:00 ET)을 피해서. 미리보기 결과가 텔레그램 07-13 메시지의 종목과 같은지 눈으로 확인한 뒤 `--confirm`:
+```
+QUANT_BOT_DB_PATH=data/digest_replica.db flock -w 600 data/.digest.lock .venv/bin/python scripts/ledger.py snapshot --source reconstructed --asof 2026-07-10
+QUANT_BOT_DB_PATH=data/digest_replica.db flock -w 600 data/.digest.lock .venv/bin/python scripts/ledger.py backfill
+QUANT_BOT_DB_PATH=data/digest_replica.db flock -w 600 data/.digest.lock .venv/bin/python scripts/ledger.py backfill --confirm
+QUANT_BOT_DB_PATH=data/digest_replica.db flock -w 600 data/.digest.lock .venv/bin/python scripts/ledger.py score
+QUANT_BOT_DB_PATH=data/digest_replica.db flock -w 600 data/.digest.lock .venv/bin/python scripts/ledger.py report us
+```
+소급 가드: 해당 시장에 live 행이 있으면 거부, 07-13 명시 리스트(US CALM HG EOG SM MGR AFGE / KR 009970 007700 284740 041510 073240 003090)와 스냅샷 v0 상위 6 이 다르면 중단.
+`report us` 의 `소급 포함` 성과가 보이면 성공(07-13 이후 보유 수익률, 벤치 대비).
+
+**6. 첫 재점수 수동 실행** — 약 25~30분 예상. 끝나면 소요 시간과 메모리 확인:
+```
+sudo systemctl start --no-block quant-universe.service
+journalctl -u quant-universe -f
+systemctl show quant-universe -p MemoryPeak -p ExecMainStatus
+```
+`ExecMainStatus=0` 이어야 정상(5 = 부분 완료/중단, 2 = 원격 DB 연결 불가). 끝난 뒤 KR/US 후보가 TTM 점수 기준으로 바뀌고 '후보 보류' 가 풀린다 — **규칙 전환일**(`규칙 v1 로 후보 재구성`) 메시지가 처음 나가는 날.
+
+**7. 주간 재점수 타이머 켜기:**
+```
+sudo systemctl enable --now quant-universe.timer
+systemctl list-timers --all --no-pager
+```
+(선택) `quant-kr-refresh.timer` 도 같은 방식으로 enable.
+
+**8. 대시보드 갱신 다시 켜기 (GitHub 웹)** — 저장소 → Actions → 왼쪽 'Dashboard Export' → 'Enable workflow' → 'Run workflow'(main).
+'Export dashboard JSON' 단계가 녹색이고 `us_data.json` 에 `data_as_of` 가 있는지, 대시보드 페이지가 갱신됐는지 확인. 60일 무활동 자동 비활성화는 정상 가동 중엔 재발하지 않는다.
+
+**9. 구독자 공지 1회 (텔레그램 소유자 계정으로 봇에):**
+`/announce 메시지 형식이 바뀝니다. 첫 줄 "오늘 할 일"만 보고 넘길 수 있게 했고, 변화가 있는 날만 길어집니다. 종목마다 가격·200일선·선정 후 성과와 봇 후보의 누적 성적을 보여드립니다. 검증 전인 예측과 제안 비중은 뺐습니다.`
+
+**10. 정리 (이 Mac, 권장)** — `.claude/settings.local.json` 에서 `"Bash(git push *)"` 와 `"Bash(.venv/bin/python scripts/send_digest.py)"` 두 줄을 지우면 push 와 실발송이 매번 확인을 거친다.
+
+**롤백**: 코드는 `git push` 로 되돌릴 필요 없이 autopull 의 자동 롤백이 기동 실패를 막는다. 유닛은 4단계에서 만든 `~/*.service.bak` 을 `/etc/systemd/system/` 에 복사 후 `daemon-reload`.
+원장 소급을 되돌려야 하면 사용자 수동(`signal_ledger` 의 `source='reconstructed'` 행 삭제) — 되도록 미리보기에서 확인하고 진행.
