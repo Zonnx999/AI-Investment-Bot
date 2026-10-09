@@ -57,8 +57,8 @@
   DB 에 없거나 읽기 실패면 기존 동작)와 같은 배당 입력(quote 에 없으면 지표 `dividendPerShare`)을 씀.
 - **운영 안전장치**: CI(`pytest` 잡) 통과 커밋만 서버 자동 배포 + 기동 실패 시 자동 롤백 · 헬스 리포트(`src/health.py`) → 소유자 평문 DM · systemd 유닛 원본을 저장소에서 관리(`deploy/systemd/`) ·
   `OnFailure` 알림 · 봇 READY 신호·워치독 · 다이제스트 종료코드 표 · 유니버스 주간 재점수 타이머(`quant-universe.timer`, 토 10:00 KST) · 대시보드 export 가드(빈 DB/강등 시 덮어쓰기 거부).
-  - **autopull CI 게이트**: GitHub Actions 앱이 올린 `pytest` 체크만 인정하고, 응답 형태가 이상하면(JSON 깨짐·형식 불일치) 예외로 죽지 않고 `unknown` 으로 보류(DM 없음 — 다음 주기 재확인).
-    ⚠️ 저장소를 private 로 바꾸면 무인증 공개 API 가 막혀 영구 `unknown`(= 코드 커밋 배포 영구 정지) — 현재 스크립트는 토큰 인증 미지원 (`DEPLOYMENT.md §6.1`).
+  - **autopull CI 게이트**: GitHub Actions 앱이 올린 `pytest` 체크만 인정하고, 응답 형태가 이상하면(JSON 깨짐·형식 불일치) 예외로 죽지 않고 `unknown` 으로 보류(바로 DM 하지 않고 다음 주기 재확인).
+    CI 상태가 `pending`·`unknown` 으로 처음 본 뒤 2시간 넘게 이어지면 '배포 대기' DM 1회. ⚠️ 저장소를 private 로 바꾸면 무인증 공개 API 가 막혀 영구 `unknown`(= 코드 커밋 배포 정지, 위 DM 으로만 드러남) — 현재 스크립트는 토큰 인증 미지원 (`DEPLOYMENT.md §6.1`).
   - **서버 의존성 감시**: `scripts/lock_drift.py` — 서버 `.venv` 설치 버전 ↔ `requirements.lock` 불일치를 autopull 이 매 주기 점검, lock 내용당 1회 소유자 DM (설치는 안 함 — 결정 #6).
   - **레플리카 미리 pull**: 재점수 유닛 `ExecStartPost` 가 `scripts/warm_replica.py` 로 다이제스트 레플리카(`digest_replica.db`)를 재점수 직후 받아 둠 (월요일 KR 다이제스트의 180초 프로브가 한 주치 델타를 한 번에 받다 강등되는 것 방지,
     `flock` 대기 900 · `QUANT_BOT_SYNC_TIMEOUT=1200`, 실패 무시). 재점수 끝에서는 **스냅샷 전에 `sync()`** (방금 쓴 점수가 클라우드와 합쳐진 뒤 스냅샷).

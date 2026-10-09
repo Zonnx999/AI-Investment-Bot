@@ -121,6 +121,21 @@ main() {
                 log "CI 결과 없음 (${remote_sha:0:7}) — 대기"
                 exit 0 ;;
             *)
+                # pending/unknown 이 계속되면(CI 멈춤·GitHub API 장애·repo 를 private 로 바꿔 무인증 조회 불가)
+                # 코드가 조용히 영구 보류된다 — 이 sha 를 '처음 본' 시각부터 2시간 넘으면 1회 DM (§4.10 #15).
+                # 커밋 시각이 아니라 처음 본 시각 기준: 검토 후 늦게 push 한 옛 커밋이 CI 진행 중에 바로 DM 되지 않게.
+                local seen_file="$STATE_DIR/.ci_wait_seen" first now
+                now=$(date +%s)
+                if [ -s "$seen_file" ] && [ "$(cut -d' ' -f1 "$seen_file")" = "$remote_sha" ]; then
+                    first="$(cut -d' ' -f2 "$seen_file")"
+                else
+                    first="$now"
+                    echo "$remote_sha $now" > "$seen_file"
+                fi
+                if [ $(( now - first )) -gt 7200 ]; then
+                    notify_once "$remote_sha:$gate" \
+                        "[quant-bot 배포 대기] ${remote_sha:0:7} CI 상태 '$gate' 가 2시간 넘게 지속 — 서버는 ${deployed_sha:0:7} 유지. Actions·GitHub API 확인(repo 를 private 로 바꿨다면 autopull 게이트에 토큰 필요), 급하면 AUTOPULL_SKIP_CI=1 로 수동 반영."
+                fi
                 log "CI 상태 '$gate' (${remote_sha:0:7}) — 다음 주기 재확인"
                 exit 0 ;;
         esac

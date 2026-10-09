@@ -227,6 +227,24 @@ def test_pending_or_unknown_ci_waits(sim, state):
     assert "restart" not in sim.read("calls")
 
 
+@pytest.mark.parametrize("state", ["pending", "apierr"])
+def test_pending_or_unknown_ci_over_two_hours_notifies_once(sim, state):
+    """pending/unknown 이 이 sha 를 처음 본 뒤 2시간 넘게 지속되면 DM 1회 — 조용한 영구 보류 방지."""
+    deployed = sim.mark_deployed()
+    sha = sim.commit({"src/a.py": "v = 2\n"}, date="2020-01-01T00:00:00+00:00")   # 옛 커밋
+    sim.ci(sha, state)
+    assert sim.run().returncode == 0
+    assert sim.read("dm") == ""                        # 처음 본 직후 — 커밋이 오래됐어도 DM 없음
+    seen = sim.data(".ci_wait_seen").split()
+    assert seen[0] == sha
+    # 처음 본 시각을 3시간 전으로 되돌리면 → DM 1회, 다음 주기엔 반복 없음
+    (sim.server / "data" / ".ci_wait_seen").write_text(f"{sha} {int(seen[1]) - 3 * 3600}\n")
+    assert sim.run().returncode == 0
+    assert sim.run().returncode == 0
+    assert sim.head() == deployed
+    assert len(sim.read("dm").splitlines()) == 1
+
+
 @pytest.mark.parametrize("body", [
     "[]",                                              # 최상위가 list
     "null",

@@ -175,10 +175,11 @@ sudo visudo -f /etc/sudoers.d/quant-autopull
 내용 한 줄: `ubuntu ALL=(root) NOPASSWD: /usr/bin/systemctl restart quant-bot` (경로는 `which systemctl` 로 확인).
 - **배포 완료 표식**은 git HEAD 가 아니라 `data/.deployed_sha`. 부분 실패하면 다음 주기에 자동 재시도.
 - **코드가 바뀐 커밋**(비코드 경로 = `dashboard/`·`docs/`·`tests/`·`deploy/`·`.github/`·`README.md`·`CLAUDE.md` 외)은 GitHub **check-run `pytest`**(CI 잡)가 `success` 일 때만 배포. **GitHub Actions 앱이 올린 체크만 인정**(같은 이름의 다른 앱 체크는 무시).
-  결과를 모르면(API 오류·진행 중·레이트리밋·**응답 형태 이상**) 배포 안 함 — JSON 이 깨졌거나 기대한 형태가 아니면 스크립트가 죽지 않고 `unknown` 으로 보류(DM 없음, 15분 뒤 재확인, `journalctl -u quant-autopull` 에 `CI 상태 'unknown'`).
-  실패 → 소유자 DM 1회(sha 당) 후 서버는 직전 버전 유지. 결과가 2시간 넘게 없으면 DM 1회.
+  결과를 모르면(API 오류·진행 중·레이트리밋·**응답 형태 이상**) 배포 안 함 — JSON 이 깨졌거나 기대한 형태가 아니면 스크립트가 죽지 않고 `unknown` 으로 보류(15분 뒤 재확인, `journalctl -u quant-autopull` 에 `CI 상태 'unknown'`).
+  `pending`·`unknown` 이 그 커밋을 **처음 본 뒤 2시간 넘게** 이어지면 DM 1회(`data/.ci_wait_seen` 에 처음 본 시각 기록 — 검토 후 늦게 push 한 옛 커밋이 CI 진행 중에 바로 DM 되지 않게 커밋 시각이 아니라 처음 본 시각 기준).
+  실패 → 소유자 DM 1회(sha 당) 후 서버는 직전 버전 유지. 결과(check-run)가 2시간 넘게 없으면 DM 1회.
   비코드만 바뀐 커밋은 CI 없이 반영하고 재시작도 안 함. `[skip ci]` 데이터 커밋이 끼면 범위 안 '마지막 코드 커밋'의 CI 로 판정.
-  ⚠️ **저장소를 private 로 바꾸면** 이 게이트가 쓰는 무인증 공개 API 요청이 거부돼(HTTP 404) 결과가 영구 `unknown` → 코드 커밋이 **DM 도 없이 조용히 영구 보류**된다. 현재 스크립트는 토큰 인증을 지원하지 않으므로
+  ⚠️ **저장소를 private 로 바꾸면** 이 게이트가 쓰는 무인증 공개 API 요청이 거부돼(HTTP 404) 결과가 영구 `unknown` → 코드 커밋이 영구 보류된다(2시간 뒤 '배포 대기' DM 1회로 드러남). 현재 스크립트는 토큰 인증을 지원하지 않으므로
   private 전환 전에 토큰 지원을 먼저 넣어야 한다 (`AUTOPULL_SKIP_CI=1` 은 비상용).
 - **의존성**: `requirements.lock` 이 바뀐 커밋이면 코드 교체 **전에** `pip install -r`(실패하면 코드 미반영 + DM 1회, 15분마다 재시도). `pyproject.toml` 변경 시엔 editable 재등록만.
 - **lock 불일치 감시** (`scripts/lock_drift.py`): 실행 중 가드(아래)를 통과한 매 주기에, 코드 교체 여부와 무관하게 서버 `.venv` 의 설치 버전을 배포 중인 `requirements.lock` 핀과 비교한다.
