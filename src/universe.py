@@ -141,6 +141,9 @@ class ScanRow:
     flags: tuple[str, ...] = ()            # detail.flags (holding/one_off/fin_neutral/...)
     fund_asof: str | None = None           # 재무 보강 기준일 (updated_at 날짜)
     price_asof: str | None = None          # 가격/시총 기준일 (seen_at 날짜, KR 은 KRX 기준일)
+    # 점수 근거 기간 — detail.basis: US 'ttm'(최근 4분기) / 'annual'(연간 폴백), KR 'FY2025' 등.
+    # 재점수 전 구형 행은 None (S3P-MSG P2 — 다이제스트 범례가 행별 실제 기준을 표기)
+    basis: str | None = None
 
 
 def _utcnow() -> str:
@@ -1193,19 +1196,28 @@ def _scan_select(cols: set[str]) -> str:
 
 
 def _flags_from_detail(detail) -> tuple[str, ...]:
+    return _flags_basis_from_detail(detail)[0]
+
+
+def _flags_basis_from_detail(detail) -> tuple[tuple[str, ...], str | None]:
+    """detail JSON → (flags, basis). 깨진/빈 JSON 은 ((), None)."""
     if not detail:
-        return ()
+        return (), None
     try:
-        flags = (json.loads(detail) or {}).get("flags") or ()
+        d = json.loads(detail) or {}
     except (json.JSONDecodeError, TypeError, AttributeError):
-        return ()
-    return tuple(str(f) for f in flags)
+        return (), None
+    if not isinstance(d, dict):
+        return (), None
+    flags = tuple(str(f) for f in (d.get("flags") or ()))
+    basis = d.get("basis")
+    return flags, (str(basis) if basis not in (None, "") else None)
 
 
 def _row_to_scan(r) -> ScanRow:
     base, exchange, excluded, detail, updated_at, seen_at = r[:12], r[12], r[13], r[14], r[15], r[16]
-    return ScanRow(*base, exchange=exchange, excluded=excluded,
-                   flags=_flags_from_detail(detail),
+    flags, basis = _flags_basis_from_detail(detail)
+    return ScanRow(*base, exchange=exchange, excluded=excluded, flags=flags, basis=basis,
                    fund_asof=_date_part(updated_at), price_asof=_date_part(seen_at))
 
 

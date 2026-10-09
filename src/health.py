@@ -25,12 +25,13 @@ from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
+from src.config import settings
 from src.exceptions import ApiTimeoutError, ModelRetiredError
 
 KST = ZoneInfo("Asia/Seoul")
 
-# 유니버스(재무 보강) 기준일 경과 임계 — 주 1회 재점수 + 하루 여유
-UNIVERSE_STALE_DAYS = 8
+# 유니버스(재무 보강) 기준일 경과 임계는 settings.universe_warn_days (기본 8 — 주 1회 재점수 + 하루
+# 여유) — 기준 줄 ⚠️·/scan 과 같은 규칙 'age >= 임계' (RVM-04). 별도 상수를 두지 않는다.
 # 가격 기준일 경과 임계 (영업일) — KR 가격 일일 갱신(kr-refresh)을 쓰는 경우
 PRICE_STALE_BDAYS = 3
 
@@ -147,7 +148,7 @@ class HealthReport:
             ))
         else:
             age = _age_days(uni, now)
-            if age > UNIVERSE_STALE_DAYS:
+            if age >= settings.universe_warn_days:
                 mmdd = _to_kst(uni).strftime("%m-%d")
                 out.append(Problem(
                     "universe_stale", f"발굴 데이터 {mmdd} 기준({age}일 전)",

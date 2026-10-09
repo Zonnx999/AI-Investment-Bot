@@ -654,7 +654,7 @@ def _summary(**over):
 def test_format_ledger_line_matches_mockup_and_is_markdown_safe():
     line = ledger.format_ledger_line(_summary(), now=NOW)
     assert line == ("📒 성적: 07-13 이후 이 리스트 보유 -0.7% · SPY +4.0% · 초과 -4.7%p "
-                    "(10-07 종가, 비용 포함) · 소급 포함 · ⏳검증 전 3/6")
+                    "(10-07 종가, 비용 포함) · 소급 포함 · ⏳검증 전 (4주 구간 3/6)")
     assert not set(line) & set("_*`[]\\")
     assert not any(w in line for w in BANNED_WORDS)
 
@@ -680,7 +680,7 @@ def test_format_ledger_line_tails_and_transition():
     line = ledger.format_ledger_line(_summary(
         rule_version="v1", has_reconstructed=False, blocks={"n": 0, "blocks": []},
         prev_version={"rule_version": "v0", "excess_pp": -4.7}), now=NOW)
-    assert line.endswith("⏳새 규칙 v1 검증 0/6 (v0 초과 -4.7%p)")
+    assert line.endswith("⏳새 규칙 v1 검증 (4주 구간 0/6, v0 초과 -4.7%p)")
 
 
 def test_format_ledger_line_gate():
@@ -704,6 +704,79 @@ def test_format_weekly_block_hides_horizon_until_six_done():
     blk = ledger.format_weekly_block(_summary(), now=NOW)
     assert "21일 적중 2/6 (평균 -1.0%p)" in blk
     assert not set(blk) & set("_*`[]\\")
+
+
+def test_format_weekly_block_compact_replaces_daily_line_without_loss():
+    """RVM-05: compact=True 는 일일 줄을 대체하는 2줄 — 일일 줄의 모든 요소(보유·벤치·초과·꼬리표·상태) +
+    기간·비용 상세·최대낙폭·구간별 초과·지평 적중. '리스트 보유' 중복 줄 없음."""
+    full = ledger.format_weekly_block(_summary(), now=NOW).splitlines()
+    compact = ledger.format_weekly_block(_summary(), now=NOW, compact=True).splitlines()
+    assert len(full) == 3 and len(compact) == 2
+    assert full[1].startswith("  리스트 보유 -0.7% / SPY +4.0% / 초과 -4.7%p · 최대낙폭 -7.1% (지수 -3.4%)")
+    assert compact[0] == ("📒 성적: 07-13~10-07 이 리스트 보유 -0.7% · SPY +4.0% · 초과 -4.7%p "
+                          "(배당·비용 10bp 포함) · 소급 포함 · ⏳검증 전 (4주 구간 3/6)")
+    assert compact[1] == ("  주간 성적표: 최대낙폭 -7.1% (지수 -3.4%) · 4주 구간 초과 -2.2, +3.0, -5.5 · "
+                          "21일 적중 2/6 (평균 -1.0%p)")
+    daily = ledger.format_ledger_line(_summary(), now=NOW)
+    for piece in ("보유 -0.7%", "SPY +4.0%", "초과 -4.7%p", "소급 포함", "⏳검증 전 (4주 구간 3/6)"):
+        assert piece in daily and piece in compact[0]
+    assert sum(1 for ln in compact if "리스트 보유" in ln) == 1          # 중복 줄 없음 (일일 줄 대체)
+    # 구간 0개 · 판정 상태(🔻)·꼬리표도 그대로 실림
+    c0 = ledger.format_weekly_block(_summary(blocks={"n": 0, "blocks": [], "days_in_partial": 2}),
+                                    now=NOW, compact=True).splitlines()
+    assert "4주 구간 아직 없음(2/20거래일)" in c0[1] and "⏳검증 전 (4주 구간 0/6)" in c0[0]
+    cd = ledger.format_weekly_block(_summary(status="demoted", n_no_price=1,
+                                             blocks={"n": 6, "mean": -2.1, "t": -1.4, "blocks": [-1.0] * 6}),
+                                    now=NOW, compact=True).splitlines()
+    assert cd[0].endswith("가격 미확보 1건 · 🔻 4주 구간 6개 평균 -2.1%p, t -1.4")
+    assert "4주 구간 초과 -1.0, -1.0, -1.0, -1.0, -1.0, -1.0" in cd[1]
+    assert not set("\n".join(cd)) & set("_*`[]\\")
+    assert ledger.format_weekly_block(_summary(computed_at="2026-10-04T00:00:00+00:00"), now=NOW, compact=True) is None
+
+
+def test_status_text_wording_spells_out_block_unit():
+    """RVM-06: '⏳검증 전 2/6' → '⏳검증 전 (4주 구간 2/6)' — 숫자의 단위를 문구에 푼다."""
+    assert ledger._status_text({"status": "pending", "blocks": {"n": 2}}) == "⏳검증 전 (4주 구간 2/6)"
+    assert ledger._status_text({"status": "pending", "rule_version": "v1", "blocks": {"n": 1},
+                                "prev_version": {"rule_version": "v0", "excess_pp": -4.65}}) == \
+        "⏳새 규칙 v1 검증 (4주 구간 1/6, v0 초과 -4.7%p)"
+    assert ledger._status_text({"status": "demoted", "blocks": {"n": 6, "mean": -2.1, "t": -1.4}}) == \
+        "🔻 4주 구간 6개 평균 -2.1%p, t -1.4"
+
+
+def test_bench_label_for_kr_is_dynamic_by_list_benches():
+    """RVM-06: KR 벤치 라벨 '홈지수' 대신 리스트 종목들의 bench_symbol 로 — 코스피 / 코스닥 / 코스피·코스닥."""
+    assert ledger.bench_label_for("KR", ["069500.KS", "069500.KS"]) == "코스피"
+    assert ledger.bench_label_for("KR", ["229200.KS"]) == "코스닥"
+    assert ledger.bench_label_for("KR", ["069500.KS", "229200.KS", None]) == "코스피·코스닥"
+    assert ledger.bench_label_for("KR", []) == ledger.BENCH_LABEL["KR"] == "코스피·코스닥"
+    assert ledger.bench_label_for("KR", ["???"]) == "코스피·코스닥"
+    assert ledger.bench_label_for("US", ["SPY"]) == "SPY" and ledger.bench_label_for("us", []) == "SPY"
+    assert "홈지수" not in ledger.BENCH_LABEL.values()
+
+
+def test_summarize_kr_bench_label_from_cursor_or_latest_sends(fresh_db):
+    perf = _perf([0.0] * 30, [0.0] * 30)
+    sends = [_pick("2026-07-13", "005930", market="KR", yf="005930.KS"),
+             _pick("2026-07-13", "035760", rank=2, market="KR", yf="035760.KQ"),
+             _pick("2026-10-07", "005930", market="KR", yf="005930.KS")]      # 최신 리스트: 코스피만
+    cur = {"rule_version": "v1", "list_key": "v1|005930",
+           "bench_of": {"005930.KS": "069500.KS"}}
+    s = ledger.summarize("KR", perf, cur, {}, sends, now=NOW)
+    assert s["bench_label"] == "코스피"
+    cur2 = {"rule_version": "v1", "bench_of": {"005930.KS": "069500.KS", "035760.KQ": "229200.KS"}}
+    assert ledger.summarize("KR", perf, cur2, {}, sends, now=NOW)["bench_label"] == "코스피·코스닥"
+    # 커서에 벤치가 없으면(채점 전) 최신 발송 리스트의 bench_symbol 로
+    assert ledger.summarize("KR", perf, {"rule_version": "v1"}, {}, sends, now=NOW)["bench_label"] == "코스피"
+    assert ledger.summarize("US", perf, {"rule_version": "v1"}, {}, [], now=NOW)["bench_label"] == "SPY"
+    line = ledger.format_ledger_line(_summary(market="KR", bench_label="코스닥"), now=NOW)
+    assert "코스닥 +4.0%" in line and "홈지수" not in line
+    # 재채점 전 state 에 남은 옛 표기 '홈지수' 는 표시 단계에서 시장 폴백으로 (라이브 스모크에서 확인된 경로)
+    legacy = _summary(market="KR", bench_label="홈지수")
+    assert "코스피·코스닥 +4.0%" in ledger.format_ledger_line(legacy, now=NOW)
+    assert "홈지수" not in ledger.format_weekly_block(legacy, now=NOW)
+    assert "홈지수" not in ledger.format_report(legacy, {}, runs={}, now=NOW)
+    assert "SPY +4.0%" in ledger.format_ledger_line(_summary(bench_label=None), now=NOW)
 
 
 def test_format_report_plain_text():

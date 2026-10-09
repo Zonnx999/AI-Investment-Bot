@@ -123,3 +123,7 @@ def test_asof_warn_and_hold_agree_between_digest_and_scan(fresh_db, monkeypatch,
     assert digest_warn == scan_warn == warn
     assert digest_hold == scan_hold == hold
     assert (bundle.record_ledger is False) == hold          # 보류일은 원장 미기록 (다이제스트 규칙)
+    # RVM-04: ⚙️ 상태 줄의 '발굴 데이터 … 기준' (health.universe_stale) 도 같은 경계 (age >= warn_days)
+    health_stale = "universe_stale" in {p.code for p in bundle.health.problems(now)}
+    assert health_stale == warn
+    assert ("발굴 데이터" in bundle.text) == warn

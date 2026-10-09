@@ -26,10 +26,12 @@ ADVERSARIAL = "A_B*C`D[E Holdings, Inc."
 # ----------------------------------------------------------------------
 
 
-def _row(sym, name, total, v, h, market="KR", sector="", flags=(), excluded=None):
+def _row(sym, name, total, v, h, market="KR", sector="", flags=(), excluded=None, basis=None):
+    if basis is None and market == "US":
+        basis = "ttm"                       # 재점수 후 US 행의 기본 (RVQ-4 범례 테스트가 따로 바꿈)
     return ScanRow(symbol=sym, market=market, name=name, sector=sector, price=0.0,
                    market_cap=1e9, total_score=total, value_score=v, health_score=h, roe=None,
-                   flags=tuple(flags), excluded=excluded, fund_asof="2026-10-05")
+                   flags=tuple(flags), excluded=excluded, fund_asof="2026-10-05", basis=basis)
 
 
 def _obs(label, last, chg, dd, ma, chg20=None, asof="2026-10-07"):
@@ -77,7 +79,7 @@ SUMMARY_KR = {
     "market": "KR", "rule_version": "v1", "since": "2026-07-13", "entry_date": "2026-07-13",
     "price_asof": "2026-10-07", "computed_at": "2026-10-07T23:00:00+00:00",
     "cum_port": -2.35, "cum_bench": -0.04, "excess_pp": -2.31, "mdd_port": -6.8, "mdd_bench": -25.0,
-    "bench_label": "홈지수", "blocks": {"n": 3, "mean": -1.5, "t": -0.6, "blocks": [1.0, -2.0, -3.0]},
+    "bench_label": "코스피", "blocks": {"n": 3, "mean": -1.5, "t": -0.6, "blocks": [1.0, -2.0, -3.0]},
     "status": "pending", "has_reconstructed": True, "events": {"n": 6},
 }
 SUMMARY_US = dict(SUMMARY_KR, market="US", bench_label="SPY", cum_port=-0.55, cum_bench=4.0,
@@ -156,7 +158,7 @@ GOLDEN_A_KR_QUIET = """\
 간밤 미국 S&P500 7,802 -0.2% · 나스닥 27,539 -0.2% · 10년물 5.28% · VIX 15.1
 
 *🌐 글로벌* (아침 1회)
-국면 🟢 위험선호 (Risk-on) · 지표 3/3, 현황 설명용 — 금리차 +0.51%p(+1) · HY 3.03%(0) · 실업수당 z-1.4(+1)
+국면 🟢 위험선호 (Risk-on) · 지표 3/3, 현황 설명용 — 금리차 +0.51%p · 하이일드 3.03% · 실업수당 z-1.4
 새 알림 없음 · 경보 유지 3: 장기국채 (20Y+) -12% · 금 -24% · 비트코인 -33%
 
 *📋 한국 스크리닝 후보 6* — 변화 없음 (09-29 이후 동일)
@@ -169,7 +171,7 @@ GOLDEN_A_KR_QUIET = """\
 점수 = 재무점수(밸류+건전성, DART 연간, 가격요인 없음) · 가격 줄은 참고용 · 상세 /stock 코드
 
 *📒 지난 후보 성과*
-성적: 07-13 이후 이 리스트 보유 -2.4% · 홈지수 -0.0% · 초과 -2.3%p (10-07 종가, 비용 포함) · 소급 포함 · ⏳검증 전 3/6
+성적: 07-13 이후 이 리스트 보유 -2.4% · 코스피 -0.0% · 초과 -2.3%p (10-07 종가, 비용 포함) · 소급 포함 · ⏳검증 전 (4주 구간 3/6)
 
 규칙 기반 참고 자료 · 투자 자문 아님 — 투자 결정은 본인 책임"""
 
@@ -195,7 +197,7 @@ SM SM Energy Company 86 · $35.25 · 200일선 +25% · 선정 후 +18.6%
 점수 = 재무점수(밸류+건전성, FMP 최근 4분기) · 가격 줄은 참고용, 점수 미반영 · 상세 /stock 티커
 
 *📒 지난 후보 성과*
-성적: 07-13 이후 이 리스트 보유 -0.6% · SPY +4.0% · 초과 -4.5%p (10-07 종가, 비용 포함) · 소급 포함 · ⏳검증 전 3/6
+성적: 07-13 이후 이 리스트 보유 -0.6% · SPY +4.0% · 초과 -4.5%p (10-07 종가, 비용 포함) · 소급 포함 · ⏳검증 전 (4주 구간 3/6)
 
 규칙 기반 참고 자료 · 투자 자문 아님 — 투자 결정은 본인 책임"""
 
@@ -871,11 +873,20 @@ def test_assemble_rule_version_transition_day_notes_restart(fresh_db, monkeypatc
     b = dg.assemble_daily_digest("kr", now=NOW_KR)
     assert "규칙 v1 기준으로 성과 집계 재시작" in b.text
     assert "선정 후" not in b.text and b.dd10_new == {}
-    # 판정: 원장이 새 규칙 기준선을 기록하는 날 — 매수 검토·탈락 대신 '재구성'
+    # 판정: 원장이 새 규칙 기준선을 기록하는 날 — 매수 검토·탈락 없음. 후보 목록이 같으면 '재구성' 이
+    # 아니라 '전환 (후보 동일)' (후보 섹션 '변화 없음' 과 모순처럼 읽히지 않게, RVM-06)
     assert b.verdict.n_buy == 0 and b.verdict.n_drop == 0
-    assert "규칙 v1 로 후보 재구성" in b.verdict.reasons
+    assert b.verdict.reasons[0] == "규칙 v1 전환 (후보 동일)"
+    assert "변화 없음" in b.text and "재구성" not in b.text
     assert any("규칙 버전 전환 v0 → v1" in x for x in b.owner_extra)
     assert_bold_only(b.text)
+    # 후보가 실제로 바뀐 전환일은 현행 '규칙 v1 로 후보 재구성 (편입 N · 탈락 M)'
+    prev2 = [LedgerPick("2026-07-13", "KR", 1, "OLD1", "OLD1", "069500.KS", "v0", "reconstructed",
+                        name="옛종목", total_score=95), prev[1]]
+    _wire(monkeypatch, picks=rows, prev=prev2)
+    b1 = dg.assemble_daily_digest("kr", now=NOW_KR)
+    assert b1.verdict.reasons[0] == "규칙 v1 로 후보 재구성 (편입 1 · 탈락 1)"
+    assert (b1.verdict.n_buy, b1.verdict.n_drop) == (0, 0)
     # 직전 리스트가 현재 규칙이면 표기 없음
     _wire(monkeypatch, picks=rows, prev=_prev(*[(r.symbol, r.total_score) for r in rows]))
     assert "성과 집계 재시작" not in dg.assemble_daily_digest("kr", now=NOW_KR).text
@@ -951,3 +962,139 @@ def test_build_daily_digest_keeps_string_contract(fresh_db, monkeypatch):
     _wire(monkeypatch, picks=KR_ROWS)
     out = dg.build_daily_digest(market="kr", top_n=6, tickers=("NVDA",), suggest_weights=True)
     assert isinstance(out, str) and out.startswith("*🇰🇷 ")
+
+
+# ----------------------------------------------------------------------
+# S3P-MSG — 메시지 표기 정리 (P1 KR 근거 단위 · P2 US 범례 · P3 용어 · P4 월요일 · P5 검증 미달 · P6 동기화 지연)
+# ----------------------------------------------------------------------
+
+
+def test_evidence_kr_per_keeps_number_only_when_detail_has_one_off_note():
+    """RVQ-6: detail PER '7.7 (일회성 의심→3년평균)' → 근거 줄은 'PER 7.7배', 일회성은 꼬리표 하나로."""
+    kr = {"health": {"components": [["ROE", 20, 35, "8.1%"]]},
+          "value": {"components": [["PER", 28.0, 40, "7.7 (일회성 의심→3년평균)"], ["PBR", 30.0, 35, "0.61"]]}}
+    assert dg.evidence_from_detail(kr, "KR", ("one_off",)) == "PER 7.7배 · PBR 0.61 · ROE 8.1% · 일회성이익 가드"
+    assert dg.evidence_from_detail(kr, "KR", ()) == "PER 7.7배 · PBR 0.61 · ROE 8.1%"
+    cap = {"value": {"components": [["PER", 0, 40, "12.3 (일회성 의심→영업이익 상한)"]]}}
+    assert dg.evidence_from_detail(cap, "KR", ("one_off",)) == "PER 12.3배 · 일회성이익 가드"
+    none = {"value": {"components": [["PER", 0, 40, "—"], ["PBR", 0, 35, "—"]]}}
+    assert dg.evidence_from_detail(none, "KR") == "PER — · PBR —"
+
+
+def test_us_basis_label_and_legend_follow_row_basis():
+    """RVQ-4: 범례는 후보 행별 detail.basis — 전부 ttm / 섞임 / ttm 없음(연간 폴백·재점수 전 None)."""
+    assert dg.us_basis_label(["ttm", "ttm"]) == "FMP 최근 4분기"
+    assert dg.us_basis_label(["ttm", "annual"]) == "FMP 최근 4분기·일부 연간"
+    assert dg.us_basis_label(["ttm", None]) == "FMP 최근 4분기·일부 연간"
+    assert dg.us_basis_label(["annual", None]) == "FMP 연간"
+    assert dg.us_basis_label([]) == "FMP 최근 4분기"
+    rows = [_row("A", "a", 90, 90, 90, "US", "Energy", basis="ttm"),
+            _row("B", "b", 88, 88, 88, "US", "Tech", basis="annual")]
+    diff = dg.ListDiff("2026-10-07", False, kept=["A", "B"])
+    views = [dg.PickView(row=r, kind="keep", metrics=_metrics(1, 0, 0, 0, 0)) for r in rows]
+    legend = dg.render_candidates("US", views, diff)[-1]
+    assert legend.startswith("점수 = 재무점수(밸류+건전성, FMP 최근 4분기·일부 연간)")
+    old = [_row("A", "a", 90, 90, 90, "US", "Energy", basis="annual")]
+    legend2 = dg.render_candidates("US", [dg.PickView(row=old[0], kind="keep", metrics=_metrics(1, 0, 0, 0, 0))],
+                                   dg.ListDiff("2026-10-07", False, kept=["A"]))[-1]
+    assert "FMP 연간)" in legend2 and "4분기" not in legend2
+    # KR 범례는 그대로 'DART 연간'
+    assert "DART 연간" in dg.render_candidates("KR", _kr_views(), dg.ListDiff("2026-10-07", False))[-1]
+
+
+def test_reason_core_strips_score_marks_and_expands_hy():
+    """RVM-06: 구독자 국면 근거에서 '(+1)'·'(0)'·'(-1)' 제거, 캐시 표기는 날짜만, 'HY' → '하이일드'."""
+    line = "근거: 금리차 +0.36%p(+1) · HY 3.24%(0, 10-06 캐시) · 실업수당 z+0.3(-1) · 금리차 실패 — 2/3 지표, 10-07 기준"
+    assert dg._reason_core(line) == "금리차 +0.36%p · 하이일드 3.24% (10-06 캐시) · 실업수당 z+0.3 · 금리차 실패"
+    assert dg._reason_core("") == ""
+    assert dg._reason_core("근거: 지표 없음 — 0/3 지표") == "지표 없음"
+    # 'HY' 가 토큰 선두가 아닌 곳(회사명 등)은 건드리지 않음, 점수 외 괄호는 보존
+    assert dg._reason_core("근거: HYUNDAI 5%(0) · 금 -3% (경보)") == "HYUNDAI 5% · 금 -3% (경보)"
+
+
+def test_candidates_title_tagged_when_ledger_demoted_only():
+    """사용자 결정 #9 A안: 원장 status 'demoted' 면 제목에 ' · 검증 미달', 설명 줄 추가 없음. testing/pending 은 그대로."""
+    diff = dg.ListDiff("2026-10-07", False, kept=[r.symbol for r in KR_ROWS])
+    for status in ("pending", "testing", "validated"):
+        lines = dg.render_candidates("KR", _kr_views(), diff, ledger_status=status)
+        assert lines[0].startswith("*📋 한국 스크리닝 후보 6* — 변화 없음")
+    lines = dg.render_candidates("KR", _kr_views(), diff, ledger_status="demoted")
+    assert lines[0] == "*📋 한국 스크리닝 후보 6 · 검증 미달* — 변화 없음"
+    assert lines[1].startswith("009970 ")                       # 바로 종목 줄 — 설명 줄 없음
+    # 전체 렌더: 📒 줄의 🔻 와 짝
+    demoted = dict(SUMMARY_KR, status="demoted", blocks={"n": 6, "mean": -2.1, "t": -1.4, "blocks": []})
+    text = dg.render_with_budget(_kr_quiet_inputs(ledger_summary=demoted))
+    assert "*📋 한국 스크리닝 후보 6 · 검증 미달* — 변화 없음" in text and "🔻 4주 구간 6개 평균 -2.1%p" in text
+    assert_bold_only(text)
+    # 📒 줄이 구독자에게 안 가는 owner 모드(show_ledger=False)면 제목에도 붙이지 않는다
+    text_owner = dg.render_digest(_kr_quiet_inputs(ledger_summary=demoted, show_ledger=False))
+    assert "검증 미달" not in text_owner
+    # 보류일 제목은 별도 형식 — 영향 없음
+    assert dg.render_candidates("KR", _kr_views(), diff, hold_age=16, ledger_status="demoted")[0] == \
+        "*📋 한국 스크리닝 후보* — 보류"
+
+
+def test_decide_actions_unsynced_neutralizes_diff_with_priority():
+    """RVM-08: 레플리카 미동기화일 — 매수/탈락 0, 사유 '데이터 동기화 지연 — 후보 비교 보류'.
+    우선순위 보류 > 동기화 지연 > 전환(기준 수립). 새 알림은 그대로."""
+    diff = dg.ListDiff(prev_date="2026-10-07", first_run=False, new=["X"],
+                       dropped=[dg.DroppedPick("Z", "z", "순위 밖")], kept=["A"])
+    v = dg.decide_actions(diff, [], unsynced=True)
+    assert v.label == "없음" and (v.n_buy, v.n_drop) == (0, 0)
+    assert v.reasons == [dg.REASON_UNSYNCED, "새 알림 없음"]
+    alert = Alert("warning", "drawdown", "금 -12%", key="dd:금:enter")
+    v2 = dg.decide_actions(diff, [alert], unsynced=True, warn_count=1)
+    assert v2.label == "리스크 점검 1" and v2.reasons == [dg.REASON_UNSYNCED, "금 낙폭 경보", "⚠️ 데이터 점검 1건"]
+    # 보류 > 동기화 지연
+    assert dg.decide_actions(diff, [], unsynced=True, held_age=20).reasons[0] == "후보 보류 (점수 20일 경과)"
+    # 동기화 지연 > 전환
+    v3 = dg.decide_actions(diff, [], unsynced=True, baseline_note="규칙 v1 로 후보 재구성 (편입 1 · 탈락 1)")
+    assert v3.reasons[0] == dg.REASON_UNSYNCED and v3.label == "없음"
+    # 첫 기록처럼 보여도 미동기화면 '기준 수립' 을 단정하지 않는다
+    v4 = dg.decide_actions(dg.diff_lists([], KR_ROWS), [], unsynced=True)
+    assert v4.reasons[0] == dg.REASON_UNSYNCED
+    assert dg.decide_actions(diff, [], unsynced=False).label == "매수 검토 1 · 탈락 1"
+
+
+def test_assemble_unsynced_replica_holds_list_verdict_but_records_ledger(fresh_db, monkeypatch):
+    """RVM-08 통합: init_sync='error'(초기 pull 실패) → 판정 중립 + 소유자 notes 에 직전 리스트 기준일,
+    후보 섹션·원장 기록(record_ledger)은 그대로. 'ok'/'local' 이면 기존 판정."""
+    prev = _prev(("OLD1", 95), *[(r.symbol, r.total_score) for r in KR_ROWS[1:]])
+    _wire(monkeypatch, picks=KR_ROWS, prev=prev)
+    monkeypatch.setattr(storage_mod.get_storage(), "init_sync", "error", raising=False)
+    b = dg.assemble_daily_digest("kr", now=NOW_KR)
+    first = b.text.splitlines()[0]
+    assert "오늘 할 일: 없음" in first and dg.REASON_UNSYNCED in first
+    assert b.diff.changed and (b.verdict.n_buy, b.verdict.n_drop) == (0, 0)
+    assert b.record_ledger and not b.hold
+    assert "신규 1 · 탈락 1" in b.text                              # 후보 섹션의 diff 표시는 유지
+    assert any(x.startswith("동기화 지연: 직전 리스트 기준일 10-07") for x in b.owner_extra)
+    assert "일부 데이터 갱신 지연" in b.text                        # health storage_error 상태 줄
+    assert_bold_only(b.text)
+    # 동기화 정상이면 매수 검토·탈락
+    _wire(monkeypatch, picks=KR_ROWS, prev=prev)
+    monkeypatch.setattr(storage_mod.get_storage(), "init_sync", "ok", raising=False)
+    assert dg.assemble_daily_digest("kr", now=NOW_KR).verdict.label == "매수 검토 1 · 탈락 1"
+    # 보류일이 우선
+    rows16 = [ScanRow(**{**r.__dict__, "fund_asof": "2026-09-22"}) for r in KR_ROWS]
+    _wire(monkeypatch, picks=rows16, prev=prev, fresh={"fund_asof": "2026-09-22", "price_asof": None, "age_days": 16})
+    monkeypatch.setattr(storage_mod.get_storage(), "init_sync", "error", raising=False)
+    bh = dg.assemble_daily_digest("kr", now=NOW_KR)
+    assert bh.verdict.reasons[0] == "후보 보류 (점수 16일 경과)"
+
+
+def test_render_ledger_monday_block_replaces_daily_line_without_duplicate():
+    """RVM-05: 월요일 📒 = 일일 줄을 대체하는 compact 블록 2줄 — '리스트 보유' 는 1번만, 꼬리표·상태·
+    최대낙폭·구간별 초과 전부 포함, 선두 📒 는 제목에 있으니 뗀다."""
+    monday = datetime(2026, 10, 12, 8, 30, tzinfo=dg.KST)
+    fresh = dict(SUMMARY_KR, computed_at="2026-10-11T23:00:00+00:00", price_asof="2026-10-09")
+    lines, footer = dg.render_ledger(fresh, now=monday, has_history=True, weekly=True)
+    assert footer is None and len(lines) == 3
+    assert lines[1] == ("성적: 07-13~10-09 이 리스트 보유 -2.4% · 코스피 -0.0% · 초과 -2.3%p "
+                        "(배당·비용 10bp 포함) · 소급 포함 · ⏳검증 전 (4주 구간 3/6)")
+    assert lines[2] == ("  주간 성적표: 최대낙폭 -6.8% (지수 -25.0%) · 4주 구간 초과 +1.0, -2.0, -3.0 · "
+                        "지평 적중은 픽 6건 이상 완료 후 표시")
+    assert sum(1 for ln in lines if "리스트 보유" in ln) == 1 and not any(ln.startswith("📒") for ln in lines)
+    # 평일은 일일 줄 그대로
+    weekday_lines, _ = dg.render_ledger(fresh, now=monday, has_history=True, weekly=False)
+    assert len(weekday_lines) == 2 and weekday_lines[1].startswith("성적: 07-13 이후 이 리스트 보유 -2.4%")
