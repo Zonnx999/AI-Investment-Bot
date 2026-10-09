@@ -31,7 +31,9 @@ from collections import Counter, defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
+from src.config import settings
 from src.exceptions import (
     ApiAuthError,
     ApiAuthorizationError,
@@ -995,7 +997,8 @@ def calculate_kr_scores(fin: dict, market_cap: float, *, name: str = "") -> dict
     profit = ni is not None and ni > 0
     # 일회성 가드가 순이익을 None 으로 만든 경우(op ≤ 0 이고 3개년 이력 없음)는 실제 보고
     # 순이익이 흑자이므로 '적자' 로 표기하면 사실과 다름 → '일회성 의심' (점수는 0점 유지).
-    profit_detail = "흑자" if profit else ("일회성 의심" if (one_off and ni is None) else "적자")
+    # ni 가 가드를 통과해 양수가 아닌 값(min(ni, 3년 평균) ≤ 0)으로 남은 경로도 같은 문구 (S2FIX S11).
+    profit_detail = "흑자" if profit else ("일회성 의심" if one_off else "적자")
 
     from src.screener import Component, ScoreCard
 
@@ -1216,35 +1219,50 @@ def scan(
     return [_row_to_scan(r) for r in rows]
 
 
-def lookup(symbol: str) -> ScanRow | None:
+def lookup(symbol: str, market: str | None = None) -> ScanRow | None:
     """특정 종목의 점수·순위 조회 (내 종목이 저평가인지 확인용).
 
-    같은 심볼이 여러 시장에 있으면(주식 vs 동명 크립토) 주식(US→KR) 우선.
+    market 미지정: 같은 심볼이 여러 시장에 있으면(주식 vs 동명 크립토) 주식(US→KR→CRYPTO) 우선.
+    market 지정('US'/'KR'/'CRYPTO', 대소문자 무관): 그 시장 행만 (CMAP-11 — 'SUI' 가 US 티커와
+    크립토에 모두 있을 때 `/stock SUI crypto` 로 지정).
     **제외 행도 반환** — ScanRow.excluded 에 사유 (예: 'sibling' = 보통주 아님).
     """
     conn = _conn()
-    r = conn.execute(
-        f"""{_scan_select(_cols(conn))}
-           WHERE symbol = ? AND enriched = 1
-           ORDER BY CASE market WHEN 'US' THEN 0 WHEN 'KR' THEN 1 ELSE 2 END
-           LIMIT 1""",
-        (symbol.upper(),),
-    ).fetchone()
+    sql = f"{_scan_select(_cols(conn))} WHERE symbol = ? AND enriched = 1"
+    args: tuple = (symbol.upper(),)
+    if market:
+        sql += " AND market = ?"
+        args += (market.upper(),)
+    sql += " ORDER BY CASE market WHEN 'US' THEN 0 WHEN 'KR' THEN 1 ELSE 2 END LIMIT 1"
+    r = conn.execute(sql, args).fetchone()
     return _row_to_scan(r) if r else None
 
 
-def lookup_detail(symbol: str) -> dict | None:
+def lookup_markets(symbol: str) -> list[str]:
+    """심볼이 보강된 상태로 존재하는 시장 목록(US→KR→CRYPTO 순) — '다른 시장에도 있음' 안내용 (CMAP-11)."""
+    conn = _conn()
+    rows = conn.execute(
+        "SELECT DISTINCT market FROM screened WHERE symbol = ? AND enriched = 1 "
+        "ORDER BY CASE market WHEN 'US' THEN 0 WHEN 'KR' THEN 1 ELSE 2 END",
+        (symbol.upper(),),
+    ).fetchall()
+    return [str(r[0]) for r in rows]
+
+
+def lookup_detail(symbol: str, market: str | None = None) -> dict | None:
     """종목의 점수 분해 JSON (--check / 텔레그램 /stock 용). 없으면 None.
 
     반환 형태: {"health": {total, components:[[label,pts,max,detail],...]},
                 "value": {...}, (신형) "basis", "flags", "fin"/"raw"}
     """
     conn = _conn()
-    r = conn.execute(
-        "SELECT detail FROM screened WHERE symbol=? AND enriched=1 AND detail IS NOT NULL "
-        "ORDER BY CASE market WHEN 'US' THEN 0 WHEN 'KR' THEN 1 ELSE 2 END LIMIT 1",
-        (symbol.upper(),),
-    ).fetchone()
+    sql = "SELECT detail FROM screened WHERE symbol=? AND enriched=1 AND detail IS NOT NULL"
+    args: tuple = (symbol.upper(),)
+    if market:
+        sql += " AND market=?"
+        args += (market.upper(),)
+    sql += " ORDER BY CASE market WHEN 'US' THEN 0 WHEN 'KR' THEN 1 ELSE 2 END LIMIT 1"
+    r = conn.execute(sql, args).fetchone()
     if not r or not r[0]:
         return None
     try:
@@ -1253,8 +1271,17 @@ def lookup_detail(symbol: str) -> dict | None:
         return None
 
 
-def _is_holding_row(row: ScanRow) -> bool:
+def is_holding_row(row: ScanRow) -> bool:
+    """KR 지주사 판정 — detail.flags 'holding' **또는** 이름 규칙(kr_is_holding).
+
+    pick_top 의 지주사 상한과 /stock·/scan 의 '지주사' 꼬리표가 **같은 함수**를 쓴다 (S2FIX S2:
+    flags 만 보던 꼬리표가 상한 판정과 어긋나 영원무역홀딩스·F&F홀딩스에 꼬리표가 빠졌었음).
+    시장 확인은 호출부 책임 — pick_top 은 KR 일 때만, 표면은 market == 'KR' 일 때만 부른다.
+    """
     return "holding" in row.flags or kr_is_holding(row.name)
+
+
+_is_holding_row = is_holding_row   # 하위호환 별칭 (구 비공개 이름)
 
 
 def pick_top(
@@ -1281,7 +1308,7 @@ def pick_top(
         if len(picked) >= n:
             break
         if market == "KR":
-            is_h = _is_holding_row(r)
+            is_h = is_holding_row(r)
             if is_h and max_holding is not None and holdings >= max_holding:
                 continue
             holdings += int(is_h)
@@ -1296,6 +1323,30 @@ def pick_top(
 def top_symbols(n: int = 6, market: str = "US") -> list[str]:
     """pick_top 의 심볼 리스트 래퍼 (다이제스트 발굴 종목 연동용). DB 가 비면 빈 리스트."""
     return [row.symbol for row in pick_top(market, n)]
+
+
+_KST = ZoneInfo("Asia/Seoul")
+
+
+def asof_status(fund_asof: str | None, *, today: date | None = None) -> dict:
+    """점수 기준일(재무) → {"age_days", "warn", "hold"} — 표면 공통 노후 판정 (S2FIX S3).
+
+    다이제스트(digest.assemble_daily_digest)와 같은 규칙: 경과일은 **KST 오늘 − 점수 기준일**,
+    warn = age ≥ settings.universe_warn_days(기본 8, '주간 갱신 지연' ⚠️), hold = age ≥
+    settings.universe_hold_days(기본 15, 후보 보류). 기준일이 없거나 파싱 불가면 age None·warn/hold False.
+    /stock·/scan 이 이 함수를 쓰므로 같은 날 표면마다 ⚠️ 가 어긋나지 않는다.
+    """
+    age: int | None = None
+    if fund_asof:
+        try:
+            age = ((today or datetime.now(_KST).date()) - date.fromisoformat(str(fund_asof)[:10])).days
+        except ValueError:
+            age = None
+    return {
+        "age_days": age,
+        "warn": age is not None and age >= settings.universe_warn_days,
+        "hold": age is not None and age >= settings.universe_hold_days,
+    }
 
 
 def freshness(market: str = "US") -> dict:

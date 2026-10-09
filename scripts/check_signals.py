@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 
+from src.findings import LABEL_HEALTH, LABEL_VALUE
 from src.logger import get_logger
 from src.signals import DEFAULT_SIGNAL_TICKERS, REGIME_CONFIRM_DATES, generate_signal_report
 
@@ -60,7 +61,7 @@ def main() -> int:
     # ---------- 1. 팩터 점수 ----------
     print("\n[1] 팩터 점수  (각 0~100, 높을수록 매력적)")
     print("-" * 78)
-    print(f"  {'종목':<8} {'모멘텀':>8} {'밸류':>8} {'퀄리티':>8} {'종합':>8}")
+    print(f"  {'종목':<8} {'모멘텀':>8} {LABEL_VALUE:>8} {LABEL_HEALTH:>8} {'종합':>8}")
     for f in sorted(report.factors, key=lambda x: x.composite, reverse=True):
         print(f"  {f.ticker:<8} {f.momentum:>8} {f.value:>8} {f.quality:>8} {f.composite:>8}")
     print()

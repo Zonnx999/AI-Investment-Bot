@@ -182,3 +182,37 @@ def test_from_screen_candidate_loss_maker():
     assert fd.score is None
     assert fd.summary == "적자"
     assert fd.evidence == ()
+
+
+# ---------------- S2FIX-SURFACE S5: 라벨·면책 단일 출처 ----------------
+
+
+def test_label_constants_and_score_labels_single_source():
+    from src import findings
+
+    assert findings.LABEL_CRYPTO_VALUE == "변동성" and findings.LABEL_CRYPTO_HEALTH == "순위"
+    assert findings.score_labels("CRYPTO") == ("변동성", "순위")
+    assert findings.score_labels("US") == (findings.LABEL_VALUE, findings.LABEL_HEALTH)
+    assert findings.score_labels(None) == ("밸류", "건전성")
+    assert "투자 자문 아님" in findings.DISCLAIMER
+
+
+def test_surfaces_import_labels_from_findings():
+    """bot_commands·scripts/scan.py·check_signals 가 findings 의 같은 객체를 쓴다 (레이어 역전 해소)."""
+    import importlib.util
+    from pathlib import Path
+
+    from src import bot_commands, findings
+
+    assert bot_commands.DISCLAIMER is findings.DISCLAIMER
+    assert bot_commands.LABEL_CRYPTO_VALUE is findings.LABEL_CRYPTO_VALUE
+    root = Path(__file__).resolve().parents[1]
+    for name in ("scan", "check_signals"):
+        text = (root / "scripts" / f"{name}.py").read_text(encoding="utf-8")
+        assert "from src.bot_commands" not in text
+        assert "from src.findings import" in text
+    assert "퀄리티" not in (root / "scripts" / "check_signals.py").read_text(encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("scan_script_under_test", root / "scripts" / "scan.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.DISCLAIMER is findings.DISCLAIMER

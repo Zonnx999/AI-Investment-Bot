@@ -660,3 +660,93 @@ def test_ledger_strips_markdown_specials_from_snake_case_tokens(fresh_db, owner_
     for ch in "_*`[":
         assert ch not in out
     assert "no price" in out and "no bench" in out and "pre rescore" in out
+
+
+# ---------------- S2FIX-SURFACE: S2 지주사 꼬리표 · S3 기준일 통일 · S6 · S8 ----------------
+
+
+def test_flag_tag_holding_by_name_rule_only(fresh_db):
+    """이름 규칙(홀딩스)으로만 지주사인 KR 행: detail.flags 에 'holding' 이 없어도 꼬리표가 붙는다 (S2)."""
+    conn = universe._conn()
+    _seed_full(conn, "105630", "KR", name="영원무역홀딩스", total=92, sector="")
+    _seed_full(conn, "000100", "KR", name="쿠쿠홈시스", total=80, sector="")
+    assert bc._flag_tags(universe.lookup("105630")) == ["지주사"]
+    assert bc._flag_tags(universe.lookup("000100")) == []
+    assert "🏷 지주사" in bc.handle_stock("105630")
+    scan = bc.handle_scan("kr")
+    line = next(ln for ln in scan.splitlines() if "105630" in ln)
+    assert "지주사" in line
+    assert "지주사" not in next(ln for ln in scan.splitlines() if "000100" in ln)
+
+
+def test_flag_tag_holding_not_applied_to_us_name(fresh_db):
+    """US 행은 이름에 'Holdings' 가 있어도 KR 전용 지주사 꼬리표를 달지 않는다."""
+    row = _row("ABC", market="US", name="Acme Holdings")
+    assert bc._flag_tags(row) == []
+
+
+def test_scan_footer_asof_boundary_matches_digest_thresholds():
+    """today−fund_asof == 8 → 경고, 7 → 없음 (settings.universe_warn_days), 15 → 보류 안내 (S3)."""
+    today = date(2026, 10, 9)
+
+    def rows(fund):
+        return [ScanRow(**{**_row("AAA").__dict__, "fund_asof": fund, "price_asof": "2026-10-08"})]
+
+    assert "⚠️" in bc.format_scan("US", rows("2026-10-01"), today=today)
+    assert "⚠️" not in bc.format_scan("US", rows("2026-10-02"), today=today)
+    assert "일 전 기준" in bc.format_scan("US", rows("2026-10-01"), today=today)
+    out14 = bc.format_scan("US", rows("2026-09-25"), today=today)
+    assert "⚠️" in out14 and "보류" not in out14
+    out15 = bc.format_scan("US", rows("2026-09-24"), today=today)
+    assert "보류" in out15 and "재점수" in out15
+    # 가격 기준일이 오래돼도 (재무 기준일이 신선하면) ⚠️ 는 다이제스트처럼 재무 기준일만 본다
+    old_px = [ScanRow(**{**_row("AAA").__dict__, "fund_asof": "2026-10-08", "price_asof": "2026-09-01"})]
+    assert "⚠️" not in bc.format_scan("US", old_px, today=today)
+
+
+def test_scan_footer_uses_oldest_pick_fund_asof():
+    today = date(2026, 10, 9)
+    mixed = [ScanRow(**{**_row("AAA").__dict__, "fund_asof": "2026-10-08"}),
+             ScanRow(**{**_row("BBB").__dict__, "fund_asof": "2026-10-01"})]
+    out = bc.format_scan("US", mixed, today=today)
+    assert "재무 2026-10-01" in out and "⚠️" in out
+
+
+def test_ledger_summary_shape_errors_become_notice(fresh_db, owner_set, monkeypatch, caplog):
+    """report_text 가 summary 필드 누락(KeyError) 등을 던져도 안내 문구로 변환 (S6)."""
+    import src.ledger as ledger
+
+    for exc in (KeyError("summary"), TypeError("x"), ValueError("y")):
+        def boom(m, _e=exc):
+            raise _e
+
+        monkeypatch.setattr(ledger, "report_text", boom)
+        with caplog.at_level("WARNING"):
+            out = bc.handle_ledger("us", owner_set)
+        assert "읽지 못했습니다" in out
+    assert any("원장 요약 처리 실패" in r.getMessage() for r in caplog.records)
+
+
+def test_parse_stock_second_arg_and_help_mentions_market():
+    assert bc.parse_command("/stock SUI crypto") == bc.Command("stock", "SUI", "crypto")
+    assert "crypto" in bc.HELP_TEXT and "/stock <티커>" in bc.HELP_TEXT
+
+
+def test_stock_market_arg_and_other_market_note(fresh_db):
+    """CMAP-11: /stock SUI → 첫 결과(US) + '다른 시장에도 있음: CRYPTO', /stock SUI crypto → 크립토 행."""
+    conn = universe._conn()
+    _seed_full(conn, "SUI", "US", name="Sui Corp", total=60, sector="Tech")
+    _seed_full(conn, "SUI", "CRYPTO", name="Sui", total=77, value=50, health=90, sector="")
+    default = bc.handle_stock("sui")
+    assert "종합 *60*" in default
+    assert "다른 시장에도 있음: CRYPTO" in default and "/stock SUI crypto" in default
+    crypto = bc.handle_stock("SUI", "crypto")
+    assert "종합 *77*" in crypto and "변동성 50" in crypto and "순위 90" in crypto
+    assert "다른 시장에도 있음" not in crypto
+    assert "사용법" in bc.handle_stock("SUI", "jp")
+    assert "찾지 못" in bc.handle_stock("SUI", "kr")
+    # 한 시장에만 있으면 안내 줄 없음
+    _seed_full(conn, "ONLY", "US", name="Only Inc", total=50)
+    assert "다른 시장에도 있음" not in bc.handle_stock("ONLY")
+    # respond 경유로도 두 번째 인자가 전달된다
+    assert "종합 *77*" in bc.respond("/stock SUI crypto", "1")

@@ -47,6 +47,22 @@ LABEL_TOTAL = "종합"
 # 종목 목록의 중립 어휘 (RPP-01) — 점수는 규칙 통과 순위일 뿐 투자 권유가 아님.
 LABEL_CANDIDATES = "스크리닝 후보"
 
+# 크립토는 screened 컬럼을 재사용해 value_score=변동성점수, health_score=순위점수 로 저장됨
+# (universe._store_crypto_scored) → 표시 라벨을 시장별로 바꾼다 (CMAP-05). 표면(/stock·/scan·
+# scripts/scan.py·check_signals)이 모두 여기서 import — 라벨 정의는 이 파일 한 곳 (S2FIX-SURFACE S5).
+LABEL_CRYPTO_VALUE = "변동성"
+LABEL_CRYPTO_HEALTH = "순위"
+
+# 봇·CLI 공통 면책 한 줄. (다이제스트는 자체 확장 문구 digest.DISCLAIMER 를 쓴다.)
+DISCLAIMER = "투자 자문 아님, 모든 결정은 본인 책임."
+
+
+def score_labels(market: str | None) -> tuple[str, str]:
+    """(value_score 라벨, health_score 라벨) — 시장별 의미. CRYPTO 만 변동성/순위, 그 외 밸류/건전성."""
+    if market == "CRYPTO":
+        return LABEL_CRYPTO_VALUE, LABEL_CRYPTO_HEALTH
+    return LABEL_VALUE, LABEL_HEALTH
+
 
 @dataclass(frozen=True)
 class Finding:
