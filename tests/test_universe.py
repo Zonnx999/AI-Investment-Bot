@@ -1141,8 +1141,8 @@ def test_pick_top_us_sector_cap(fresh_db):
 def test_pick_top_kr_holding_cap(fresh_db):
     conn = universe._conn()
     for i, (sym, name, total) in enumerate([
-        ("H1", "A홀딩스", 95), ("H2", "B지주", 94), ("H3", "C홀딩스", 93), ("H4", "D Holdings", 92),
-        ("N1", "삼성전자", 91), ("N2", "에스엠", 90), ("F1", "KB금융지주", 89),
+        ("H00001", "A홀딩스", 95), ("H00002", "B지주", 94), ("H00003", "C홀딩스", 93), ("H00004", "D Holdings", 92),
+        ("N00001", "삼성전자", 91), ("N00002", "에스엠", 90), ("F00001", "KB금융지주", 89),
     ]):
         universe._upsert_universe_row(conn, symbol=sym, market="KR", name=name, sector="우량기업부",
                                       industry="", price=1.0, market_cap=1e12 - i, dividend_yield=0.0)
@@ -1150,14 +1150,30 @@ def test_pick_top_kr_holding_cap(fresh_db):
                      "WHERE symbol=? AND market='KR'", (total, total, total, sym))
     conn.commit()
     picked = [r.symbol for r in universe.pick_top("KR", 6)]
-    assert picked == ["H1", "H2", "N1", "N2", "F1"]        # 지주 2개 상한 (금융지주는 지주 아님), 섹터 상한 미적용
-    assert [r.symbol for r in universe.pick_top("KR", 6, max_holding=None)][:4] == ["H1", "H2", "H3", "H4"]
+    assert picked == ["H00001", "H00002", "N00001", "N00002", "F00001"]        # 지주 2개 상한 (금융지주는 지주 아님), 섹터 상한 미적용
+    assert [r.symbol for r in universe.pick_top("KR", 6, max_holding=None)][:4] == ["H00001", "H00002", "H00003", "H00004"]
+
+
+def test_pick_top_kr_skips_unrecordable_codes(fresh_db):
+    """RVM-02: KR 비표준 코드(ADR 'KT')는 kr_adr 위생이 아직 안 돌았어도 후보에서 빠지고 다음 순위가
+    채운다 — 원장 미기록 → 매일 '신규' 반복을 막는 2차 방어선. 0126Z0 같은 영숫자 6자리는 정상."""
+    from src import ledger
+
+    assert universe.KR_CODE_RE.pattern == ledger._KR_CODE_RE.pattern
+    conn = universe._conn()
+    for i, (sym, total) in enumerate([("KT", 99), ("0126Z0", 95), ("005930", 90), ("SSNLF", 89)]):
+        universe._upsert_universe_row(conn, symbol=sym, market="KR", name=f"n{i}", sector="", industry="",
+                                      price=1.0, market_cap=1e12 - i, dividend_yield=0.0)
+        conn.execute("UPDATE screened SET enriched=1, total_score=?, value_score=?, health_score=? "
+                     "WHERE symbol=? AND market='KR'", (total, total, total, sym))
+    conn.commit()
+    assert [r.symbol for r in universe.pick_top("KR", 6)] == ["0126Z0", "005930"]
 
 
 def test_pick_top_uses_detail_holding_flag(fresh_db):
     conn = universe._conn()
-    for sym, name, flags in [("X1", "대웅", ["holding"]), ("X2", "한화", ["holding"]), ("X3", "CJ", ["holding"]),
-                             ("Y1", "현대차", [])]:
+    for sym, name, flags in [("X00001", "대웅", ["holding"]), ("X00002", "한화", ["holding"]), ("X00003", "CJ", ["holding"]),
+                             ("Y00001", "현대차", [])]:
         universe._upsert_universe_row(conn, symbol=sym, market="KR", name=name, sector="", industry="",
                                       price=1.0, market_cap=1e12, dividend_yield=0.0)
         conn.execute("UPDATE screened SET enriched=1, total_score=90, value_score=90, health_score=90, "
@@ -1165,7 +1181,7 @@ def test_pick_top_uses_detail_holding_flag(fresh_db):
                      (_json.dumps({"health": {}, "value": {}, "flags": flags}), sym))
     conn.commit()
     picked = universe.pick_top("KR", 6)
-    assert sum("holding" in r.flags for r in picked) == 2 and "Y1" in [r.symbol for r in picked]
+    assert sum("holding" in r.flags for r in picked) == 2 and "Y00001" in [r.symbol for r in picked]
 
 
 def test_pick_top_empty_and_min_total(fresh_db):
@@ -1173,6 +1189,55 @@ def test_pick_top_empty_and_min_total(fresh_db):
     conn = universe._conn()
     _seed_stock(conn, "LOW", "US", 40)
     assert universe.pick_top("US", 6, min_total=50) == []
+
+
+def _set_updated(conn, symbol, market, day):
+    conn.execute("UPDATE screened SET updated_at=? WHERE symbol=? AND market=?",
+                 (f"{day}T01:30:00+00:00", symbol, market))
+    conn.commit()
+
+
+def test_scan_excludes_row_lagging_market_batch(fresh_db):
+    """RVQ-1: 직전 주간 배치에서 재보강 못 한 1행(옛 점수)은 후보에서 빠지고 lagging_rows 로 보인다."""
+    conn = universe._conn()
+    for i, (sym, total, day) in enumerate([
+        ("SM", 99, "2026-09-26"),        # 기준일보다 7일 뒤처짐 → 제외
+        ("OLD6", 97, "2026-09-27"),      # 6일 → 유지 (정상 배치 범위 밖이지만 1주 미만)
+        ("A", 90, "2026-10-03"), ("B", 89, "2026-10-03"), ("C", 88, "2026-10-03"),
+        ("D", 87, "2026-10-04"),
+    ]):
+        _seed_stock(conn, sym, "US", total, mcap=1e10 - i, sector=f"S{i}")
+        _set_updated(conn, sym, "US", day)
+    picked = [r.symbol for r in universe.pick_top("US", 6)]
+    assert "SM" not in picked and picked[0] == "OLD6"
+    assert [r.symbol for r in universe.scan("US")] == picked
+    assert [r.symbol for r in universe.scan("US", include_lagging=True)][0] == "SM"
+    lag = universe.lagging_rows("US")
+    assert [(r.symbol, r.fund_asof) for r in lag] == [("SM", "2026-09-26")]
+
+
+def test_scan_lag_reference_is_median_not_max(fresh_db):
+    """수동 소량 재보강(1행)이 기준일을 끌어올려 나머지 전부를 '뒤처짐' 으로 만들지 않는다."""
+    conn = universe._conn()
+    for i, sym in enumerate(["A", "B", "C", "D"]):
+        _seed_stock(conn, sym, "US", 90 - i, mcap=1e10 - i, sector=f"S{i}")
+        _set_updated(conn, sym, "US", "2026-09-26")
+    _set_updated(conn, "D", "US", "2026-10-20")
+    assert [r.symbol for r in universe.pick_top("US", 6)] == ["A", "B", "C", "D"]
+    assert universe.lagging_rows("US") == []
+
+
+def test_scan_lag_cutoff_is_per_market(fresh_db):
+    """시장마다 기준일이 따로 — KR 배치가 늦어도 US 컷오프로 KR 행을 빼지 않는다 (market=None 스캔)."""
+    conn = universe._conn()
+    _seed_stock(conn, "U1", "US", 80)
+    _set_updated(conn, "U1", "US", "2026-10-03")
+    _seed_stock(conn, "K1", "KR", 70)
+    _set_updated(conn, "K1", "KR", "2026-09-12")
+    _seed_stock(conn, "N1", "US", 60)
+    conn.execute("UPDATE screened SET updated_at=NULL WHERE symbol='N1'")   # 판정 불가 → 유지
+    conn.commit()
+    assert [r.symbol for r in universe.scan()] == ["U1", "K1", "N1"]
 
 
 def test_freshness_reports_dates_and_age(fresh_db):

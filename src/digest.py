@@ -29,7 +29,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -374,16 +374,62 @@ def evidence_from_detail(detail: dict | None, market: str, flags: Sequence[str] 
 # ----------------------------------------------------------------------
 
 
+REASON_SECTOR_CAP = "선정 규칙(같은 업종 최대 2개)"
+REASON_HOLDING_CAP = "선정 규칙(지주사 최대 2개)"
+REASON_LAGGING = "점수 갱신 누락 (재보강 실패)"
+
+
+def skip_reasons(market: str, picks: Sequence[Any], dropped_rows: dict[str, Any],
+                 lagging_syms: Iterable[str] = (), top_n: int = 6) -> dict[str, str]:
+    """탈락 종목 중 '순위 밖' 이 아닌 사유를 아는 것 → {symbol: 사유} (순수, RVM-01·RVQ-1).
+
+    · 재보강 누락 행(universe.lagging_rows) → REASON_LAGGING
+    · pick_top 의 상한으로 건너뛴 행: 정렬 키(total_score, market_cap) 가 마지막 선정 종목보다
+      앞인데(또는 선정이 top_n 을 못 채웠는데) 선정되지 않았고, US 면 같은 sector 선정이 이미 2개 /
+      KR 이면 지주사 → 상한 사유. pick_top 과 같은 정렬·같은 판정 함수(universe.is_holding_row).
+    제외(excluded) 행은 diff_lists 가 '필터 제외' 로 먼저 처리하므로 여기서 다루지 않는다.
+    """
+    from src import universe
+
+    lag = set(lagging_syms)
+    picked = {str(p.symbol) for p in picks}
+    last = picks[-1] if picks else None
+    out: dict[str, str] = {}
+    for sym, row in dropped_rows.items():
+        if row is None or getattr(row, "excluded", None) or sym in picked:
+            continue
+        if sym in lag:
+            out[sym] = REASON_LAGGING
+            continue
+        try:
+            key = (float(row.total_score), float(row.market_cap or 0))
+            ahead = last is None or len(picks) < top_n or key > (
+                float(last.total_score), float(last.market_cap or 0))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if not ahead:
+            continue
+        if market == "KR":
+            if universe.is_holding_row(row):
+                out[sym] = REASON_HOLDING_CAP
+        elif getattr(row, "sector", None) and sum(
+                1 for p in picks if getattr(p, "sector", None) == row.sector) >= 2:
+            out[sym] = REASON_SECTOR_CAP
+    return out
+
+
 def diff_lists(prev: Sequence[Any], cur: Sequence[Any], dropped_rows: dict[str, Any] | None = None,
-               prev_date: str | None = None) -> ListDiff:
+               prev_date: str | None = None, reasons: dict[str, str] | None = None) -> ListDiff:
     """직전 원장 리스트(prev: LedgerPick duck — symbol/total_score) vs 현재 후보(cur: ScanRow).
 
-    탈락 사유: 유니버스에서 제외됐으면 '필터 제외' / 점수가 내려갔으면 '점수 하락 92→79' /
-    그 외 '순위 밖'. **동점 교체**(탈락·신규의 total_score 가 같음)는 swaps 로 분리해 판정
+    탈락 사유: 유니버스에서 제외됐으면 '필터 제외' / ``reasons`` 에 있으면 그 사유(선정 규칙 상한·
+    재보강 누락 — skip_reasons) / 점수가 내려갔으면 '점수 하락 92→79' / 그 외 '순위 밖'.
+    **동점 교체**(탈락·신규의 total_score 가 같음)는 swaps 로 분리해 판정
     카운트에서 제외 — KR 90점 동률 6종목의 시총 tie-break churn 이 '매수 검토' 를 만들지 않게.
     prev 가 비면 first_run(기준 수립): new 는 비우고 kept 에 전부 (6종목 '매수 검토' 방지).
     """
     dropped_rows = dropped_rows or {}
+    reasons = reasons or {}
     prev_list = list(prev or [])
     cur_syms = [str(getattr(r, "symbol")) for r in cur]
     if not prev_list:
@@ -403,6 +449,8 @@ def diff_lists(prev: Sequence[Any], cur: Sequence[Any], dropped_rows: dict[str, 
         before = prev_score.get(s)
         if row is not None and getattr(row, "excluded", None):
             reason = "필터 제외 (보통주 아님 등)"
+        elif s in reasons:
+            reason = reasons[s]
         elif (now_score is not None and before is not None and now_score < before):
             reason = f"점수 하락 {before}→{now_score}"
         else:
@@ -1045,13 +1093,26 @@ def assemble_daily_digest(market: str = "us", *, now: datetime | None = None,
 
     # --- 후보 (DB 재무점수 하나) ---
     picks: list = []
+    lagging: list = []
     try:
         picks = list(universe.pick_top(market, top_n))
         fresh = universe.freshness(market)
+        # 재보강 누락 행(시장 배치보다 1주 이상 옛 점수)은 pick_top 이 이미 뺐다 (RVQ-1) — 그중
+        # 후보권 점수였던 행만 소유자에게 알린다. 낡은 1행이 min(기준일) 로 시장 전체를
+        # '후보 보류' 로 끌고 가지 않게 하는 쪽은 universe.scan 의 컷오프가 담당.
+        floor = min((int(p.total_score) for p in picks), default=0)
+        lagging = list(universe.lagging_rows(market, min_total=floor, limit=10))
     except (StorageError, *DB_ERRORS):
         logger.warning("유니버스 읽기 실패 (%s)", market, exc_info=True)
         fresh = {"fund_asof": None, "price_asof": None, "age_days": None}
         health.optional_failures.append("유니버스 읽기")
+    if lagging:
+        # 고정 키 — 처음 생긴 날 signature 가 바뀌어 소유자 DM 1회, 같은 상태가 이어지면 억제
+        health.optional_failures.append("재보강 누락 종목")
+        shown = ", ".join(f"{r.symbol} {r.total_score} ({str(r.fund_asof or '?')[5:]})" for r in lagging[:5])
+        more = f" 외 {len(lagging) - 5}" if len(lagging) > 5 else ""
+        owner_extra.append(f"재보강 누락으로 후보 제외 {len(lagging)}종목 (그 종목 보강 실패·상폐 의심, "
+                           f"build_universe 로그 확인): {shown}{more}")
     asofs = [p.fund_asof for p in picks if getattr(p, "fund_asof", None)]
     score_asof = min(asofs) if asofs else fresh.get("fund_asof")
     health.universe_as_of = score_asof
@@ -1097,7 +1158,8 @@ def assemble_daily_digest(market: str = "us", *, now: datetime | None = None,
             dropped_rows[str(p.symbol)] = universe.lookup(str(p.symbol), market)
         except (StorageError, *DB_ERRORS):
             dropped_rows[str(p.symbol)] = None
-    diff = diff_lists(prev_list, picks, dropped_rows, prev_date=prev_date)
+    reasons = skip_reasons(market, picks, dropped_rows, (str(r.symbol) for r in lagging), top_n)
+    diff = diff_lists(prev_list, picks, dropped_rows, prev_date=prev_date, reasons=reasons)
     if baseline_note and diff.changed:
         baseline_note += f" (편입 {len(diff.new)} · 탈락 {len(diff.dropped)})"
     list_since = max((starts.get(s) for s in cur_syms if starts.get(s)), default=None)

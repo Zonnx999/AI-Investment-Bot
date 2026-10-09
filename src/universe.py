@@ -66,6 +66,18 @@ RULE_VERSION = "v1"
 DISCOVER_CHUNK = 200                      # 발굴 upsert 배치 크기 (executescript 1회)
 ABORT_AFTER_RATE_LIMITS = 5               # 연속 429 N회면 보강 루프 중단
 KR_MIN_LIST_SIZE = 1500                   # KRX 일별 목록이 이보다 작으면 'not_listed' 판정 보류
+# 재보강 누락 행 — 시장 기준일(보강 행 updated_at 날짜의 중앙값)보다 이만큼(일) 이상 뒤처진 행은
+# 후보(scan/pick_top)에서 뺀다 (RVQ-1). 주간 배치(토 10:00, --max-age 6)는 모든 행을 매주 다시
+# 점수화하므로, 정상 배치 안의 날짜 차이는 0~1일이고 '직전 배치에서 갱신 못 한 행' 은 정확히 7일
+# 뒤처진다 (no_data·DataFetchError·상폐/피인수·DART 미제출). 이런 옛 점수가 새 점수와 순위를 다투고,
+# 다이제스트의 min(후보 기준일) 노후 판정을 그 1행이 시장 전체 '후보 보류' 로 끌고 가는 것을 막는다.
+# 기준을 MAX 가 아니라 중앙값으로 잡는 이유: 수동 `--enrich --limit 1` 같은 소수 행 갱신이 기준일을
+# 끌어올려 나머지 전부를 '뒤처짐' 으로 만들지 않게 (배치가 절반 이상 끝나야 기준일이 움직인다).
+ROW_LAG_EXCLUDE_DAYS = 7
+# KRX 단축코드 — 원장(ledger._KR_CODE_RE)이 yfinance 심볼을 만들 수 있는 KR 코드와 같은 규칙
+# (테스트로 일치 강제). 이 규칙에 안 맞는 KR 행은 원장에 기록되지 않아 다이제스트 diff 에서 매일
+# '신규' 로 반복되므로 pick_top 단계에서 건너뛴다 (RVM-02 — kr_adr 위생 규칙의 2차 방어선).
+KR_CODE_RE = re.compile(r"[0-9A-Z]{6}")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS screened (
@@ -1197,17 +1209,73 @@ def _row_to_scan(r) -> ScanRow:
                    fund_asof=_date_part(updated_at), price_asof=_date_part(seen_at))
 
 
+def _lag_keep_from(conn, cols: set[str], market: str | None = None) -> dict[str, str]:
+    """시장별 '이 날짜 이상이면 후보 유지' 컷오프 {market: 'YYYY-MM-DD'} (RVQ-1, 순수 읽기).
+
+    기준일 = 그 시장 보강 행(enriched=1, 미제외) updated_at 날짜의 중앙값(상위 중앙값).
+    컷오프 = 기준일 − (ROW_LAG_EXCLUDE_DAYS − 1)일 → 기준일보다 ROW_LAG_EXCLUDE_DAYS 일 이상
+    오래된 행이 빠진다. updated_at 이 없는 행은 기준·판정 모두에서 제외(판정 불가 → 유지).
+    """
+    sql = ("SELECT market, substr(updated_at, 1, 10) FROM screened "
+           f"WHERE enriched=1 AND updated_at IS NOT NULL {_excluded_clause(cols)}")
+    args: tuple = ()
+    if market:
+        sql += " AND market = ?"
+        args = (market,)
+    by_mkt: dict[str, list[str]] = defaultdict(list)
+    for mkt, d in conn.execute(sql, args).fetchall():
+        if d:
+            by_mkt[str(mkt)].append(str(d))
+    out: dict[str, str] = {}
+    for mkt, dates in by_mkt.items():
+        dates.sort()
+        try:
+            ref = date.fromisoformat(dates[len(dates) // 2])
+        except ValueError:
+            continue
+        out[mkt] = (ref - timedelta(days=ROW_LAG_EXCLUDE_DAYS - 1)).isoformat()
+    return out
+
+
+def _lag_clause(keep_from: dict[str, str], *, lagging: bool = False) -> tuple[str, tuple]:
+    """컷오프 dict → (SQL 조각, 파라미터). lagging=False 면 '유지 행', True 면 '뒤처진 행' 만."""
+    if not keep_from:
+        return ("AND 0", ()) if lagging else ("", ())
+    parts, args = [], []
+    for mkt, cut in sorted(keep_from.items()):
+        op = "<" if lagging else ">="
+        parts.append(f"(market = ? AND substr(updated_at, 1, 10) {op} ?)")
+        args += [mkt, cut]
+    if lagging:
+        return "AND updated_at IS NOT NULL AND (" + " OR ".join(parts) + ")", tuple(args)
+    # 컷오프가 없는 시장(보강 행 0)·updated_at 없는 행은 판정 불가 → 유지
+    mkts = sorted(keep_from)
+    clause = ("AND (updated_at IS NULL OR market NOT IN (" + ", ".join("?" * len(mkts)) + ") OR "
+              + " OR ".join(parts) + ")")
+    return clause, tuple(mkts) + tuple(args)
+
+
 def scan(
     market: str | None = None,
     limit: int = 50,
     min_total: int = 0,
     sector: str | None = None,
+    *,
+    include_lagging: bool = False,
 ) -> list[ScanRow]:
-    """점수 내림차순 전수 스캔 (보강 완료 + 미제외 종목만). 저평가 상위 발굴용."""
+    """점수 내림차순 전수 스캔 (보강 완료 + 미제외 종목만). 저평가 상위 발굴용.
+
+    재보강 누락 행(시장 기준일보다 ROW_LAG_EXCLUDE_DAYS 일 이상 뒤처진 옛 점수)은 기본 제외 —
+    include_lagging=True 면 포함 (RVQ-1). 목록은 lagging_rows() 로 따로 볼 수 있다.
+    """
     conn = _conn()
     cols = _cols(conn)
     sql = [_scan_select(cols), "WHERE enriched=1 AND total_score >= ?", _excluded_clause(cols)]
     args: list = [min_total]
+    if not include_lagging:
+        clause, lag_args = _lag_clause(_lag_keep_from(conn, cols, market))
+        if clause:
+            sql.append(clause); args.extend(lag_args)
     if market:
         sql.append("AND market = ?"); args.append(market)
     if sector:
@@ -1216,6 +1284,21 @@ def scan(
 
     # libsql(Turso)은 파라미터를 tuple 로만 받음 (sqlite3 는 list 도 허용) → tuple 강제
     rows = conn.execute(" ".join(sql), tuple(args)).fetchall()
+    return [_row_to_scan(r) for r in rows]
+
+
+def lagging_rows(market: str, min_total: int = 0, limit: int = 50) -> list[ScanRow]:
+    """재보강 누락으로 후보에서 빠진 행 (점수 내림차순) — 소유자 진단용 (RVQ-1).
+
+    scan() 의 기본 제외와 같은 컷오프(_lag_keep_from)를 반대로 적용한다.
+    """
+    conn = _conn()
+    cols = _cols(conn)
+    clause, lag_args = _lag_clause(_lag_keep_from(conn, cols, market), lagging=True)
+    sql = " ".join([_scan_select(cols), "WHERE enriched=1 AND total_score >= ?",
+                    _excluded_clause(cols), clause, "AND market = ?",
+                    "ORDER BY total_score DESC, market_cap DESC LIMIT ?"])
+    rows = conn.execute(sql, (min_total, *lag_args, market, limit)).fetchall()
     return [_row_to_scan(r) for r in rows]
 
 
@@ -1297,6 +1380,7 @@ def pick_top(
       행(크립토)은 상한 미적용.
     · KR: 지주사(flags 'holding' 또는 이름 규칙) 최대 max_holding. KR sector 는 KRX 소속부라
       섹터 상한 미적용.
+    · KR 비표준 코드(6자리 영숫자 아님 — ADR 등)는 원장에 기록할 수 없어 건너뜀 (RVM-02).
     상한 때문에 건너뛴 자리는 다음 순위가 채움. None 이면 해당 상한 끔. DB 가 비면 [].
     """
     rows = scan(market=market, limit=max(n * 12, n), min_total=min_total)
@@ -1307,6 +1391,10 @@ def pick_top(
         if len(picked) >= n:
             break
         if market == "KR":
+            if not KR_CODE_RE.fullmatch(str(r.symbol)):
+                logger.warning("pick_top: KR 비표준 코드 %s 건너뜀 (원장 기록 불가 — kr_adr 위생 확인)",
+                               r.symbol)
+                continue
             is_h = is_holding_row(r)
             if is_h and max_holding is not None and holdings >= max_holding:
                 continue
