@@ -15,6 +15,11 @@ Environment=QUANT_BOT_DB_PATH=/home/ubuntu/AI-Investment-Bot/data/universe_repli
 Environment=QUANT_BOT_CACHE=off
 Environment=QUANT_BOT_SYNC_TIMEOUT=300
 ExecStart=/usr/bin/flock -w 1800 /home/ubuntu/AI-Investment-Bot/data/.universe.lock /home/ubuntu/AI-Investment-Bot/.venv/bin/python scripts/build_universe.py --max-age 6
+# 재점수 직후 다이제스트 레플리카를 미리 pull (RVOPS-01) — 주말엔 digest_replica.db 를 여는 유닛이
+# 없어, 안 하면 월 08:30 KR 다이제스트의 180초 프로브가 한 주치 델타를 한 번에 받아야 한다(넘기면
+# 강등·보류). 같은 파일이라 다이제스트와 같은 flock(1 파일 = 1 프로세스, §4.10 #9), 넉넉한 타임아웃,
+# 실패는 무시('-' — 재점수 자체는 성공). journal 의 'init_sync=… elapsed=…s' 가 pull 소요 실측값.
+ExecStartPost=-/usr/bin/flock -w 900 /home/ubuntu/AI-Investment-Bot/data/.digest.lock /usr/bin/env QUANT_BOT_DB_PATH=/home/ubuntu/AI-Investment-Bot/data/digest_replica.db QUANT_BOT_SYNC_TIMEOUT=1200 /home/ubuntu/AI-Investment-Bot/.venv/bin/python scripts/warm_replica.py
 TimeoutStartSec=4h
 Nice=10
 IOSchedulingClass=idle
