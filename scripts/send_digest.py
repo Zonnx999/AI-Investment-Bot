@@ -5,7 +5,7 @@ scripts/send_digest.py
 
 실행:
     python scripts/send_digest.py --market kr            # 구독 동기화 → 전 구독자 브로드캐스트
-    python scripts/send_digest.py --market us --dry-run  # 전송·쓰기 없이 터미널에만 출력
+    python scripts/send_digest.py --market us --dry-run  # 전송 없이 터미널에만 출력 (아래 주의)
     python scripts/send_digest.py --no-sync              # 구독 동기화(getUpdates) 건너뛰고 발송만
                                                          #   (봇 프로세스가 돌고 있으면 필수 — offset 경합)
 
@@ -20,6 +20,11 @@ LLM 요약·예측·제안 비중은 환경변수 플래그(QUANT_BOT_LLM / QUAN
 QUANT_BOT_DIGEST_WEIGHTS, 기본 0)로만 켠다 — 예전 --no-llm/--no-weights 옵션은 제거.
 
 가입(소유자 승인제): 친구가 봇에게 /start → 소유자가 /approve <chat_id> → 다음 실행부터 수신.
+
+dry-run 의 쓰기 범위 (RVM-03): 상태(signals/health state)·원장(signal_ledger 등) 쓰기 0, 텔레그램 발송 0.
+단 유니버스 읽기 경로(universe._conn)가 screened 스키마를 보장하므로 **마이그레이션 전 DB 에는 멱등
+ALTER(컬럼 추가, storage.add_column_if_missing)** 를 수행할 수 있다 — 데이터 행은 바뀌지 않는다.
+운영 레플리카가 아닌 사본으로 점검할 때는 QUANT_BOT_DB_PATH 로 사본 경로를 지정할 것.
 """
 
 from __future__ import annotations
@@ -56,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--market", choices=["us", "kr"], default="us",
                         help="다이제스트 시장 (us=미국 저녁, kr=한국 아침)")
     parser.add_argument("--dry-run", action="store_true",
-                        help="전송·쓰기 없이 미리보기만 (state·원장·헬스 모두 불변)")
+                        help="전송 없이 미리보기만 (state·원장·헬스 불변 — 단 스키마 컬럼 추가는 멱등 수행될 수 있음)")
     parser.add_argument("--top", type=int, default=6, help="스크리닝 후보 상위 N개 (기본 6)")
     parser.add_argument("--no-sync", action="store_true",
                         help="구독 동기화(getUpdates) 건너뛰고 발송만")
@@ -64,6 +69,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.dry_run:
+            # 상태·원장 쓰기 0 (assemble 만). 마이그레이션 전 DB 면 screened 의 멱등 컬럼 추가만 일어날 수 있음.
             bundle = assemble_daily_digest(args.market, top_n=args.top)
             print(bundle.text)  # 미리보기 — stdout deliverable
             if bundle.hold:
