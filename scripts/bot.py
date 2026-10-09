@@ -169,9 +169,10 @@ def run() -> NoReturn:
                     # help/menu 응답에 버튼 메뉴 부착 (소유자는 관리자 버튼 포함)
                     kb = (bot_commands.main_keyboard(owner is not None and chat_id == owner)
                           if cmd.kind == "help" else None)
-                    # /news 는 의도적 평문([site]·URL 포함) — Markdown 으로 보내면
-                    # 매번 400 → 평문 폴백으로 전송이 2배가 되므로 처음부터 평문.
-                    pm = None if cmd.kind == "news" else "Markdown"
+                    # /news(제목·URL)·/ledger(snake_case 토큰 등 원장 본문)는 의도적 평문 —
+                    # Markdown 으로 보내면 매번 400 → 평문 폴백으로 전송이 2배가 되거나(news),
+                    # 짝수 밑줄이 이탤릭으로 조용히 깨진다(ledger). §4.10 #10.
+                    pm = None if cmd.kind in ("news", "ledger") else "Markdown"
                     send_safe(reply, chat_id, parse_mode=pm, reply_markup=kb)
             except Exception:  # noqa: BLE001 — poison 메시지가 봇을 크래시 루프시키지 않도록
                 logger.exception("명령 처리 실패 (chat=%s) — 건너뜀", chat_id)

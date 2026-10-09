@@ -216,3 +216,31 @@ def test_healthy_loop_never_warns_about_degraded_events(fresh_db, owner_set, mon
 def test_run_docstring_documents_degraded_write_limit():
     bot = _load_bot()
     assert "강등" in bot.run.__doc__ and "offline.db" in bot.run.__doc__
+
+
+# ---------------- S2FIX-SURFACE S1: /ledger 평문 전송 ----------------
+
+
+def _sent_parse_modes(bot, monkeypatch, texts):
+    """소유자(chat 1)가 texts 를 보낸 한 배치를 돌리고 (reply, parse_mode) 목록을 반환."""
+    sent: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(bot, "send_safe",
+                        lambda text, chat_id=None, parse_mode="Markdown", reply_markup=None:
+                            sent.append((text, parse_mode)) or True)
+    batch = [_msg_update(10 + i, 1, t) for i, t in enumerate(texts)]
+    monkeypatch.setattr(bot, "get_updates", _one_batch_then_stop(batch))
+    monkeypatch.setattr(bot.bot_commands, "respond",
+                        lambda text, chat_id, limiter=None: f"reply:{text}")
+    assert bot.main() == 0
+    return sent
+
+
+def test_ledger_and_news_sent_plaintext_others_markdown(fresh_db, owner_set, monkeypatch):
+    bot = _load_bot()
+    sent = _sent_parse_modes(bot, monkeypatch,
+                             ["/ledger us", "/news AAPL", "/scan us", "/stock AAPL"])
+    modes = {text: pm for text, pm in sent}
+    assert modes["reply:/ledger us"] is None            # 원장 본문의 snake_case 가 Markdown 에 깨지지 않게
+    assert modes["reply:/news AAPL"] is None
+    assert modes["reply:/scan us"] == "Markdown"
+    assert modes["reply:/stock AAPL"] == "Markdown"

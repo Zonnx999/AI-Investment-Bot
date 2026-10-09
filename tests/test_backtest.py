@@ -553,13 +553,16 @@ def _ic_fixture(end: str):
 
 
 def test_monthly_rank_ic_excludes_incomplete_last_month():
+    import pandas as pd
+
     from src.backtest import _monthly_rank_ic
 
     panel, reb, scores = _ic_fixture("2025-10-08")          # 10월은 진행 중 (6거래일)
     assert reb[-1] == panel.index[-1] and reb[-1].month == 10
-    got = _monthly_rank_ic(panel, scores)
+    now = pd.Timestamp("2025-10-08")                         # 실행 시각 = 데이터 마지막 날 (10월 진행 중)
+    got = _monthly_rank_ic(panel, scores, now)
     done = {d: v for d, v in scores.items() if d != reb[-1]}
-    ref = _monthly_rank_ic(panel, done)
+    ref = _monthly_rank_ic(panel, done, now)
     assert got[2] == len(done) - 1                           # 09-30→10-08 부분 구간이 빠짐
     assert got == ref                                        # 값도 동일
 
@@ -577,10 +580,23 @@ def test_month_is_complete_boundaries():
 
     from src.backtest import _month_is_complete
 
-    assert _month_is_complete(pd.Timestamp("2025-09-30")) is True
-    assert _month_is_complete(pd.Timestamp("2025-10-31")) is True     # 금요일 월말
-    assert _month_is_complete(pd.Timestamp("2025-10-08")) is False
-    assert _month_is_complete(pd.Timestamp("2025-05-30")) is True     # 토요일 31일 — 다음 영업일은 6월
+    now = pd.Timestamp("2025-10-08")
+    assert _month_is_complete(pd.Timestamp("2025-09-30"), now) is True
+    assert _month_is_complete(pd.Timestamp("2025-10-31"), now) is True     # 금요일 월말
+    assert _month_is_complete(pd.Timestamp("2025-10-08"), now) is False
+    assert _month_is_complete(pd.Timestamp("2025-05-30"), now) is True     # 토요일 31일 — 다음 영업일은 6월
+
+
+def test_month_is_complete_uses_run_time_for_holiday_month_end():
+    """월말이 휴장일이라 마지막 거래일이 28일(성금요일 29일)이면 달력 규칙만으론 '미완결' —
+    실행 시각이 다음 달로 넘어가면 완결로 인정 (S2FIX S10)."""
+    import pandas as pd
+
+    from src.backtest import _month_is_complete
+
+    last_trading_day = pd.Timestamp("2024-03-28")
+    assert _month_is_complete(last_trading_day, pd.Timestamp("2024-03-28")) is False   # 같은 달 — 보수적
+    assert _month_is_complete(last_trading_day, pd.Timestamp("2024-04-01")) is True    # 다음 달 — 복구
 
 
 def test_simulate_docstring_states_drift_limitation():
@@ -626,6 +642,7 @@ def test_check_backtest_trend_headline_is_annualized():
     bench = types.SimpleNamespace(annualized_return_pct=10.9, max_drawdown_pct=-55.0,
                                   total_return_pct=3071.0)
     line = cb._trend_headline(strat, bench)
-    assert "연환산 +7.8% vs +10.9%" in line and "연 -3.1%p" in line
+    assert "연환산 +7.8% vs +10.9%" in line
+    assert "%p" not in line                                  # 초과수익은 아래 stats 줄 하나로만 (S2FIX S9)
     assert "-1971" not in line                               # 누적 %p 차이는 더 이상 헤드라인이 아님
     assert "MDD -18.0% vs -55.0%" in line

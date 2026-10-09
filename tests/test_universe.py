@@ -1520,3 +1520,78 @@ def test_build_universe_kr_refresh_zero_discovered_is_partial(fresh_db, monkeypa
     monkeypatch.setattr("sys.argv", ["build_universe.py", "--kr-refresh"])
     assert bu.main() == bu.EXIT_PARTIAL
     assert "발굴 0건" in capsys.readouterr().out
+
+
+# ---------------- S2FIX-SURFACE: S2 지주사 판정 · S3 기준일 · S8 시장 지정 lookup · S11 문구 ----------------
+
+
+def _scan_row(**kw):
+    base = dict(symbol="X", market="KR", name="테스트", sector="", price=1.0, market_cap=1.0,
+                total_score=50, value_score=50, health_score=50, roe=None)
+    base.update(kw)
+    return universe.ScanRow(**base)
+
+
+def test_is_holding_row_flag_or_name_rule():
+    """flags 'holding' 이거나 이름 규칙(홀딩스/지주) — pick_top 과 표면 꼬리표가 공유하는 판정."""
+    assert universe.is_holding_row(_scan_row(flags=("holding",)))
+    assert universe.is_holding_row(_scan_row(name="영원무역홀딩스"))           # 이름 규칙만
+    assert not universe.is_holding_row(_scan_row(name="쿠쿠홈시스"))
+    assert not universe.is_holding_row(_scan_row(name="KB금융지주"))           # 금융지주는 금융으로 판정
+    assert universe._is_holding_row is universe.is_holding_row               # 구 이름 별칭
+
+
+def _seed_sui(conn):
+    _seed_stock(conn, "SUI", "US", 60)
+    universe._store_crypto_scored(
+        conn, symbol="SUI", name="Sui", price=3.0, market_cap=1e10,
+        scores={"total_score": 70, "volatility_score": 50, "rank_score": 80},
+    )
+    conn.commit()
+
+
+def test_lookup_market_filter_and_other_markets(fresh_db):
+    """CMAP-11: US 티커 SUI 와 크립토 SUI — 시장 미지정이면 US 우선, 지정하면 그 시장."""
+    conn = universe._conn()
+    _seed_sui(conn)
+    assert universe.lookup("sui").market == "US"                          # 하위호환: 주식 우선
+    assert universe.lookup("SUI", "crypto").market == "CRYPTO"             # 대소문자 무관
+    assert universe.lookup("SUI", "KR") is None
+    assert universe.lookup_markets("SUI") == ["US", "CRYPTO"]
+    assert universe.lookup_markets("NOPE") == []
+
+
+def test_lookup_detail_market_filter(fresh_db):
+    conn = universe._conn()
+    _seed_sui(conn)
+    conn.execute("UPDATE screened SET detail=? WHERE symbol='SUI' AND market='US'", ('{"tag": "us"}',))
+    conn.execute("UPDATE screened SET detail=? WHERE symbol='SUI' AND market='CRYPTO'", ('{"tag": "cr"}',))
+    conn.commit()
+    assert universe.lookup_detail("SUI")["tag"] == "us"
+    assert universe.lookup_detail("SUI", "CRYPTO")["tag"] == "cr"
+
+
+def test_asof_status_thresholds_use_settings_and_boundaries():
+    """경계: 8일 → 경고, 7일 → 없음, 14일 → 보류 아님, 15일 → 보류 (settings 임계, 다이제스트와 동일)."""
+    from src.config import settings
+
+    today = date(2026, 10, 9)
+    assert settings.universe_warn_days == 8 and settings.universe_hold_days == 15
+    st8 = universe.asof_status("2026-10-01", today=today)
+    assert st8 == {"age_days": 8, "warn": True, "hold": False}
+    assert universe.asof_status("2026-10-02", today=today)["warn"] is False
+    assert universe.asof_status("2026-09-25", today=today) == {"age_days": 14, "warn": True, "hold": False}
+    assert universe.asof_status("2026-09-24", today=today) == {"age_days": 15, "warn": True, "hold": True}
+    assert universe.asof_status(None, today=today) == {"age_days": None, "warn": False, "hold": False}
+    assert universe.asof_status("garbage", today=today)["age_days"] is None
+
+
+def test_kr_scores_one_off_with_nonpositive_three_year_avg_labels_suspect():
+    """ni>0·op≤0 이고 3개년 이력이 있어 min(ni, 평균)이 ≤0 이 되는 경로 — '적자' 가 아니라 '일회성 의심'."""
+    fin = {"net_income": 500.0, "op_income": -10.0, "ni_prev1": -3000.0, "ni_prev2": -2000.0,
+           "equity": 1000.0, "equity_total": 1000.0, "debt": 100.0, "assets": 1100.0, "revenue": 1000.0}
+    ni, flag = universe.normalize_net_income(fin)
+    assert flag == "one_off" and ni is not None and ni <= 0               # 가드 결과가 None 이 아닌 비양수
+    sc = universe.calculate_kr_scores(fin, 5000.0, name="테스트")
+    comp = _kr_comp(sc, "health", "흑자")
+    assert comp[1] == 0 and comp[3] == "일회성 의심"

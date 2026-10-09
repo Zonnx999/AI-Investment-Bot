@@ -8,9 +8,9 @@ cron 이 Turso 에 사전계산해 두고, 이 응답기는 **유니버스 DB �
 유저별 rate limit 으로 남용을 막는다.
 
 명령 (조회 전용):
-  /stock <티커>        종목 점수 + 근거 분해 + 기준일 (universe.lookup + lookup_detail)
+  /stock <티커> [시장]  종목 점수 + 근거 분해 + 기준일 (universe.lookup + lookup_detail)
   /scan [us|kr] [N]    점수 상위 후보 (universe.pick_top — 일일 리포트와 같은 선정 규칙)
-  /ledger [us|kr]      지난 후보 성과 원장 (ledger.report_text, 평문)
+  /ledger [us|kr]      지난 후보 성과 원장 (ledger.report_text, 평문 전송)
   /news <티커>         최근 뉴스 헤드라인 (data_fetcher.fetch_stock_news — FMP, 캐시 30분)
   /help                도움말
 
@@ -42,28 +42,19 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 
 from src.exceptions import DataFetchError, MissingApiKeyError
-from src.health import UNIVERSE_STALE_DAYS
+from src.findings import (   # 라벨·면책 단일 출처 — 아래 이름들은 재노출(테스트·소비자 호환)
+    DISCLAIMER,
+    LABEL_CRYPTO_HEALTH,
+    LABEL_CRYPTO_VALUE,
+    LABEL_HEALTH,
+    LABEL_VALUE,
+    score_labels,
+)
 from src.logger import get_logger
 
 logger = get_logger(__name__)
 
-# ---------------------------------------------------------------------------
-# 표면 공통 상수 — 라벨·면책·문구는 이 블록 한 곳에서만 정의 (CMAP-02/09).
-# WP-DIGEST 가 src/findings.py 에 LABEL_VALUE/LABEL_HEALTH 를 추가하므로, 있으면 그 값을
-# 쓰고 없으면 같은 값('밸류'/'건전성')으로 폴백 → 병합 후 별도 수정 없이 단일 소스가 됨.
-# ---------------------------------------------------------------------------
-try:
-    from src.findings import LABEL_HEALTH, LABEL_VALUE
-except ImportError:  # 병합 전(상수 미존재) 폴백
-    LABEL_VALUE = "밸류"
-    LABEL_HEALTH = "건전성"
-
-# 크립토는 screened 컬럼을 재사용해 value_score=변동성점수, health_score=순위점수 로 저장됨
-# (universe._store_crypto_scored) → 표시 라벨을 시장별로 바꾼다 (CMAP-05).
-LABEL_CRYPTO_VALUE = "변동성"
-LABEL_CRYPTO_HEALTH = "순위"
-
-DISCLAIMER = "투자 자문 아님, 모든 결정은 본인 책임."
+# 표면 공통 상수 — 라벨·면책은 src/findings.py 한 곳에서만 정의 (CMAP-02/09, S2FIX S5).
 
 SCAN_DEFAULT_N = 6          # 일일 리포트 후보 수와 동일
 SCAN_MAX_N = 10             # /scan us 10 처럼 늘릴 수 있는 상한 (메시지 길이 보호)
@@ -113,7 +104,7 @@ class Command:
     """파싱된 조회 명령 (순수)."""
     kind: str            # stock | scan | ledger | news | help | unknown
     arg: str | None = None
-    arg2: str | None = None     # /scan us 10 의 두 번째 인자
+    arg2: str | None = None     # /scan us 10 · /stock SUI crypto 의 두 번째 인자
 
 
 def parse_command(text: str) -> Command:
@@ -125,7 +116,7 @@ def parse_command(text: str) -> Command:
     arg = parts[1] if len(parts) > 1 else None
     arg2 = parts[2] if len(parts) > 2 else None
     if cmd == "/stock":
-        return Command("stock", arg)
+        return Command("stock", arg, arg2)
     if cmd == "/scan":
         return Command("scan", arg, arg2)
     if cmd == "/ledger":
@@ -253,7 +244,8 @@ def handle_callback(callback_query: dict, owner: str | None) -> None:
 
 HELP_TEXT = (
     "📖 *명령어*\n"
-    "`/stock <티커>` — 종목 점수와 근거 (예: `/stock AAPL`, `/stock 005930`)\n"
+    "`/stock <티커> [us|kr|crypto]` — 종목 점수와 근거 (예: `/stock AAPL`, `/stock 005930`)\n"
+    "  같은 코드가 여러 시장에 있으면 시장을 붙여요 (예: `/stock SUI crypto`)\n"
     "`/scan [us|kr] [개수]` — 점수 상위 후보 (기본 us 6종목, 일일 리포트와 같은 선정)\n"
     "`/ledger [us|kr]` — 지난 후보 성과 기록\n"
     "`/news <티커>` — 최근 뉴스 헤드라인 (예: `/news TSLA`)\n"
@@ -269,13 +261,8 @@ _MKT_LABEL = {"US": "🇺🇸 미국", "KR": "🇰🇷 한국", "CRYPTO": "🪙 
 
 
 def _sub_labels(market: str) -> tuple[str, str]:
-    """(value_score 라벨, health_score 라벨) — 시장별 의미 (CMAP-05).
-
-    CRYPTO 는 screened 컬럼 재사용으로 value=변동성점수 / health=순위점수.
-    """
-    if market == "CRYPTO":
-        return LABEL_CRYPTO_VALUE, LABEL_CRYPTO_HEALTH
-    return LABEL_VALUE, LABEL_HEALTH
+    """(value_score 라벨, health_score 라벨) — 시장별 의미 (CMAP-05). 정의는 findings.score_labels."""
+    return score_labels(market)
 
 
 def _per_pbr(row) -> str:
@@ -289,9 +276,18 @@ def _per_pbr(row) -> str:
 
 
 def _flag_tags(row) -> list[str]:
-    """ScanRow.flags → 사용자용 꼬리표 목록 (알려진 것만, 순서 고정)."""
+    """ScanRow.flags → 사용자용 꼬리표 목록 (알려진 것만, 순서 고정).
+
+    '지주사' 는 pick_top 의 지주사 상한과 **같은 판정**(universe.is_holding_row: flags 또는 이름 규칙)을
+    쓴다 — flags 만 보면 이름 규칙으로 상한이 걸린 영원무역홀딩스 등에 꼬리표가 빠진다 (S2FIX S2).
+    """
+    from src import universe
+
     flags = getattr(row, "flags", ()) or ()
-    return [_FLAG_TAG[f] for f in _FLAG_TAG if f in flags]
+    present = set(flags)
+    if getattr(row, "market", None) == "KR" and universe.is_holding_row(row):
+        present.add("holding")
+    return [_FLAG_TAG[f] for f in _FLAG_TAG if f in present]
 
 
 def _excluded_reason(row) -> str | None:
@@ -301,27 +297,17 @@ def _excluded_reason(row) -> str | None:
     return _EXCLUDED_REASON.get(code, "후보 제외 대상")
 
 
-def _today_utc() -> date:
-    return datetime.now(timezone.utc).date()
-
-
-def _age_days(*dates: str | None, today: date | None = None) -> int | None:
-    """기준일들 중 **가장 오래된** 날짜로부터의 경과일. 파싱 가능한 날짜가 없으면 None (순수)."""
-    today = today or _today_utc()
-    ages = []
-    for d in dates:
-        if not d:
-            continue
-        try:
-            ages.append((today - date.fromisoformat(str(d)[:10])).days)
-        except ValueError:
-            continue
-    return max(ages) if ages else None
-
-
 def _asof_lines(fund_asof: str | None, price_asof: str | None, *,
-                today: date | None = None, fund_label: str = "재무") -> list[str]:
-    """기준일 줄 + (UNIVERSE_STALE_DAYS 이상 경과 시) 경고 줄 (순수)."""
+                today: date | None = None, fund_label: str = "재무",
+                show_hold: bool = False) -> list[str]:
+    """기준일 줄 + 노후 경고 줄 (순수).
+
+    경고(⚠️)·보류 판정은 다이제스트와 같은 함수·임계(universe.asof_status — settings.universe_warn_days /
+    universe_hold_days, KST 오늘 기준, 재무 기준일 기준)를 쓴다 (S2FIX S3).
+    show_hold=True(/scan)면 보류 임계 이상일 때 '일일 리포트는 후보 보류 중' 안내를 덧붙인다.
+    """
+    from src import universe
+
     if not fund_asof and not price_asof:
         return ["기준일 정보 없음"]
     bits = []
@@ -330,13 +316,18 @@ def _asof_lines(fund_asof: str | None, price_asof: str | None, *,
     if price_asof:
         bits.append(f"가격 {str(price_asof)[:10]}")
     lines = ["🗓 점수 기준일: " + " · ".join(bits)]
-    age = _age_days(fund_asof, price_asof, today=today)
-    if age is not None and age >= UNIVERSE_STALE_DAYS:
+    st = universe.asof_status(fund_asof, today=today)
+    age = st["age_days"]
+    if st["warn"]:
         lines.append(f"⚠️ 점수가 {age}일 전 기준이라 최신이 아닐 수 있어요.")
+    if show_hold and st["hold"]:
+        lines.append("⏸ 일일 리포트는 이 기간 동안 후보를 보류해요(재점수 필요). "
+                     "아래 목록은 마지막 점수 기준 참고용이에요.")
     return lines
 
 
-def format_stock(row, detail: dict | None, *, today: date | None = None) -> str:
+def format_stock(row, detail: dict | None, *, today: date | None = None,
+                 other_markets: list[str] | None = None) -> str:
     """종목 점수 + 근거 분해 + 기준일/제외 사유. row=ScanRow, detail=lookup_detail() 결과(없으면 None).
 
     점수는 DB(screened) 값 그대로 — 일일 리포트·/scan·대시보드와 같은 숫자/라벨.
@@ -374,6 +365,9 @@ def format_stock(row, detail: dict | None, *, today: date | None = None) -> str:
                 label, pts, mx, det = (list(comp) + [None] * 4)[:4]
                 tail = f" ({_safe(det)})" if det and det != "—" else ""
                 lines.append(f"  • {_safe(label)} {pts}/{mx}{tail}")
+    if other_markets:
+        lines.append(f"※ 다른 시장에도 있음: {', '.join(other_markets)} "
+                     f"(예: /stock {_safe(row.symbol)} {other_markets[0].lower()})")
     lines.append("")
     lines.extend(_asof_lines(getattr(row, "fund_asof", None), getattr(row, "price_asof", None),
                              today=today,
@@ -396,12 +390,12 @@ def format_scan(market: str, rows: list, *, today: date | None = None) -> str:
             f"  `{r.symbol}` {_safe(r.name)} — 종합 *{r.total_score}* "
             f"({vlabel} {r.value_score}/{hlabel} {r.health_score}){_per_pbr(r)}{tail}"
         )
-    # 기준일: 후보 전체 중 가장 오래된 날짜 (보수적으로 표기)
+    # 기준일: 후보 전체 중 가장 오래된 날짜 — 다이제스트 score_asof(선정 종목 재무 기준일 min)와 같은 규칙
     fund = [r.fund_asof for r in rows if getattr(r, "fund_asof", None)]
     price = [r.price_asof for r in rows if getattr(r, "price_asof", None)]
     lines.append("")
     lines.extend(_asof_lines(min(fund) if fund else None, min(price) if price else None,
-                             today=today))
+                             today=today, show_hold=True))
     rule = "지주사 최대 2개" if market == "KR" else "같은 업종 최대 2개"
     lines.append(f"일일 리포트와 같은 선정 규칙({rule}) · 시장 내 상대 점수")
     lines.append(DISCLAIMER)
@@ -445,16 +439,30 @@ def format_news(symbol: str, items: list[dict]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def handle_stock(arg: str | None) -> str:
+_STOCK_MARKETS = ("US", "KR", "CRYPTO")
+_STOCK_USAGE = "사용법: `/stock <티커> [us|kr|crypto]` (예: `/stock AAPL`, `/stock SUI crypto`)"
+
+
+def handle_stock(arg: str | None, arg2: str | None = None) -> str:
     from src import universe
 
     if not arg:
-        return "사용법: `/stock <티커>` (예: `/stock AAPL`)"
+        return _STOCK_USAGE
+    market = None
+    if arg2:
+        market = arg2.upper()
+        if market not in _STOCK_MARKETS:
+            return _STOCK_USAGE
     sym = arg.upper()
-    row = universe.lookup(sym)
+    row = universe.lookup(sym, market)
     if row is None:
-        return f"`{_safe(sym)}` 을(를) 유니버스에서 찾지 못했습니다 (미발굴/미보강일 수 있어요)."
-    return format_stock(row, universe.lookup_detail(sym))
+        where = f" ({market})" if market else ""
+        return f"`{_safe(sym)}`{where} 을(를) 유니버스에서 찾지 못했습니다 (미발굴/미보강일 수 있어요)."
+    others: list[str] = []
+    if market is None:
+        # 시장 미지정 + 여러 시장에 존재(CMAP-11: US 티커 vs 동명 크립토) → 첫 결과 + 안내 한 줄
+        others = [m for m in universe.lookup_markets(sym) if m != row.market]
+    return format_stock(row, universe.lookup_detail(sym, row.market), other_markets=others or None)
 
 
 def _parse_scan_n(raw: str | None) -> int | None:
@@ -538,11 +546,16 @@ def handle_ledger(arg: str | None, chat_id: str) -> str:
     except DB_ERRORS:
         logger.warning("/ledger 원장 조회 실패 (market=%s)", market, exc_info=True)
         return "원장을 읽지 못했습니다. 잠시 후 다시 시도해 주세요."
+    except (KeyError, TypeError, ValueError):
+        # 요약 dict 의 필드 누락/타입 불일치 같은 데이터 모양 문제 — 폴링 루프의 poison 가드까지
+        # 가지 않고 같은 안내로 변환 (S2FIX S6). 원인은 traceback 과 함께 로그에 남긴다.
+        logger.warning("/ledger 원장 요약 처리 실패 (market=%s)", market, exc_info=True)
+        return "원장을 읽지 못했습니다. 잠시 후 다시 시도해 주세요."
     if len(text) > LEDGER_MAX_CHARS:
         text = text[:LEDGER_MAX_CHARS].rstrip() + "\n…(이하 생략)"
-    # scripts/bot.py 가 /ledger 를 legacy Markdown 으로 보내므로(news 만 평문) 원장 본문의
-    # snake_case 토큰(no_price 등)이 짝수 밑줄이면 400 없이 이탤릭으로 조용히 깨진다 (§4.10 #10).
-    # 서식 특수문자를 공백으로 치환해 어느 parse_mode 에서도 안전하게 한다.
+    # scripts/bot.py 는 /ledger 를 평문(parse_mode=None)으로 보낸다 (S2FIX S1). 그래도 원장 본문의
+    # snake_case 토큰(no_price 등)이 Markdown 경로로 가면 짝수 밑줄이 400 없이 이탤릭으로 조용히
+    # 깨지므로(§4.10 #10) 서식 특수문자를 공백으로 치환하는 방어는 유지한다.
     text = _safe(text.replace("_", " "))
     return f"{text}\n\n{DISCLAIMER}"
 
@@ -593,7 +606,7 @@ def respond(text: str, chat_id: str, limiter: RateLimiter | None = None) -> str 
         logger.info("rate limit 초과 — 드롭 (chat=%s, cmd=%s)", chat_id, cmd.kind)
         return None
     if cmd.kind == "stock":
-        return handle_stock(cmd.arg)
+        return handle_stock(cmd.arg, cmd.arg2)
     if cmd.kind == "scan":
         return handle_scan(cmd.arg, cmd.arg2)
     if cmd.kind == "ledger":

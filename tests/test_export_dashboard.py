@@ -486,6 +486,7 @@ def test_main_payload_has_asof_and_excluded_fields(export_env):
     assert us["data_as_of"] == "2026-07-10T05:00:00+00:00"          # main/_data_as_of 동작 불변
     assert us["price_as_of"] == "2026-07-09"
     assert us["excluded_count"] == 1
+    assert us["count"] == 3 and us["eligible_count"] == 2             # count 하위호환 + 후보 대상 수 (S7)
     by = {i["symbol"]: i for i in us["items"]}
     assert by["AFGE"]["excluded"] == "sibling"
     assert by["AAA"]["excluded"] is None

@@ -311,6 +311,8 @@ def export_screener(
         payload = {"generated_at": now_str, "data_as_of": as_of,
                    "price_as_of": max(price_dates) if price_dates else None,
                    "excluded_count": sum(1 for i in items if i.get("excluded")),
+                   # count 는 하위호환(제외 행 포함 전체 행 수) 유지, eligible_count = 후보 대상(excluded 없는 행) 수
+                   "eligible_count": sum(1 for i in items if not i.get("excluded")),
                    "count": len(items), "items": items}
         size = _write_json(DASHBOARD_DIR / fname, payload)
         logger.info("%s 내보내기 완료: %d종목 → %s (%.1fKB)", market, len(items), fname, size / 1024)

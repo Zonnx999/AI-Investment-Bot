@@ -275,10 +275,13 @@ def _section_walk_forward(tickers: tuple[str, ...], period: str, top_n: int):
 
 
 def _trend_headline(strat, bench) -> str:
-    """[5] 헤드라인 — 연환산 비교 (누적 총수익 차이는 창이 길수록 커져 과장된 인상을 줌)."""
-    ann_excess = strat.annualized_return_pct - bench.annualized_return_pct
+    """[5] 헤드라인 — 연환산 수익률 비교 + MDD. 초과수익은 바로 아래 stats 줄(연환산 초과 %p) 하나로만 표기.
+
+    (예전엔 여기에도 CAGR 차이 '연 ±x%p' 를 붙여, stats 줄의 '연환산 초과'(일별 초과수익률 평균 기반)와
+    숫자 두 개가 나란히 나와 혼란을 줬다 — S2FIX S9.)
+    """
     return (f"  연환산 {strat.annualized_return_pct:+.1f}% vs {bench.annualized_return_pct:+.1f}%"
-            f" (연 {ann_excess:+.1f}%p) | MDD {strat.max_drawdown_pct:.1f}% vs {bench.max_drawdown_pct:.1f}%")
+            f" | MDD {strat.max_drawdown_pct:.1f}% vs {bench.max_drawdown_pct:.1f}%")
 
 
 def _section_trend(period: str):

@@ -19,7 +19,7 @@ from __future__ import annotations
 import argparse
 
 from src import universe
-from src.bot_commands import DISCLAIMER, LABEL_HEALTH, LABEL_VALUE   # 라벨 단일 소스 (텔레그램과 공유)
+from src.findings import DISCLAIMER, LABEL_HEALTH, LABEL_VALUE, score_labels   # 라벨 단일 소스 (텔레그램·다이제스트와 공유)
 from src.logger import get_logger
 
 logger = get_logger(__name__)
@@ -41,8 +41,8 @@ def _fmt_mcap(market: str, mcap: float) -> str:
 
 
 def _print_rows(rows, market: str | None = None) -> None:
-    # 크립토는 value=변동성점수 / health=순위점수 (universe._store_crypto_scored 매핑)
-    vlab, hlab = ("변동성", "순위") if market == "CRYPTO" else (LABEL_VALUE, LABEL_HEALTH)
+    # 크립토는 value=변동성점수 / health=순위점수 (universe._store_crypto_scored 매핑) — findings 에서 일괄 결정
+    vlab, hlab = score_labels(market)
     print(f"  {'순위':>3} {'종목':<10} {'시장':<6} {'종합':>4} {vlab:>4} {hlab:>4} "
           f"{'ROE':>7} {'PER':>6} {'PBR':>5}  회사")
     print("  " + "-" * 90)
@@ -74,7 +74,8 @@ def main() -> int:
         pbr = f"{row.pbr:.2f}" if row.pbr else "—"
         print(f"\n[{row.symbol}] {row.name}  ({row.market} · {row.sector or '—'})")
         if row.market == "CRYPTO":
-            print(f"  종합 {row.total_score} (변동성 {row.value_score} / 순위 {row.health_score})"
+            vlab, hlab = score_labels("CRYPTO")
+            print(f"  종합 {row.total_score} ({vlab} {row.value_score} / {hlab} {row.health_score})"
                   "  ※ 주식 점수와 비교 불가")
         else:
             print(f"  종합 {row.total_score} ({LABEL_VALUE} {row.value_score} / "
