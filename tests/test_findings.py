@@ -16,6 +16,9 @@ import pytest
 from src.findings import (
     CONFIDENCE_RELIABLE,
     CONFIDENCE_WEAK,
+    LABEL_CANDIDATES,
+    LABEL_HEALTH,
+    LABEL_VALUE,
     Finding,
     from_factor_scores,
     from_prediction,
@@ -117,10 +120,21 @@ def test_from_factor_scores_fields():
     assert fd.title == "NVDA"
     assert fd.score == 64.0
     assert fd.confidence is None
-    # 다이제스트 팩터 내역 줄과 동일 포맷 — 4팩터 전부 보존
-    assert fd.summary == "모멘텀 100 · 밸류 14 · 퀄리티 77 · 로우볼 36"
+    # 4팩터 전부 보존 — 라벨은 findings 상수 ('퀄리티' 어휘 폐기 → 건전성, CMAP-02)
+    assert fd.summary == f"모멘텀 100 · {LABEL_VALUE} 14 · {LABEL_HEALTH} 77 · 로우볼 36"
+    assert fd.summary == "모멘텀 100 · 밸류 14 · 건전성 77 · 로우볼 36"
     assert fd.evidence == ("12-1개월(skip) 수익률 +45.0% ↑",
                            "연환산 변동성 42.1% → Low Vol 36")
+
+
+def test_label_constants_single_source():
+    """digest·/stock·/scan·대시보드가 공유하는 라벨 — 한 곳에서만 정의, 금지 어휘 없음."""
+    assert (LABEL_VALUE, LABEL_HEALTH) == ("밸류", "건전성")
+    assert LABEL_CANDIDATES == "스크리닝 후보"
+    import src.findings as fmod
+    src_text = open(fmod.__file__, encoding="utf-8").read()
+    for banned in ("퀄리티", "발굴", "추천"):
+        assert banned not in src_text, banned
 
 
 # ----------------------------------------------------------------------

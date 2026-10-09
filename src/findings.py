@@ -39,6 +39,14 @@ KINDS = frozenset({"regime", "factor", "prediction", "screen"})
 CONFIDENCE_RELIABLE = "신뢰"
 CONFIDENCE_WEAK = "약함"
 
+# 점수 라벨 — 다이제스트·/stock·/scan·대시보드가 **한 곳**에서 공유 (CMAP-02).
+# screened.value_score = 밸류, screened.health_score = 건전성 (이전 어휘는 폐기 — 테스트가 금지어 검사).
+LABEL_VALUE = "밸류"
+LABEL_HEALTH = "건전성"
+LABEL_TOTAL = "종합"
+# 종목 목록의 중립 어휘 (RPP-01) — 점수는 규칙 통과 순위일 뿐 투자 권유가 아님.
+LABEL_CANDIDATES = "스크리닝 후보"
+
 
 @dataclass(frozen=True)
 class Finding:
@@ -114,8 +122,8 @@ def from_factor_scores(scores: "FactorScores") -> Finding:
         score=float(scores.composite),
         confidence=None,   # 팩터엔 기존 신뢰도 개념 없음
         summary=(
-            f"모멘텀 {scores.momentum} · 밸류 {scores.value} · "
-            f"퀄리티 {scores.quality} · 로우볼 {scores.low_vol}"
+            f"모멘텀 {scores.momentum} · {LABEL_VALUE} {scores.value} · "
+            f"{LABEL_HEALTH} {scores.quality} · 로우볼 {scores.low_vol}"
         ),
         evidence=tuple(scores.notes),
     )

@@ -2007,3 +2007,63 @@ def format_backfill_plan(plan: BackfillPlan, *, confirm: bool = False,
     else:
         lines.append("텔레그램 07-13 메시지의 종목과 같으면: python scripts/ledger.py backfill --confirm")
     return "\n".join(lines)
+
+
+# ----------------------------------------------------------------------
+# 8. 다이제스트용 읽기 헬퍼 (Stage 2 WP-DIGEST — 쓰기 0, DB 오류는 빈 결과)
+# ----------------------------------------------------------------------
+# 후보 리스트 diff(🆕/➖/유지)의 **유일한 출처**는 원장이다 — 별도 'last_list' state 를 두지
+# 않는다. 아래는 전부 _rconn()(스키마 생성 없음) 경로라 dry-run 에서도 쓰기가 없다.
+
+
+def last_sent_list(market: str) -> tuple[str | None, list[LedgerPick]]:
+    """가장 최근 발송일의 리스트 — (sent_date, rank 순 픽). 원장이 비면 (None, [])."""
+    sends = load_sends(market)
+    if not sends:
+        return None, []
+    by_date = _lists_by_date(sends)
+    last = max(by_date)
+    return last, by_date[last]
+
+
+def inclusion_start(market: str, symbols: Iterable[str] | None = None) -> dict[str, str]:
+    """심볼 → '연속 포함이 시작된 발송일'. 리스트에서 빠졌다가 재진입하면 재진입일.
+
+    symbols 를 주면 그 심볼만(현재 리스트), 없으면 최근 리스트의 전 종목. 원장에 없는
+    심볼은 결과에 없음 (호출부가 '신규' 로 취급). pick_events 와 같은 규칙(규칙 버전
+    변경 시 리셋)이라 채점기의 '첫 발송일' 과 일치한다.
+    """
+    sends = load_sends(market)
+    if not sends:
+        return {}
+    start: dict[str, str] = {}
+    for ev in pick_events(sends):            # 날짜 순 — 재진입은 나중 값으로 덮어씀
+        start[ev.symbol] = ev.sent_date
+    _last_date, last = last_sent_list(market)
+    current = {p.symbol for p in last}
+    wanted = set(symbols) if symbols is not None else current
+    return {s: d for s, d in start.items() if s in wanted and s in current}
+
+
+def entry_prices(market: str) -> dict[str, dict]:
+    """심볼 → 채점기가 채운 진입 정보 {entry_px, entry_date, first_sent_date, last_px,
+    last_px_date, bench_entry_px, status}. 같은 심볼이 여러 번 진입했으면 가장 최근 진입.
+
+    진입가는 **채점기(scripts/ledger.py score)** 가 Adj Close 로 채운다 — 발송 경로는 가격
+    API 를 추가하지 않는다. 아직 채점 전이면 해당 심볼이 비어 있고, 표시는 '52주 위치' 로 대체.
+    """
+    outs = load_outcomes(market)
+    best: dict[str, dict] = {}
+    for (sym, first), row in outs.items():
+        cur = best.get(sym)
+        if cur is None or str(first) > str(cur.get("first_sent_date") or ""):
+            best[sym] = {
+                "entry_px": _num(row.get("entry_px")),
+                "entry_date": row.get("entry_date"),
+                "first_sent_date": first,
+                "bench_entry_px": _num(row.get("bench_entry_px")),
+                "last_px": _num(row.get("last_px")),
+                "last_px_date": row.get("last_px_date"),
+                "status": row.get("status"),
+            }
+    return best

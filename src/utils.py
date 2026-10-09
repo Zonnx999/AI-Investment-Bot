@@ -59,3 +59,37 @@ def pick_first(row: pd.Series, candidates: list[str]):
         if name in row.index and pd.notna(row[name]):
             return row[name]
     return None
+
+
+# ----------------------------------------------------------------------
+# 텔레그램 legacy Markdown 안전 헬퍼 (digest / notifier 공용 — CLAUDE.md §4.10 #10)
+# ----------------------------------------------------------------------
+# legacy Markdown(parse_mode="Markdown") 은 `_ * \` [` 네 글자로 엔티티를 열고, 백슬래시
+# 이스케이프를 지원하지 않는다. 동적 문자열(회사명·에러 문구)은 렌더 경계 한 곳에서
+# md_safe() 를 통과시켜 '비슷하게 생긴 다른 유니코드' 로 바꾼다 — 짝이 안 맞아도 파서가
+# 엔티티를 열지 않으므로 메시지 전체가 통째로 실패하는 사고(MSG-06)를 막는다.
+_MD_LOOKALIKE = str.maketrans({"*": "∗", "_": "＿", "`": "ʼ", "[": "［"})
+MD_SAFE_NAME_LEN = 24
+
+
+def md_safe(text: object, max_len: int | None = None) -> str:
+    """동적 문자열을 legacy Markdown 안전 문자열로 (`*`→`∗`, `_`→`＿`, `` ` ``→`ʼ`, `[`→`［`).
+
+    max_len 을 주면 그 길이로 절단 (회사명은 MD_SAFE_NAME_LEN=24). None/빈 값은 "".
+    백슬래시는 그대로 둔다 — 엔티티 문자가 모두 치환돼 이스케이프로 해석될 짝이 없다.
+    """
+    if text is None:
+        return ""
+    s = str(text).translate(_MD_LOOKALIKE)
+    if max_len is not None and len(s) > max_len:
+        s = s[:max_len]
+    return s
+
+
+def strip_md(text: str) -> str:
+    """Markdown 서식 문자를 제거한 평문 — sendMessage 400(파싱 실패) 폴백 재전송용.
+
+    굵게(`*`)·코드(`` ` ``)·링크 괄호(`[ ]`)만 걷어낸다. `_` 는 유저명(john_doe)처럼 내용의
+    일부일 수 있어 유지 — 평문에서는 밑줄이 그대로 보여도 무해하다.
+    """
+    return "".join(ch for ch in str(text) if ch not in "*`[]")
