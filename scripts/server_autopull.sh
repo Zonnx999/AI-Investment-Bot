@@ -56,6 +56,11 @@ main() {
         fi
     done
 
+    # 서버 .venv ↔ requirements.lock 불일치 감시 (RVOPS-03) — lock 은 '바뀐 커밋' 에서만 설치되므로
+    # lock 이 처음 들어온 배포(구 autopull 이 처리)나 수동 설치본은 CI 가 검증한 스택과 다를 수 있다.
+    # 설치는 하지 않고 lock 내용별 1회 소유자 DM 만 (일괄 업그레이드 여부는 소유자 결정).
+    lock_drift_check
+
     # fetch 일시 실패(GitHub·네트워크 장애)는 exit 0 — 15분마다 OnFailure DM 폭주 방지.
     # 연속 FETCH_FAIL_NOTIFY 회(기본 8 = 약 2시간) 실패하면 그때 1회만 알린다.
     if ! git fetch origin "$BRANCH" --quiet; then
@@ -233,6 +238,20 @@ ci_gate() {
         fi
     fi
     echo "$r"
+}
+
+# 배포 중인 requirements.lock 과 .venv 설치 버전 비교 → 다르면 lock 내용당 1회 DM. 점검 실패는 무시.
+lock_drift_check() {
+    local lock="$REPO/requirements.lock" out rc=0 h
+    [ -f "$lock" ] || return 0
+    out="$("$PY" "$REPO/scripts/lock_drift.py" "$lock" 2>/dev/null)" || rc=$?
+    if [ "$rc" -eq 3 ]; then
+        h="$(sha256sum "$lock" | cut -c1-12)"
+        log "의존성 불일치: $out"
+        notify_once "lockdrift:$h" \
+            "[quant-bot 의존성 점검] 서버 .venv 가 requirements.lock 과 다름 — CI 가 검증한 스택 ≠ 운영 스택. ${out}. 조치: 발송 시각을 피해 flock -w 600 data/.digest.lock .venv/bin/pip install -r requirements.lock 후 봇 재시작·dry-run 스모크, 또는 서버 pip freeze 로 lock 교체 (DEPLOYMENT 참고)."
+    fi
+    return 0
 }
 
 # 같은 사건은 1회만 DM (키 = "<sha>:<종류>")
