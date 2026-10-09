@@ -111,3 +111,16 @@ def test_import_does_not_load_storage_or_pandas():
                          env={**os.environ, "PYTHONPATH": str(_ROOT)})
     assert out.returncode == 0, out.stderr
     assert out.stdout.strip() == "False False"
+
+
+def test_format_failure_masks_key_straddling_line_cut(fake_token):
+    """SEC-01 회귀: 키가 MAX_LINE(200자) 경계에 걸쳐도 접두부가 새지 않아야 한다.
+
+    줄을 먼저 자르고 마스킹하면 잘린 키는 전체 치환에 안 걸려 앞부분이 그대로 나간다.
+    """
+    # 키 앞부분이 6자 이상 잘려 남는 모든 위치 (짧은 접두부는 다른 문자열과 우연히 겹칠 수 있어 제외)
+    for prefix_len in range(no.MAX_LINE - len(FAKE_TOKEN) + 1, no.MAX_LINE - 5):
+        line = "u" * prefix_len + FAKE_TOKEN + "&file_type=json"
+        text = no.format_failure("digest-kr", "quant-digest@kr.service", {}, line, NOW)
+        head = FAKE_TOKEN[: no.MAX_LINE - prefix_len]
+        assert head not in text, prefix_len
