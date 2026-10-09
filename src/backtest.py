@@ -670,13 +670,24 @@ def _simulate(
     return net, gross_e, n_trades
 
 
-def _month_is_complete(ts: pd.Timestamp) -> bool:
-    """ts 가 속한 달이 끝났는가 — 다음 영업일이 다른 달이면 완결 (월말 주말은 완결로 본다)."""
+def _month_is_complete(ts: pd.Timestamp, now: pd.Timestamp | None = None) -> bool:
+    """ts 가 속한 달이 끝났는가 — 두 근거 중 하나라도 맞으면 완결.
+
+    1) 실행 시각(now, 기본 현재) 기준: ts 의 (연, 월) 이 now 의 (연, 월) 보다 앞이면 그 달은 지났다.
+       휴장일이 월말인 달(예: 마지막 거래일이 28일, 29일은 성금요일)도 다음 달이 되면 완결로 인정.
+    2) 달력 기준: ts 다음 영업일이 다른 달이면 완결 (월말 주말은 완결로 본다).
+    남은 한계: 거래소 휴장 달력은 모르므로, 월말 휴장 직후 같은 달 안에서는 (2) 가 '미완결' 로 보수적
+    판정해 마지막 구간을 하루이틀 제외할 수 있다 — 다음 달이 되면 (1) 로 자동 복구된다.
+    """
+    now = pd.Timestamp(now) if now is not None else pd.Timestamp.now()
+    if (ts.year, ts.month) < (now.year, now.month):
+        return True
     return (ts + pd.offsets.BDay(1)).month != ts.month
 
 
 def _monthly_rank_ic(
-    panel: pd.DataFrame, scores_by_date: dict[pd.Timestamp, dict[str, float]]
+    panel: pd.DataFrame, scores_by_date: dict[pd.Timestamp, dict[str, float]],
+    now: pd.Timestamp | None = None,
 ) -> tuple[float, float, int]:
     """리밸런스일 점수 vs 다음 리밸런스일까지 수익률의 스피어만 순위상관 → (평균 IC, t, 개월 수).
 
@@ -687,7 +698,7 @@ def _monthly_rank_ic(
     from scipy.stats import spearmanr
 
     dates = list(scores_by_date)
-    if len(dates) >= 2 and dates[-1] == panel.index[-1] and not _month_is_complete(dates[-1]):
+    if len(dates) >= 2 and dates[-1] == panel.index[-1] and not _month_is_complete(dates[-1], now):
         dates = dates[:-1]
     rhos: list[float] = []
     for a, b in zip(dates[:-1], dates[1:]):
