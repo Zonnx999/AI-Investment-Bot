@@ -29,7 +29,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -73,6 +73,10 @@ MAX_NEW_LINES = 6
 MAX_KEEP_LINES = 6
 MAX_ACTIVE_SHOWN = 3
 NEW_HIGH_EPS_PCT = 0.05          # 52주 고점比 이 이상이면 '52주 신고가'
+# '선정 후' 수익률 절대값이 이 이상이면 비정상(분할·데이터 오류 의심) — 표시·-10% 판정 제외, 소유자 DM 상세
+SINCE_ABS_MAX_PCT = 60.0
+# KR 아침 🌐 '경보 유지' 목록에서 뺄 자산 — 🇰🇷 한국 시장 섹션이 이미 '⚠️ 경보 중' 으로 표시
+_KR_SECTION_PREFIXES = ("KOSPI ", "KOSDAQ ")
 
 VERDICT_NONE = "없음"
 VERDICT_BUY = "매수 검토"
@@ -111,6 +115,10 @@ class PriceMetrics:
     dd_52w_pct: float | None
     mdd_1y_pct: float | None
     vol_pct: float | None
+    # 같은 프레임의 Adj Close 시리즈 (tz 없는 날짜 index) — 진입 기준가를 **이 프레임에서** 다시
+    # 구하기 위함. yfinance 는 분할·배당을 과거 가격에 소급 반영하므로, 채점기가 예전에 저장한
+    # entry_px 와 오늘 받은 adj_last 를 섞으면 2:1 분할 뒤 '선정 후 -50%' 가 된다 (D2).
+    adj_close: pd.Series | None = None
 
 
 @dataclass
@@ -179,7 +187,8 @@ class DigestBundle:
     dd10_new: dict[str, str] = field(default_factory=dict)   # 이번 런에 새로 발화한 '선정 후 -10%'
     verdict: Verdict | None = None
     diff: ListDiff | None = None
-    owner_extra: list[str] = field(default_factory=list)      # 소유자 DM 에 덧붙일 기술 상세
+    # 소유자 DM 기술 상세 — assemble 이 만든 번들에서는 health.notes 와 **같은 리스트** (D4)
+    owner_extra: list[str] = field(default_factory=list)
 
 
 # ----------------------------------------------------------------------
@@ -240,10 +249,13 @@ def price_metrics_from_frame(df: pd.DataFrame) -> PriceMetrics | None:
     last = float(close.iloc[-1])
     asof = pd.Timestamp(close.index[-1]).strftime("%Y-%m-%d")
     adj_last = None
+    adj_series: pd.Series | None = None
     try:
         adj = close_series(df).dropna()
+        adj = adj[adj > 0]
         if not adj.empty:
             adj_last = float(adj.iloc[-1])
+            adj_series = _naive_index(adj)
     except QuantBotError:
         adj_last = None
     vs_ma200 = None
@@ -255,7 +267,65 @@ def price_metrics_from_frame(df: pd.DataFrame) -> PriceMetrics | None:
     except InsufficientDataError:
         mdd = None
     return PriceMetrics(price=last, asof=asof, adj_last=adj_last, vs_ma200_pct=vs_ma200,
-                        dd_52w_pct=dd_52w, mdd_1y_pct=mdd, vol_pct=annualized_vol_pct(close))
+                        dd_52w_pct=dd_52w, mdd_1y_pct=mdd, vol_pct=annualized_vol_pct(close),
+                        adj_close=adj_series)
+
+
+def _naive_index(s: pd.Series) -> pd.Series:
+    """DatetimeIndex 를 tz 없는 날짜로 (yfinance 가 tz-aware 로 줄 때 날짜 비교가 깨지지 않게)."""
+    idx = pd.DatetimeIndex(s.index)
+    if idx.tz is not None:
+        idx = idx.tz_localize(None)
+    return pd.Series(s.to_numpy(dtype=float), index=idx.normalize())
+
+
+def entry_base_from_frame(adj: pd.Series | None, entry_date: str | None,
+                          first_sent_date: str | None) -> tuple[float | None, str]:
+    """같은 프레임의 Adj Close 에서 진입 기준가 — (기준가, 출처). 순수.
+
+    기준일 = ``entry_date`` (채점기가 확정한 진입 거래일), 없으면 ``first_sent_date`` 당일 또는 이후
+    첫 거래일 (ledger.update_outcomes 와 같은 규칙 — 아침 발송이라 당일 종가가 진입가).
+    출처: "frame"(프레임에서 구함) / "out_of_window"(진입일이 프레임 첫 관측 이전 — 저장 entry_px
+    폴백 대상) / "missing"(시리즈·날짜 없음, 또는 진입일이 마지막 관측 이후).
+    """
+    if adj is None or len(adj) == 0:
+        return None, "missing"
+    ref = entry_date or first_sent_date
+    if not ref:
+        return None, "missing"
+    try:
+        ts = pd.Timestamp(str(ref)[:10])
+    except ValueError:
+        return None, "missing"
+    s = _naive_index(adj.dropna())
+    s = s[s > 0]
+    if s.empty:
+        return None, "missing"
+    if ts < s.index[0]:
+        return None, "out_of_window"
+    later = s[s.index >= ts]
+    if later.empty:
+        return None, "missing"
+    return float(later.iloc[0]), "frame"
+
+
+def since_pct_for(m: PriceMetrics | None, ent: Mapping[str, Any] | None) -> tuple[float | None, str]:
+    """'선정 후' 수익률 (%) — (값, 기준가 출처 "frame"|"stored"|"none"). 순수.
+
+    1순위: 같은 프레임의 진입일 Adj Close (분할·배당 소급과 같은 기준). 프레임이 진입일을 덮지
+    못하면(1년 창 밖, 또는 시리즈 없음) 채점기가 저장한 ``entry_px`` 로 폴백. 둘 다 없으면 None.
+    """
+    if m is None or m.adj_last is None or not ent:
+        return None, "none"
+    base, how = entry_base_from_frame(m.adj_close, ent.get("entry_date"), ent.get("first_sent_date"))
+    src = "frame"
+    if base is None:
+        stored = ent.get("entry_px")
+        base = float(stored) if stored else None
+        src = "stored"
+    if not base or base <= 0:
+        return None, "none"
+    return (m.adj_last / base - 1) * 100, src
 
 
 def evidence_from_detail(detail: dict | None, market: str, flags: Sequence[str] = (),
@@ -369,15 +439,21 @@ def _alert_short(a: Alert) -> str:
 
 
 def decide_actions(diff: ListDiff, new_alerts: Sequence[Alert], dd10_labels: Sequence[str] = (),
-                   warn_count: int = 0, first_run: bool = False) -> Verdict:
+                   warn_count: int = 0, first_run: bool = False,
+                   held_age: int | None = None) -> Verdict:
     """'오늘 할 일' 판정 — 사실의 변화만으로 (점수·예측으로 행동을 지시하지 않음).
 
     매수 검토 N = 신규 후보 수(동점 교체 제외), 탈락 N = 탈락 수, 리스크 점검 N = 새 알림 수
     (국면 전환·낙폭·충격·신용·환율·종목 선정 후 하락). 전부 0 이면 '없음'.
     첫 기록(first_run)은 '기준 수립' — 6종목 전부 매수 검토가 되지 않는다.
+    후보 보류일(``held_age``: 점수 노후 일수)은 후보 diff 를 판정에서 뺀다 — 매수/탈락/기준 수립 0,
+    사유 '후보 보류 (점수 N일 경과)'. 원장이 갱신되지 않는 날이라 같은 diff 가 매일 반복되기 때문
+    (D1). 새 알림(국면·낙폭·충격)은 보류와 무관하게 남는다.
     """
-    n_buy = 0 if (diff.first_run or first_run) else len(diff.new)
-    n_drop = 0 if (diff.first_run or first_run) else len(diff.dropped)
+    held = held_age is not None
+    baseline = (diff.first_run or first_run) and not held
+    n_buy = 0 if (baseline or held) else len(diff.new)
+    n_drop = 0 if (baseline or held) else len(diff.dropped)
     n_risk = len(new_alerts) + len(dd10_labels)
     parts = []
     if n_buy:
@@ -389,7 +465,9 @@ def decide_actions(diff: ListDiff, new_alerts: Sequence[Alert], dd10_labels: Seq
     label = " · ".join(parts) if parts else VERDICT_NONE
 
     reasons: list[str] = []
-    if diff.first_run or first_run:
+    if held:
+        reasons.append(f"후보 보류 (점수 {held_age}일 경과)")
+    elif baseline:
         reasons.append("후보 목록 기준 수립 (첫 기록)")
     elif diff.changed:
         reasons.append("후보 변경일")
@@ -427,7 +505,9 @@ def render_basis(market: str, now: datetime, price_asof: str | None, score_asof:
     lag = _bdays(price_asof, today)
     px = f"시세 {_mmdd(price_asof)} 종가" if price_asof else "시세 —"
     if lag is not None and lag >= 2:
-        px += " (휴장)"
+        # 2영업일 이상 전 — 휴장일 수도, 가격 갱신 지연일 수도 있어 단정하지 않음 (D6).
+        # 3영업일 초과는 health.price_stale 가 ⚙️ 상태 줄로 따로 알린다.
+        px += " (휴장 또는 지연)"
     age = _age_days(score_asof, now)
     if score_asof is None:
         sc = "점수 기준일 없음"
@@ -519,7 +599,11 @@ def _active_short(text: str) -> str:
 
 
 def render_global(report: SignalReport | None, extra_new: int = 0) -> list[str]:
-    """🌐 글로벌 — 국면 1줄 + '새 알림 N건/없음 · 경보 유지' 1줄. extra_new = 🔔 블록의 종목 알림 수."""
+    """🌐 글로벌 (KR 아침 전용) — 국면 1줄 + '새 알림 N건/없음 · 경보 유지' 1줄.
+
+    extra_new = 🔔 블록의 종목 알림 수. '경보 유지' 목록·개수에서 KOSPI·KOSDAQ 은 뺀다 —
+    바로 위 🇰🇷 한국 시장 섹션이 같은 경보를 '⚠️ 경보 중' 으로 이미 표시 (D5).
+    """
     lines = ["*🌐 글로벌* (아침 1회)"]
     if report is None:
         lines.append("국면 조회 실패")
@@ -530,8 +614,8 @@ def render_global(report: SignalReport | None, extra_new: int = 0) -> list[str]:
     else:
         if view.held:        # shown_label 이 이미 '… · 직전 판정 유지 (지표 n/3)' 형식
             label = view.shown_label
-        else:
-            label = f"{view.shown_label} (지표 {view.available}/{view.total}, 현황 설명용)"
+        else:                # 유지 경로와 같은 ' · ' 구분 — 괄호 연속 '(Risk-on) (지표 3/3…)' 방지
+            label = f"{view.shown_label} · 지표 {view.available}/{view.total}, 현황 설명용"
         if view.prev_label:
             label += f" (어제: {view.prev_label})"
         if view.pending:
@@ -540,7 +624,7 @@ def render_global(report: SignalReport | None, extra_new: int = 0) -> list[str]:
         lines.append(f"국면 {md_safe(label)}" + (f" — {core}" if core else ""))
     n_new = len(report.alerts) + int(extra_new)
     head = f"새 알림 {n_new}건 (위)" if n_new else "새 알림 없음"
-    active = [_active_short(a) for a in report.active]
+    active = [_active_short(a) for a in report.active if not str(a).startswith(_KR_SECTION_PREFIXES)]
     if active:
         shown = " · ".join(active[:MAX_ACTIVE_SHOWN])
         if len(active) > MAX_ACTIVE_SHOWN:
@@ -588,8 +672,11 @@ def _legend(market: str) -> str:
 def render_candidates(market: str, views: Sequence[PickView], diff: ListDiff, *,
                       hold_age: int | None = None, list_since: str | None = None,
                       collapse_keep: bool = False, compact_new: bool = False,
-                      weights_line: str | None = None) -> list[str]:
-    """📋 후보 섹션. hold_age 가 있으면 '후보 보류' 1줄로 대체 (점수 >14일)."""
+                      weights_line: str | None = None, rule_note: str | None = None) -> list[str]:
+    """📋 후보 섹션. hold_age 가 있으면 '후보 보류' 1줄로 대체 (점수 >14일).
+
+    rule_note: 규칙 버전 전환 당일 1회 꼬리 줄 ('규칙 v1 기준으로 성과 집계 재시작', D3).
+    """
     title = f"*📋 {_MARKET_KO.get(market, market)} {LABEL_CANDIDATES} {len(views)}*"
     if hold_age is not None:
         return [f"*📋 {_MARKET_KO.get(market, market)} {LABEL_CANDIDATES}* — 보류",
@@ -647,17 +734,25 @@ def render_candidates(market: str, views: Sequence[PickView], diff: ListDiff, *,
                 lines.append(f"외 {len(keep_views) - MAX_KEEP_LINES} — {_SCAN_CMD.get(market, '/scan')}")
     if weights_line:
         lines.append(weights_line)
+    if rule_note:
+        lines.append(md_safe(rule_note))
     lines.append(_legend(market))
     return lines
 
 
 def render_ledger(summary: dict | None, *, now: datetime, has_history: bool,
-                  weekly: bool = False, ledger_mod=None) -> tuple[list[str], str | None]:
-    """📒 섹션 — (줄들, 상태 푸터). 게이트 미통과면 섹션 생략 + 푸터 반환."""
+                  weekly: bool = False, ledger_mod=None, held: bool = False) -> tuple[list[str], str | None]:
+    """📒 섹션 — (줄들, 상태 푸터). 게이트 미통과면 섹션 생략 + 푸터 반환.
+
+    held(후보 보류일): 요약이 없을 때 '첫 발송 — 성과 기록 시작'/'발송 후 자동 채점' 대신
+    '후보 보류 중 — 원장 미기록' — 보류일은 원장에 기록되지 않아 채점도 시작되지 않는다 (D1).
+    """
     from src import ledger as _ledger
     lg = ledger_mod or _ledger
     title = "*📒 지난 후보 성과*"
     if summary is None:
+        if held:
+            return [title, "후보 보류 중 — 원장 미기록"], None
         if not has_history:
             return [title, "첫 발송 — 성과 기록 시작"], None
         return [title, "채점 전 — 발송 후 자동 채점"], None
@@ -735,6 +830,7 @@ class DigestInputs:
     show_ledger: bool = True
     predictions: list = field(default_factory=list)
     weights_line: str | None = None
+    rule_note: str | None = None            # 규칙 버전 전환 당일 1회 (D3)
 
 
 def render_digest(inp: DigestInputs, *, collapse_keep: bool = False, compact_new: bool = False,
@@ -754,12 +850,13 @@ def render_digest(inp: DigestInputs, *, collapse_keep: bool = False, compact_new
         out += ["", *render_changes_us(alerts, inp.dd10_lines)]
     out += ["", *render_candidates(m, inp.views, inp.diff, hold_age=inp.hold_age,
                                    list_since=inp.list_since, collapse_keep=collapse_keep,
-                                   compact_new=compact_new, weights_line=inp.weights_line)]
+                                   compact_new=compact_new, weights_line=inp.weights_line,
+                                   rule_note=inp.rule_note)]
     footer = None
     if inp.show_ledger:
         lines, footer = render_ledger(inp.ledger_summary, now=inp.now,
                                       has_history=inp.ledger_has_history, weekly=inp.weekly,
-                                      ledger_mod=ledger_mod)
+                                      ledger_mod=ledger_mod, held=inp.hold_age is not None)
         if lines:
             out += ["", *lines]
     pred = render_predictions(inp.predictions)
@@ -927,7 +1024,8 @@ def assemble_daily_digest(market: str = "us", *, now: datetime | None = None,
     health = HealthReport(market=market, started_at=now,
                           storage=getattr(store, "init_sync", "local"), universe_as_of=None)
     degraded = bool(getattr(store, "degraded", False))
-    owner_extra: list[str] = []
+    # 소유자 DM 상세 줄 — health.notes 와 같은 리스트 (signature 제외, 평문 DM 에만). D4
+    owner_extra: list[str] = health.notes
 
     # --- 후보 (DB 재무점수 하나) ---
     picks: list = []
@@ -962,7 +1060,16 @@ def assemble_daily_digest(market: str = "us", *, now: datetime | None = None,
     prev_date, prev_list = ledger.last_sent_list(market)
     cur_syms = [str(p.symbol) for p in picks]
     starts = ledger.inclusion_start(market, cur_syms) if prev_list else {}
-    entries = ledger.entry_prices(market) if prev_list else {}
+    # 진입 정보는 (symbol, 연속 포함 시작일) 정확 일치만 — 옛 회차(v0 백필) 진입가 혼용 금지 (D3)
+    entries = ledger.entry_prices(market, starts) if starts else {}
+    rule_note = None
+    prev_rv = next((getattr(p, "rule_version", None) for p in prev_list), None)
+    if prev_rv and prev_rv != universe.RULE_VERSION:
+        # 규칙 버전 전환 당일 (직전 리스트가 옛 규칙): 원장 판정 단위 = 규칙 버전이므로 성과를
+        # 재시작한다 — 옛 회차의 시작일·진입가로 '선정 후'·-10% 알림을 만들지 않고 1회 표기만.
+        starts, entries = {}, {}
+        rule_note = f"규칙 {universe.RULE_VERSION} 기준으로 성과 집계 재시작"
+        owner_extra.append(f"원장: 규칙 버전 전환 {prev_rv} → {universe.RULE_VERSION} (성과 재시작)")
     summary = ledger.load_summary(market)
     dropped_rows: dict[str, Any] = {}
     for p in prev_list:
@@ -980,7 +1087,7 @@ def assemble_daily_digest(market: str = "us", *, now: datetime | None = None,
     dd10_new: dict[str, str] = {}
     dd10_lines: list[str] = []
     dd10_labels: list[str] = []
-    price_fail = 0
+    price_fail: list[str] = []
     price_dates: list[str] = []
     dd_state = {}
     if report is not None and report.pending_state is not None:
@@ -989,18 +1096,24 @@ def assemble_daily_digest(market: str = "us", *, now: datetime | None = None,
         if hold_age is not None:
             views.append(PickView(row=p, kind="keep"))
             continue
-        m = _price_metrics(str(p.symbol), market, getattr(p, "exchange", None), getattr(p, "sector", "") or "")
+        sym = str(p.symbol)
+        m = _price_metrics(sym, market, getattr(p, "exchange", None), getattr(p, "sector", "") or "")
         if m is None:
-            price_fail += 1
+            price_fail.append(sym)
         else:
             price_dates.append(m.asof)
-        sym = str(p.symbol)
         kind = "new" if sym in diff.new else ("base" if diff.first_run else "keep")
         since_pct = None
-        ent = entries.get(sym)
-        if (kind != "new" and m is not None and m.adj_last is not None and ent
-                and ent.get("entry_px")):
-            since_pct = (m.adj_last / float(ent["entry_px"]) - 1) * 100
+        anomaly = False
+        if kind != "new":
+            since_pct, src = since_pct_for(m, entries.get(sym))
+            if since_pct is not None and abs(since_pct) > SINCE_ABS_MAX_PCT:
+                # 분할 미반영·데이터 오류 의심 — 표시는 52주 위치로, -10% 판정 제외, 소유자에게만 (D2)
+                anomaly = True
+                owner_extra.append(f"선정 후 수익률 이상치 {sym} ({since_pct:+.1f}%, 진입가 출처 {src})")
+                logger.warning("선정 후 수익률 이상치 %s %s: %+.1f%% (진입가 출처 %s) — 표시 제외",
+                               market, sym, since_pct, src)
+                since_pct = None
         evidence = ""
         if kind == "new":
             try:
@@ -1012,7 +1125,7 @@ def assemble_daily_digest(market: str = "us", *, now: datetime | None = None,
         views.append(PickView(row=p, kind=kind, metrics=m, since_pct=since_pct,
                               since_date=starts.get(sym), evidence=evidence))
         thr = settings.pick_dd_alert_pct
-        if (thr and since_pct is not None and since_pct <= thr and starts.get(sym)
+        if (thr and not anomaly and since_pct is not None and since_pct <= thr and starts.get(sym)
                 and dd_state.get(sym) != starts.get(sym)):
             dd10_new[sym] = starts[sym]
             dd10_lines.append(f"{_name(p) or sym} 선정 후 {since_pct:+.1f}% — 보유 시 점검 (1회 알림)")
@@ -1020,7 +1133,9 @@ def assemble_daily_digest(market: str = "us", *, now: datetime | None = None,
     if dd10_new and report is not None and report.pending_state is not None:
         report.pending_state.setdefault("pick_dd10", {}).setdefault(market, {}).update(dd10_new)
     if price_fail:
-        health.optional_failures.append(f"가격 조회 실패 {price_fail}종목")
+        # 고정 키만 (signature 안정) — 개수·종목은 소유자 상세 줄 (D4)
+        health.optional_failures.append("가격 조회 실패")
+        owner_extra.append(f"가격 조회 실패 {len(price_fail)}종목: {', '.join(price_fail)}")
 
     # --- 기준일 ---
     kr = getattr(report, "kr", None)
@@ -1042,7 +1157,7 @@ def assemble_daily_digest(market: str = "us", *, now: datetime | None = None,
     # --- 판정 ---
     warn_count = sum(1 for pr in health.problems(now) if pr.user_text)
     alerts = list(report.alerts) if report is not None else []
-    verdict = decide_actions(diff, alerts, dd10_labels, warn_count=warn_count)
+    verdict = decide_actions(diff, alerts, dd10_labels, warn_count=warn_count, held_age=hold_age)
     weekly = ledger.market_today(market, now).weekday() == 0
     inp = DigestInputs(
         market=market, now=now, verdict=verdict, diff=diff, views=views, report=report,
@@ -1050,12 +1165,14 @@ def assemble_daily_digest(market: str = "us", *, now: datetime | None = None,
         hold_age=hold_age, list_since=list_since, dd10_lines=dd10_lines, overnight_line=overnight,
         ledger_summary=summary, ledger_has_history=bool(prev_list), weekly=weekly,
         show_ledger=(settings.ledger_line == "on"), predictions=predictions,
-        weights_line=weights_line,
+        weights_line=weights_line, rule_note=rule_note,
     )
     text = render_with_budget(inp)
     if settings.ledger_line == "owner":
-        line, _ = render_ledger(summary, now=now, has_history=bool(prev_list), weekly=weekly)
-        owner_extra.extend(line[1:])
+        # 성과 줄을 구독자 대신 소유자 DM 에 — send_daily_digest 가 owner 모드면 매 런 DM 을 보낸다 (D7)
+        line, _ = render_ledger(summary, now=now, has_history=bool(prev_list), weekly=weekly,
+                                held=hold_age is not None)
+        owner_extra.extend(f"성과: {x}" for x in line[1:])
 
     hold = health.is_hold(len(picks))
     hold_reason = None
@@ -1107,8 +1224,13 @@ def send_daily_digest(
     """시장별 다이제스트 1회 조립 후 active 구독자 전원에게 브로드캐스트.
 
     순서: 조립 → 강등/후보 0 이면 소유자 보류 DM(종료코드 20/21, 쓰기 0) → 브로드캐스트 →
-    sent ≥ 1 이면 commit_signal_state → ledger.record_send(후보 보류일은 미기록) →
-    put_state('health') → sync → 헬스 signature 변화·경고·실패가 있으면 소유자 DM 1통(평문).
+    Markdown 평문 폴백 횟수 확정(헬스 반영) → sent ≥ 1 이면 commit_signal_state →
+    ledger.record_send(후보 보류일은 미기록) → put_state('health') → sync →
+    헬스 signature 변화·경고·실패가 있으면 소유자 DM 1통(평문).
+    폴백 횟수·원장 결과는 **put_state 전에** 헬스에 반영한다 — 저장 signature 와 DM 판정
+    signature 가 같아야 중복 억제가 맞는다 (D4).
+    ``QUANT_BOT_LEDGER_LINE=owner`` 면 성과 줄이 구독자 메시지 대신 소유자 DM 에 실리므로
+    signature 변화와 무관하게 **매 런** 소유자 DM 을 보낸다 (D7).
     Returns {"sent", "failed", "recipients", "exit_code"} (기존 3키 + exit_code).
     """
     from src import ledger, llm, subscribers, universe
@@ -1151,6 +1273,13 @@ def send_daily_digest(
             failed += 1
     health.sent, health.failed, health.recipients = sent, failed, len(recipients)
     logger.info("브로드캐스트 %s: 전송 %d / 실패 %d (대상 %d)", mk, sent, failed, len(recipients))
+    # 브로드캐스트 직후 확정 — put_state 앞에서 헬스에 반영 (고정 키 + 상세는 notes)
+    fb = fallback_count()
+    if fb:
+        health.optional_failures.append("Markdown 평문 폴백")
+        health.notes.append(f"Markdown 평문 폴백 {fb}회")
+    if bundle.verdict is not None:
+        health.notes.insert(0, f"판정: {bundle.verdict.label}")
 
     store = get_storage()
     prev_health = None
@@ -1166,21 +1295,20 @@ def send_daily_digest(
             )
             if not ok:
                 health.optional_failures.append("원장 기록")
-            bundle.owner_extra.append(f"원장: {'기록 완료' if ok else '기록 실패'} ({sent_date}, {len(bundle.picks)}종목)")
+            health.notes.append(f"원장: {'기록 완료' if ok else '기록 실패'} ({sent_date}, {len(bundle.picks)}종목)")
         else:
-            bundle.owner_extra.append("원장: 미기록 (후보 보류 또는 후보 없음)")
+            health.notes.append("원장: 미기록 (후보 보류 또는 후보 없음)")
         prev_health = store.get_state(_HEALTH_NS, f"digest:{mk}")
         if not store.put_state(_HEALTH_NS, f"digest:{mk}", health.to_state()):
             health.state_write_ok = False
         store.sync()
 
-    fb = fallback_count()
-    if fb:
-        health.optional_failures.append(f"Markdown 평문 폴백 {fb}회")
-    if health.needs_owner_dm(run_now, prev_health):
-        extra = [f"판정: {bundle.verdict.label}" if bundle.verdict else "",
-                 f"Markdown 평문 폴백 {fb}회", *bundle.owner_extra]
-        _owner_dm(health.owner_text(run_now, held=False) + "\n" + "\n".join(x for x in extra if x))
+    # bundle.owner_extra 는 health.notes 의 별칭(assemble) — 테스트가 별도 리스트를 넘긴 경우만 병합
+    if bundle.owner_extra is not health.notes:
+        health.notes.extend(x for x in bundle.owner_extra if x)
+    owner_mode = settings.ledger_line == "owner"
+    if owner_mode or health.needs_owner_dm(run_now, prev_health):
+        _owner_dm(health.owner_text(run_now, held=False))
 
     exit_code = EXIT_OK if failed == 0 else (EXIT_ALL_FAIL if sent == 0 else EXIT_PARTIAL_FAIL)
     return {"sent": sent, "failed": failed, "recipients": len(recipients), "exit_code": exit_code}
