@@ -67,7 +67,7 @@ API 키는 모두 프로젝트 루트의 `.env` 파일에 저장 — gitignore �
 - **실전 예외 처리** — broad `except Exception` 금지. 단 layered 패턴의 최후 fallback 자리는 예외이며 `# noqa: BLE001` 주석 필수.
 - **logging 모듈 사용** — 진단/에러는 `logger.*`. `print()` 는 사용자 대시보드 출력(stdout deliverable)에만 사용.
 - **모듈 독립 테스트 가능** — 다른 모듈 없이도 import + 실행 가능해야 함.
-- **테스트 그린 유지** — 작업 후 `python -m pytest` (오프라인) 통과 필수. 2026-10-09 실측: **1,132개, 약 40초** — libsql 설치 환경(CI·프로젝트 `.venv` — `.[dev,hosting]`)은 전부 통과, 미설치 환경은 libsql 전용 3개가 스킵돼 1,129 통과 / 3 스킵 (autopull 시나리오 테스트가 git/bash 를 실제로 돌려서 예전보다 느림). 새 로직에는 테스트 추가 (네트워크 없는 테스트만 — 합성 데이터/로컬 서버). CI(`.github/workflows/ci.yml`, 잡 이름 `pytest`)가 같은 스위트를 `requirements.lock` 환경에서 돌리고, 서버 autopull 은 이 잡이 녹색인 코드 커밋만 배포한다.
+- **테스트 그린 유지** — 작업 후 `python -m pytest` (오프라인) 통과 필수. 2026-10-09 실측: **1,134개, 약 40초** — libsql 설치 환경(CI·프로젝트 `.venv` — `.[dev,hosting]`)은 전부 통과, 미설치 환경은 libsql 전용 3개가 스킵돼 1,131 통과 / 3 스킵 (autopull 시나리오 테스트가 git/bash 를 실제로 돌려서 예전보다 느림). 새 로직에는 테스트 추가 (네트워크 없는 테스트만 — 합성 데이터/로컬 서버). CI(`.github/workflows/ci.yml`, 잡 이름 `pytest`)가 같은 스위트를 `requirements.lock` 환경에서 돌리고, 서버 autopull 은 이 잡이 녹색인 코드 커밋만 배포한다.
 
 ### 4.3 새 기능 짜기 전 — 코드 오딧 우선
 영향 받는 파일들 먼저 Read 하고, 영향도 분석 후 작업 시작. 추측 금지.

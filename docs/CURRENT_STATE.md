@@ -84,7 +84,7 @@
 - `main` 에 push 하면 서버가 15분 내 자동 반영하므로 **배포 순서가 중요**합니다 → `docs/DEPLOYMENT.md` "배포 순서" (브랜치 push 로 CI 먼저 확인 → main ff 병합 → 유닛 설치 → 원장 소급 → 첫 재점수 → 타이머 → 대시보드 재활성화 → 공지).
 - `docs/proposals/2026-10-08-fix-proposal.html`(진단·설계 제안서)은 **커밋하지 않기로 한 사용자 결정**으로 로컬에만 있음.
 - **사용자 결정 대기**: 로컬 `.claude/agents/`·`.claude/launch.json` 을 저장소에 커밋할지(지금은 untracked). `.claude/worktrees/`·`.claude/scheduled_tasks.lock` 은 `.gitignore` 로 이미 제외.
-- 테스트: **1,132개, 약 40초** (2026-10-09 실측, 오프라인) — libsql 설치 환경은 전부 통과, 미설치 환경은 libsql 전용 3개가 스킵(1,129 통과 / 3 스킵).
+- 테스트: **1,134개, 약 40초** (2026-10-09 실측, 오프라인) — libsql 설치 환경은 전부 통과, 미설치 환경은 libsql 전용 3개가 스킵(1,131 통과 / 3 스킵).
 - 서버 실제 상태(설치 버전·`.env` 키·타이머 목록)는 이번 라운드에서 접속하지 못해 **미확인**입니다. 배포 전 `DEPLOYMENT.md` 의 점검 명령으로 확인하세요.
 
 ### 2.2 사용자 결정 사항 (기본값으로 구현됨 — 바꾸려면 알려주세요)
@@ -139,7 +139,7 @@ AI-Investment-Bot/
 ├── scripts/                                           # 실행 진입점 (아래)
 ├── deploy/systemd/                                    # 서버 유닛·타이머 원본 (11개)
 ├── dashboard/index.html, *_data.json                  # GitHub Pages 대시보드
-├── tests/                                             # 오프라인 1,132개 — python -m pytest (~40s)
+├── tests/                                             # 오프라인 1,134개 — python -m pytest (~40s)
 ├── data/ (gitignore, 캐시·유니버스 DB), logs/, notebooks/
 └── .github/workflows/{ci,dashboard-export,daily-digest}.yml
 ```
@@ -242,7 +242,7 @@ cp .env.example .env
 - `.env` 에 `FRED_API_KEY`, `FMP_API_KEY`, (KRX/DART/TELEGRAM/TURSO) 채우기. 운영 키로 `--dry-run` 을 돌려도 텔레그램 발송·상태/원장 쓰기는 없지만(스키마 보장과 조회 캐시 저장은 일어날 수 있음), **운영 Turso 에 붙으므로** 격리하려면 `TURSO_DATABASE_URL= TURSO_AUTH_TOKEN= TELEGRAM_BOT_TOKEN= TELEGRAM_CHAT_ID= QUANT_BOT_DB_PATH=/tmp/x.db` 를 앞에 붙일 것(`CLAUDE.md §4.10 (1)`).
 - 저장소 `.venv` 는 머신 종속입니다(다른 머신 경로로 만든 venv 는 실행 불가) — 새 머신에서는 새로 만들기.
 - 로컬 `.claude/settings.local.json` 에 `git push`·실발송 명령이 무확인 허용돼 있으면 지우는 것을 권장.
-- 테스트는 libsql(`.[hosting]`)이 설치된 인터프리터에서 돌려야 1,132개 전부 실행됨 — 미설치면 libsql 전용 3개가 스킵(조용히 통과로 보임, `-rs` 로 사유 확인).
+- 테스트는 libsql(`.[hosting]`)이 설치된 인터프리터에서 돌려야 1,134개 전부 실행됨 — 미설치면 libsql 전용 3개가 스킵(조용히 통과로 보임, `-rs` 로 사유 확인).
 
 ---
 

@@ -101,7 +101,7 @@ AI-Investment-Bot/
 ├── data/                  # 데이터 캐시·유니버스 DB (gitignore)
 ├── notebooks/             # 실험용 노트북 (gitignore)
 ├── logs/                  # quant_bot.log (gitignore)
-└── tests/                 # pytest — 오프라인 테스트 1,132개, 약 40초 (python -m pytest)
+└── tests/                 # pytest — 오프라인 테스트 1,134개, 약 40초 (python -m pytest)
 ```
 
 ## 첫 실행 (Quick Start)
@@ -118,7 +118,7 @@ uv pip install --python .venv/bin/python -e ".[dev,hosting]"
 ```bash
 cp .env.example .env
 ```
-테스트(오프라인 1,132개, 약 40초)와 첫 실행(발송 없는 미리보기):
+테스트(오프라인 1,134개, 약 40초)와 첫 실행(발송 없는 미리보기):
 ```bash
 .venv/bin/python -m pytest
 .venv/bin/python scripts/send_digest.py --market kr --dry-run
