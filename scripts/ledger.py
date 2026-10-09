@@ -8,6 +8,8 @@ scripts/ledger.py
              --source rescore(기본) | pre_rescore(필요할 때만) | reconstructed(07-10 복원)
   backfill   07-13 소급 백필 — 기본 dry-run(쓰기 0), --confirm 일 때만 기록
   score      채점 (발송 후 ExecStartPost 용). 실패 시 exit 1 (유닛에서 '-' 로 무시)
+
+공통: 저장소가 강등(초기 pull 타임아웃 → 빈 오프라인 파일)이면 어떤 명령도 실행하지 않고 exit 3.
   report     us | kr — 평문 성적표
   ic         최근 두 스냅샷 사이 점수-수익 순위상관 (정보용, 판정 근거 아님)
 
@@ -144,9 +146,19 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
+EXIT_DEGRADED = 3
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        # 초기 pull 타임아웃으로 빈 오프라인 파일로 강등됐으면 실행하지 않는다 (RVOPS-02) — 그대로 가면
+        # score/report 가 '원장 비어 있음 → 생략' exit 0 으로 실패를 숨긴다.
+        if getattr(ledger.get_storage(), "init_sync", None) == "timeout":
+            print("[중단] 저장소 강등 — Turso 초기 pull 타임아웃으로 빈 오프라인 파일이 열렸습니다. "
+                  "원장 결과가 무효라 실행하지 않습니다. QUANT_BOT_SYNC_TIMEOUT=240 으로 다시 실행하세요.",
+                  file=sys.stderr)
+            return EXIT_DEGRADED
         return args.fn(args)
     except (StorageError, *DB_ERRORS) as e:
         logger.error("원장 DB 오류: %s", e, exc_info=True)
