@@ -678,6 +678,8 @@ def _month_is_complete(ts: pd.Timestamp, now: pd.Timestamp | None = None) -> boo
     2) 달력 기준: ts 다음 영업일이 다른 달이면 완결 (월말 주말은 완결로 본다).
     남은 한계: 거래소 휴장 달력은 모르므로, 월말 휴장 직후 같은 달 안에서는 (2) 가 '미완결' 로 보수적
     판정해 마지막 구간을 하루이틀 제외할 수 있다 — 다음 달이 되면 (1) 로 자동 복구된다.
+    (1) 은 패널이 실행 시점까지 최신이라고 가정한다 — 끝 날짜가 과거로 고정된 캐시 패널(예: 09-15 에서
+    끝남)을 10월에 돌리면 9월 부분 구간도 완결로 본다. 운영 호출부는 실행 당일까지 받은 패널을 쓴다.
     """
     now = pd.Timestamp(now) if now is not None else pd.Timestamp.now()
     if (ts.year, ts.month) < (now.year, now.month):

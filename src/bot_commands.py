@@ -39,7 +39,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from datetime import date, datetime, timezone
+from datetime import date
 
 from src.exceptions import DataFetchError, MissingApiKeyError
 from src.findings import (   # 라벨·면책 단일 출처 — 아래 이름들은 재노출(테스트·소비자 호환)

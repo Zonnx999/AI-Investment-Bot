@@ -1538,7 +1538,6 @@ def test_is_holding_row_flag_or_name_rule():
     assert universe.is_holding_row(_scan_row(name="영원무역홀딩스"))           # 이름 규칙만
     assert not universe.is_holding_row(_scan_row(name="쿠쿠홈시스"))
     assert not universe.is_holding_row(_scan_row(name="KB금융지주"))           # 금융지주는 금융으로 판정
-    assert universe._is_holding_row is universe.is_holding_row               # 구 이름 별칭
 
 
 def _seed_sui(conn):

@@ -413,6 +413,30 @@ def test_render_global_label_no_double_parens_and_kr_assets_deduped():
     assert many[2].endswith("· 외 1") and "경보 유지 4:" in many[2]
 
 
+def test_decide_actions_baseline_note_for_rule_transition():
+    """규칙 전환일: 바뀐 목록이어도 매수 검토·탈락 대신 재구성 사유 1개 (원장이 새 기준선을 기록)."""
+    diff = dg.ListDiff(prev_date="07-13", first_run=False, new=["A", "B"],
+                       dropped=[dg.DroppedPick("C", "c", "순위 밖"), dg.DroppedPick("D", "d", "순위 밖")])
+    v = dg.decide_actions(diff, [], baseline_note="규칙 v1 로 후보 재구성 (편입 2 · 탈락 2)")
+    assert (v.label, v.n_buy, v.n_drop) == ("없음", 0, 0)
+    assert v.reasons[0] == "규칙 v1 로 후보 재구성 (편입 2 · 탈락 2)"
+    # 보류일이 우선 — 보류 사유만
+    vh = dg.decide_actions(diff, [], held_age=20, baseline_note="규칙 v1 로 후보 재구성")
+    assert vh.reasons[0] == "후보 보류 (점수 20일 경과)"
+    # 노트 없으면 기존 동작
+    assert dg.decide_actions(diff, []).label == "매수 검토 2 · 탈락 2"
+
+
+def test_render_global_keeps_kr_alerts_when_kr_section_failed():
+    """한국 시장 섹션이 조회 실패로 지수를 못 그린 날은 KOSPI·KOSDAQ 경보를 글로벌 목록에 남긴다."""
+    act = ["KOSPI -25% (임계 -12%)", "KOSDAQ -27% (임계 -15%)"]
+    no_kr = dg.render_global(_report(kr=False, active=act))
+    assert no_kr[2] == "새 알림 없음 · 경보 유지 2: KOSPI -25% · KOSDAQ -27%"
+    rep = _report(active=act)
+    rep.kr.kospi = None                                         # 코스피만 조회 실패
+    assert dg.render_global(rep)[2] == "새 알림 없음 · 경보 유지 1: KOSPI -25%"
+
+
 def test_render_kr_market_handles_missing_context():
     rep = _report(kr=False)
     lines = dg.render_kr_market(rep, None)
@@ -516,6 +540,9 @@ def test_since_pct_uses_frame_entry_after_split_not_stored_px():
     assert dg.since_pct_for(m_no, {"entry_px": None}) == (None, "none")
     assert dg.since_pct_for(None, ent) == (None, "none")
     assert dg.since_pct_for(m, None) == (None, "none")
+    # 진입일이 프레임 마지막 관측 이후(낡은 캐시 프레임) → 저장 entry_px 와 섞지 않고 None
+    ent_future = {"entry_px": 50.0, "entry_date": "2030-01-02", "first_sent_date": "2030-01-02"}
+    assert dg.since_pct_for(m, ent_future) == (None, "none")
 
 
 def test_predictions_and_weights_only_behind_flags():
@@ -578,8 +605,8 @@ def _wire(monkeypatch, *, picks, prev=(), starts=None, entries=None, summary=Non
     monkeypatch.setattr(uni, "pick_top", lambda market, n=6, **k: list(picks))
     monkeypatch.setattr(uni, "freshness", lambda market="US": fresh or
                         {"fund_asof": "2026-10-05", "price_asof": "2026-10-07", "age_days": 3})
-    monkeypatch.setattr(uni, "lookup", lambda s: None)
-    monkeypatch.setattr(uni, "lookup_detail", lambda s: None)
+    monkeypatch.setattr(uni, "lookup", lambda s, market=None: None)
+    monkeypatch.setattr(uni, "lookup_detail", lambda s, market=None: None)
     rep = report if report is not None else _report(market=picks[0].market if picks else "KR")
     if dd_state is not None and rep.pending_state is not None:
         rep.pending_state["pick_dd10"] = dd_state
@@ -704,6 +731,9 @@ def test_assemble_since_pct_split_safe_and_anomaly_guard(fresh_db, monkeypatch):
     assert any(ln.startswith("007700 ") and "52주 고점比 -70%" in ln and "선정 후" not in ln for ln in lines)
     assert b.dd10_new == {} and b.verdict.label == "없음"
     assert any("선정 후 수익률 이상치 007700 (-70.0%" in x for x in b.owner_extra)
+    # 고정 키 — 소유자 DM signature 에 들어가 처음 나타난 날 1회 알림 (구독자 상태 줄에는 안 나감)
+    assert "선정 후 수익률 이상치" in b.health.optional_failures
+    assert "이상치" not in (b.health.status_line(NOW_KR) or "")
     assert b.owner_extra is b.health.notes                     # D4: 상세는 health.notes 로 흘러간다
     # 창 밖 진입(프레임이 진입일을 못 덮음) → 저장 entry_px 그대로 (소급 위험은 채점기와 같은 폴백)
     old_ent = {"entry_px": 50.0, "entry_date": "2025-01-02", "first_sent_date": "2025-01-02"}
@@ -746,6 +776,9 @@ def test_assemble_rule_version_transition_day_notes_restart(fresh_db, monkeypatc
     b = dg.assemble_daily_digest("kr", now=NOW_KR)
     assert "규칙 v1 기준으로 성과 집계 재시작" in b.text
     assert "선정 후" not in b.text and b.dd10_new == {}
+    # 판정: 원장이 새 규칙 기준선을 기록하는 날 — 매수 검토·탈락 대신 '재구성'
+    assert b.verdict.n_buy == 0 and b.verdict.n_drop == 0
+    assert "규칙 v1 로 후보 재구성" in b.verdict.reasons
     assert any("규칙 버전 전환 v0 → v1" in x for x in b.owner_extra)
     assert_bold_only(b.text)
     # 직전 리스트가 현재 규칙이면 표기 없음

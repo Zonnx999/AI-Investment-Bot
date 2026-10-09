@@ -573,6 +573,8 @@ def test_monthly_rank_ic_keeps_complete_last_month():
     panel, reb, scores = _ic_fixture("2025-09-30")          # 9월 마지막 거래일 — 완결
     assert reb[-1] == panel.index[-1]
     assert _monthly_rank_ic(panel, scores)[2] == len(scores) - 1   # 마지막 쌍 포함
+    # 실행 시각을 패널 마지막 날로 고정해도 달력 규칙(다음 영업일이 다른 달)으로 완결
+    assert _monthly_rank_ic(panel, scores, now=panel.index[-1])[2] == len(scores) - 1
 
 
 def test_month_is_complete_boundaries():

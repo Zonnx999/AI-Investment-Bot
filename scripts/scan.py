@@ -64,7 +64,7 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.check:
-        row = universe.lookup(args.check)
+        row = universe.lookup(args.check, args.market)
         if not row:
             print(f"'{args.check.upper()}' — DB 에 없거나 아직 보강 안 됨. build_universe 먼저 실행.")
             return 1
@@ -93,7 +93,7 @@ def main() -> int:
             print(f"  {row.market} 내 순위: {rank}위 / {len(peers)}종목")
 
         # 점수 분해 — '왜 이 점수인지' (텔레그램 /stock 과 동일 내용)
-        detail = universe.lookup_detail(row.symbol)
+        detail = universe.lookup_detail(row.symbol, row.market)
         if detail:
             for key, title in (("health", f"🏥 {LABEL_HEALTH} 분해"), ("value", f"💰 {LABEL_VALUE} 분해")):
                 card = detail.get(key, {})

@@ -1281,7 +1281,6 @@ def is_holding_row(row: ScanRow) -> bool:
     return "holding" in row.flags or kr_is_holding(row.name)
 
 
-_is_holding_row = is_holding_row   # 하위호환 별칭 (구 비공개 이름)
 
 
 def pick_top(
