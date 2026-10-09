@@ -141,6 +141,28 @@ def test_negative_nde_without_ev_ebitda_is_conservative():
     assert _nde(card).points == 0.0
 
 
+def test_zero_nde_with_negative_ev_ebitda_gets_zero():
+    """RVQ-2: FMP 결측=0 인 nde 0 + EBITDA 적자 → 만점(20) 이 아니라 0점."""
+    card = health_scorecard(dict(GOOD, netDebtToEBITDA=0, evToEBITDA=-4.0))
+    c = _nde(card)
+    assert c.points == 0.0
+    assert "EBITDA 적자" in c.detail
+
+
+def test_zero_nde_without_ev_ebitda_not_full_credit():
+    """RVQ-2: nde 0 + evToEBITDA 결측/0 → 만점 아님 (None 결측 0점과 일관)."""
+    metrics = {k: v for k, v in GOOD.items() if k != "evToEBITDA"}
+    assert _nde(health_scorecard(dict(metrics, netDebtToEBITDA=0))).points == 0.0
+    assert _nde(health_scorecard(dict(GOOD, netDebtToEBITDA=0, evToEBITDA=0))).points == 0.0
+    assert _nde(health_scorecard(dict(metrics, netDebtToEBITDA=None))).points == 0.0
+
+
+def test_zero_nde_with_positive_ebitda_keeps_full_credit():
+    """진짜 무차입(nde 0, EBITDA>0) 은 기존대로 만점."""
+    c = _nde(health_scorecard(dict(GOOD, netDebtToEBITDA=0.0, evToEBITDA=7.0)))
+    assert c.points == 20.0
+
+
 # ---------------- _safe (결측/비숫자 방어) ----------------
 
 
