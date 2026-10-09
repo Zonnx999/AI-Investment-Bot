@@ -1126,3 +1126,109 @@ def test_entry_prices_takes_latest_entry_per_symbol(fresh_db):
     assert ep["MGR"]["entry_px"] == 21.5 and ep["MGR"]["first_sent_date"] == "2026-08-05"   # 재진입
     assert ep["NOPX"]["entry_px"] is None and ep["NOPX"]["status"] == "no_price"
     assert ledger.entry_prices("KR") == {}
+
+
+# ----------------------------------------------------------------------
+# WP-POLISH: Stage 1 리뷰 low 정리 (비표준 KR 심볼 · no_price 만료 · 티커 상한)
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("sym", ["KT", "SSNLF", "KEP", "SKM", "WF", "CPNG", "KB", "LPL", "SHG", "PKX",
+                                 "00593", "0059300", "005 30", "005930.KS", "05930a"])
+def test_yf_symbol_fallback_kr_non_code_is_none(sym):
+    """KR 시장에 섞인 ADR 티커·비표준 코드는 존재하지 않는 'KT.KQ' 대신 None."""
+    assert ledger._yf_symbol_fallback(sym, "KR", None, "Financial Services") is None
+    assert ledger._yf_symbol_fallback(sym, "KR", "KOSDAQ") is None
+
+
+def test_yf_symbol_fallback_kr_valid_codes_unchanged():
+    assert ledger._yf_symbol_fallback("005930", "KR", "KOSPI") == "005930.KS"
+    assert ledger._yf_symbol_fallback("0126Z0", "KR", None, "") == "0126Z0.KS"
+    assert ledger._yf_symbol_fallback("041510", "KR", None, "우량기업부") == "041510.KQ"
+    assert ledger._yf_symbol_fallback("KT", "US") == "KT"           # US 는 영향 없음
+
+
+def test_record_send_skips_unmappable_kr_pick_keeps_rank(fresh_db):
+    picks = [Row("009970", "영원무역홀딩스", ""), Row("KT", "KT ADR", "Financial Services"),
+             Row("041510", "에스엠", "우량기업부")]
+    assert ledger.record_send("KR", "2026-10-08", picks, rule_version="v1", sent=1)
+    rows = ledger.load_sends("KR")
+    assert [(r.rank, r.symbol, r.yf_symbol) for r in rows] == [
+        (1, "009970", "009970.KS"), (3, "041510", "041510.KQ")]      # ADR 제외, 원래 순위 유지
+    run = storage_mod.get_storage().get_state("digest_runs", "KR:2026-10-08")
+    assert run["status"] == "recorded" and run["list_key"] == "v1|009970,041510"
+
+
+def test_record_send_all_unmappable_records_nothing(fresh_db):
+    ok = ledger.record_send("KR", "2026-10-08", [Row("KT"), Row("PKX")], rule_version="v1", sent=1)
+    assert ok is False
+    assert _count("SELECT COUNT(*) FROM signal_ledger") == 0
+    run = storage_mod.get_storage().get_state("digest_runs", "KR:2026-10-08")
+    assert run["status"] == "ledger_failed"
+
+
+def test_build_ledger_rows_returns_fewer_rows_for_unmappable():
+    rows = ledger.build_ledger_rows(
+        "KR", "2026-10-08", [Row("KT"), Row("005930")], rule_version="v1", source="live",
+        sent_at="2026-10-08T00:00:00+00:00")
+    assert [(r[2], r[3], r[4]) for r in rows] == [(2, "005930", "005930.KS")]
+
+
+def test_panel_max_tickers_matches_fetcher_limit():
+    assert ledger.PANEL_MAX_TICKERS == data_fetcher.CLOSE_PANEL_MAX_TICKERS
+
+
+def _expiry_setup(fresh_db):
+    """A(가격 없음) 가 07-05 리스트에 있다가 B 로 바뀐 원장 + 1차 채점 완료."""
+    dates = pd.bdate_range("2026-01-05", periods=170)
+    panel = _panel(dates, B=[50.0 + 0.1 * i for i in range(170)], SPY=[100.0] * 170)
+    ledger.record_send("US", "2026-01-05", [Row("A")], rule_version="v1", source="reconstructed")
+    ledger.record_send("US", "2026-01-12", [Row("B")], rule_version="v1", source="reconstructed")
+    fetch, calls = _fake_fetch_factory(panel)
+    ledger.score(("US",), now=datetime(2026, 2, 20, 23, tzinfo=timezone.utc), fetch=fetch)
+    return fetch, calls
+
+
+def test_score_expires_old_no_price_events(fresh_db, monkeypatch):
+    fetch, calls = _expiry_setup(fresh_db)
+    assert "A" in calls[0][0]
+    assert ledger.load_outcomes("US")[("A", "2026-01-05")]["status"] == "no_price"
+    # 만료 전(기본 120일 이내)에는 계속 조회
+    ledger.score(("US",), now=datetime(2026, 3, 20, 23, tzinfo=timezone.utc), fetch=fetch)
+    assert "A" in calls[-1][0]
+    # 만료 후: 조회 창·티커에서 빠짐 (outcome 행 자체는 그대로 no_price)
+    ledger.score(("US",), now=datetime(2026, 8, 24, 23, tzinfo=timezone.utc), fetch=fetch)
+    assert "A" not in calls[-1][0]
+    assert ledger.load_outcomes("US")[("A", "2026-01-05")]["status"] == "no_price"
+    # B 이벤트가 63거래일 채점을 마치면(done) 창이 더는 01월로 당겨지지 않는다 — 만료 이벤트 포함 안 됨
+    ledger.score(("US",), now=datetime(2026, 8, 25, 23, tzinfo=timezone.utc), fetch=fetch)
+    assert calls[-1][1] > "2026-05-01"
+
+
+def test_score_expiry_is_configurable(fresh_db, monkeypatch):
+    fetch, calls = _expiry_setup(fresh_db)
+    monkeypatch.setattr(ledger, "NO_PRICE_EXPIRE_DAYS", 10_000)
+    ledger.score(("US",), now=datetime(2026, 8, 24, 23, tzinfo=timezone.utc), fetch=fetch)
+    assert "A" in calls[-1][0]
+
+
+def test_score_caps_open_event_tickers(fresh_db, monkeypatch, caplog):
+    """미결 이벤트가 많아도 티커 수는 상한 이내 — 최근 이벤트를 우선하고 경고를 남긴다."""
+    dates = pd.bdate_range("2026-07-13", periods=40)
+    cols = {f"T{i}": [100.0 + i] * 40 for i in range(10)}
+    panel = _panel(dates, SPY=[100.0] * 40, **cols)
+    for i in range(10):                                     # 매일 다른 종목 1개 리스트 → 이벤트 10개
+        ledger.record_send("US", dates[i].strftime("%Y-%m-%d"), [Row(f"T{i}")],
+                           rule_version="v1", source="reconstructed")
+    fetch, calls = _fake_fetch_factory(panel)
+    now = datetime(2026, 9, 4, 23, tzinfo=timezone.utc)
+    ledger.score(("US",), now=now, fetch=fetch)             # 1차: 커서 확립 (상한 기본값)
+    monkeypatch.setattr(ledger, "PANEL_MAX_TICKERS", 4)
+    with caplog.at_level("WARNING"):
+        ledger.score(("US",), now=now, fetch=fetch)
+    tick = set(calls[-1][0])
+    assert len(tick) <= 4
+    assert {"SPY", "T9"} <= tick                            # 핵심(벤치·현재 보유)은 유지
+    assert "T8" in tick                                     # 최근 이벤트 우선
+    assert "T0" not in tick
+    assert any("티커 상한" in r.message for r in caplog.records)

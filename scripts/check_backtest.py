@@ -274,6 +274,13 @@ def _section_walk_forward(tickers: tuple[str, ...], period: str, top_n: int):
     return result
 
 
+def _trend_headline(strat, bench) -> str:
+    """[5] 헤드라인 — 연환산 비교 (누적 총수익 차이는 창이 길수록 커져 과장된 인상을 줌)."""
+    ann_excess = strat.annualized_return_pct - bench.annualized_return_pct
+    return (f"  연환산 {strat.annualized_return_pct:+.1f}% vs {bench.annualized_return_pct:+.1f}%"
+            f" (연 {ann_excess:+.1f}%p) | MDD {strat.max_drawdown_pct:.1f}% vs {bench.max_drawdown_pct:.1f}%")
+
+
 def _section_trend(period: str):
     """[5] SPY 200일선 long/flat vs 매수후보유 (참고). (strat, bench, stats) 반환."""
     from src.data_fetcher import fetch_prices
@@ -289,11 +296,10 @@ def _section_trend(period: str):
     )
     print(strat)
     print(bench)
-    excess = strat.total_return_pct - bench.total_return_pct
     stats = excess_significance(
         (returns_from_equity(strat.equity_curve) - returns_from_equity(bench.equity_curve)).dropna()
     )
-    print(f"  초과수익 {excess:+.1f}%p | MDD {strat.max_drawdown_pct:.1f}% vs {bench.max_drawdown_pct:.1f}%")
+    print(_trend_headline(strat, bench))
     print(f"  {stats.summary_line()}")
     print("  ※ 참고용 — 짧은 기간 창(예: 5y)의 큰 격차는 창 선택 때문일 수 있어, 긴 창(max) 기준으로만 봅니다.")
     return strat, bench, stats
@@ -304,20 +310,31 @@ def _section_trend(period: str):
 # ----------------------------------------------------------------------
 
 
-def _save_state(results: list[LeadLagWF], wf_result) -> None:
+def _save_state(results: list[LeadLagWF], wf_result) -> bool:
+    """검증 결과 저장. put_state 가 False(best-effort 쓰기 실패)를 돌려주면 실패로 집계.
+
+    Returns True = 모든 쓰기 성공. (put_state 는 DB 오류를 예외 대신 False 로 줄 수 있다 —
+    반환값을 안 보면 저장 실패인데 '저장 완료' 로그와 종료코드 0 이 나간다.)
+    """
     from src.storage import get_storage
 
     store = get_storage()
     asof = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    store.put_state("validation", "lead_lag", {
+    writes = [("lead_lag", store.put_state("validation", "lead_lag", {
         "asof": asof,
         "n_tests": len(PREDICTOR_SPECS),
         "n_passed": sum(1 for r in results if r.passed),
         "results": [r.to_dict() for r in results],
-    })
+    }))]
     if wf_result is not None:
-        store.put_state("validation", "walk_forward", {"asof": asof, **wf_result.to_dict()})
+        writes.append(("walk_forward", store.put_state(
+            "validation", "walk_forward", {"asof": asof, **wf_result.to_dict()})))
+    failed = [k for k, ok in writes if ok is False]
+    if failed:
+        logger.warning("검증 결과 저장 실패 (state 'validation': %s)", ", ".join(failed))
+        return False
     logger.info("검증 결과 저장 완료 (state 'validation')")
+    return True
 
 
 # ----------------------------------------------------------------------
@@ -392,7 +409,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.save:
         try:
-            _save_state(results, wf_result)
+            if not _save_state(results, wf_result):
+                failures += 1
         except (QuantBotError, *_db_errors()) as e:
             logger.warning("검증 결과 저장 실패 — %s", e)
             failures += 1

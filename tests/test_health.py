@@ -160,3 +160,42 @@ def test_llm_status_mapping():
     assert llm_status(ApiTimeoutError("slow")) == "timeout"
     assert llm_status(DataValidationError("잘림")) == "error:DataValidationError"
     assert llm_status(ApiHttpError("x", status_code=500)) == "error:ApiHttpError"
+
+
+# ---------------- WP-POLISH: owner_text regime_ok None 가드 · from_state started_at 검증 ----------------
+
+
+def test_owner_text_regime_ok_none_has_no_none_line():
+    h = _healthy(regime_ok=None, regime_total=3)
+    text = h.owner_text(NOW, held=False)
+    assert "None" not in text and "국면 지표" not in text
+
+
+def test_owner_text_regime_ok_zero_is_still_shown():
+    """0/3 은 '측정 안 됨(None)' 과 다르다 — 줄은 나가야 한다."""
+    text = _healthy(regime_ok=0, regime_total=3).owner_text(NOW, held=False)
+    assert "0/3" in text
+
+
+def test_owner_text_regime_full_unchanged():
+    assert "국면 지표: 3/3 반영" in _healthy().owner_text(NOW, held=False)
+
+
+def test_from_state_missing_started_at_raises_value_error():
+    d = _healthy().to_state()
+    del d["started_at"]
+    with pytest.raises(ValueError, match="started_at"):
+        HealthReport.from_state(d)
+    d["started_at"] = None
+    with pytest.raises(ValueError, match="started_at"):
+        HealthReport.from_state(d)
+
+
+def test_from_state_bad_started_at_raises_value_error():
+    d = _healthy().to_state()
+    d["started_at"] = "어제 아침"
+    with pytest.raises(ValueError, match="started_at"):
+        HealthReport.from_state(d)
+    d["started_at"] = 12345
+    with pytest.raises(ValueError, match="started_at"):
+        HealthReport.from_state(d)

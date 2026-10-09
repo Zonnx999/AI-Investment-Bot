@@ -532,3 +532,100 @@ def test_check_backtest_ledger_wiring(cb_env, monkeypatch, capsys):
     cb._section_universe_ic()
     out = capsys.readouterr().out
     assert out.count("원장 연동 오류") == 2 and "원장 없음" not in out
+
+
+# ----------------------------------------------------------------------
+# WP-POLISH: 월별 IC 에서 미완결 마지막 달 제외 · _simulate 한계 docstring
+# ----------------------------------------------------------------------
+
+
+def _ic_fixture(end: str):
+    import numpy as np
+    import pandas as pd
+
+    rng = np.random.default_rng(7)
+    idx = pd.bdate_range("2025-01-01", end)
+    panel = pd.DataFrame(
+        {f"T{i}": 100 * np.cumprod(1 + rng.normal(0, 0.01, len(idx))) for i in range(8)}, index=idx)
+    reb = panel.index.to_series().resample("ME").last().dropna().tolist()
+    scores = {d: {c: float(rng.normal()) for c in panel.columns} for d in reb}
+    return panel, reb, scores
+
+
+def test_monthly_rank_ic_excludes_incomplete_last_month():
+    from src.backtest import _monthly_rank_ic
+
+    panel, reb, scores = _ic_fixture("2025-10-08")          # 10월은 진행 중 (6거래일)
+    assert reb[-1] == panel.index[-1] and reb[-1].month == 10
+    got = _monthly_rank_ic(panel, scores)
+    done = {d: v for d, v in scores.items() if d != reb[-1]}
+    ref = _monthly_rank_ic(panel, done)
+    assert got[2] == len(done) - 1                           # 09-30→10-08 부분 구간이 빠짐
+    assert got == ref                                        # 값도 동일
+
+
+def test_monthly_rank_ic_keeps_complete_last_month():
+    from src.backtest import _monthly_rank_ic
+
+    panel, reb, scores = _ic_fixture("2025-09-30")          # 9월 마지막 거래일 — 완결
+    assert reb[-1] == panel.index[-1]
+    assert _monthly_rank_ic(panel, scores)[2] == len(scores) - 1   # 마지막 쌍 포함
+
+
+def test_month_is_complete_boundaries():
+    import pandas as pd
+
+    from src.backtest import _month_is_complete
+
+    assert _month_is_complete(pd.Timestamp("2025-09-30")) is True
+    assert _month_is_complete(pd.Timestamp("2025-10-31")) is True     # 금요일 월말
+    assert _month_is_complete(pd.Timestamp("2025-10-08")) is False
+    assert _month_is_complete(pd.Timestamp("2025-05-30")) is True     # 토요일 31일 — 다음 영업일은 6월
+
+
+def test_simulate_docstring_states_drift_limitation():
+    from src.backtest import _simulate
+
+    assert "드리프트" in (_simulate.__doc__ or "")
+
+
+# ---------------- WP-POLISH: check_backtest 저장 실패 집계 · [5] 연환산 헤드라인 ----------------
+
+
+def test_check_backtest_save_failure_when_put_state_returns_false(cb_env, caplog):
+    cb, store = cb_env
+    store.put_state = lambda ns, key, value: False          # best-effort 쓰기 실패
+    with caplog.at_level("INFO"):
+        assert cb.main(["--save"]) == 1
+    msgs = [r.message for r in caplog.records]
+    assert any("검증 결과 저장 실패" in m for m in msgs)
+    assert not any("검증 결과 저장 완료" in m for m in msgs)
+
+
+def test_check_backtest_save_partial_failure_counts(cb_env):
+    cb, store = cb_env
+    store.put_state = lambda ns, key, value: key != "walk_forward"
+    assert cb.main(["--save"]) == 1
+
+
+def test_check_backtest_save_success_logs_done(cb_env, caplog):
+    cb, store = cb_env
+    store.put_state = lambda ns, key, value: True
+    with caplog.at_level("INFO"):
+        assert cb.main(["--save"]) == 0
+    assert any("검증 결과 저장 완료" in r.message for r in caplog.records)
+
+
+def test_check_backtest_trend_headline_is_annualized():
+    import types
+
+    import scripts.check_backtest as cb
+
+    strat = types.SimpleNamespace(annualized_return_pct=7.8, max_drawdown_pct=-18.0,
+                                  total_return_pct=1100.0)
+    bench = types.SimpleNamespace(annualized_return_pct=10.9, max_drawdown_pct=-55.0,
+                                  total_return_pct=3071.0)
+    line = cb._trend_headline(strat, bench)
+    assert "연환산 +7.8% vs +10.9%" in line and "연 -3.1%p" in line
+    assert "-1971" not in line                               # 누적 %p 차이는 더 이상 헤드라인이 아님
+    assert "MDD -18.0% vs -55.0%" in line

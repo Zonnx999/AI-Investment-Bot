@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import sys
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
@@ -195,6 +196,12 @@ _SCREENED_FOR_SNAPSHOT = (
     "market_cap", "per", "pbr", "enriched", "updated_at",
 )
 _FINAL_OUTCOME = "done"
+# 채점 창 보호: 진입가를 영영 못 구하는 이벤트(no_price)는 이 일수가 지나면 조회 대상에서 뺀다
+# (63거래일 ≈ 90일 + 여유). 티커 상한은 data_fetcher.CLOSE_PANEL_MAX_TICKERS 와 같은 값
+# (테스트로 동일성 고정 — 오프라인 격리를 위해 data_fetcher 를 import 하지 않는다).
+NO_PRICE_EXPIRE_DAYS = 120
+PANEL_MAX_TICKERS = 200
+_KR_CODE_RE = re.compile(r"[0-9A-Z]{6}")      # KRX 단축코드 (005930, 0126Z0)
 
 
 # ----------------------------------------------------------------------
@@ -237,15 +244,19 @@ def _rconn():
 
 
 def _yf_symbol_fallback(symbol: str, market: str, exchange: str | None = None,
-                        sector: str | None = "") -> str:
+                        sector: str | None = "") -> str | None:
     """yfinance 심볼 — **universe.yf_symbol 과 동일 규칙** (병합 후 하나로 합칠 예정).
 
-    KR: exchange 가 있으면 KOSDAQ→.KQ / 그 외 .KS. exchange 가 None 이면 sector(KRX 소속부)가
-    비어있지 않으면 KOSDAQ(.KQ), 빈 문자열이면 KOSPI(.KS) — DB 507/507 일치 실측 규칙.
+    KR: 6자리 영숫자 코드(005930, 0126Z0)가 아니면 **None** (US ADR 이 섞인 행 — 'KT.KQ'
+    같은 존재하지 않는 심볼이 영구 no_price 가 되는 것 방지). exchange 가 있으면
+    KOSDAQ→.KQ / 그 외 .KS. exchange 가 None 이면 sector(KRX 소속부)가 비어있지 않으면
+    KOSDAQ(.KQ), 빈 문자열이면 KOSPI(.KS) — DB 507/507 일치 실측 규칙.
     US: 그대로 (BRK-B). CRYPTO: SYM-USD.
     """
     m = (market or "").upper()
     if m == "KR":
+        if not _KR_CODE_RE.fullmatch(str(symbol)):
+            return None
         if exchange is not None:
             kosdaq = str(exchange).upper() == "KOSDAQ"
         else:
@@ -344,7 +355,8 @@ class LedgerPick:
 
 
 def _pick_yf_symbol(p: Any, market: str,
-                    yf_symbol_fn: Callable[..., str] | None) -> str:
+                    yf_symbol_fn: Callable[..., str | None] | None) -> str | None:
+    """픽의 yfinance 심볼. 매핑 불가(KR 비표준 코드 등)면 None — 호출부가 처리한다."""
     explicit = getattr(p, "yf_symbol", None)
     if isinstance(explicit, str) and explicit:
         return explicit
@@ -371,13 +383,14 @@ def build_ledger_rows(
     sent_at: str,
     bench_symbol: str | None = None,
     score_asof: str | None = None,
-    yf_symbol_fn: Callable[..., str] | None = None,
+    yf_symbol_fn: Callable[..., str | None] | None = None,
     detail: dict | None = None,
 ) -> list[tuple]:
     """picks(ScanRow duck-typed) → signal_ledger 16컬럼 tuple 리스트 (순수).
 
     picks 는 symbol 필수, name/sector/price/total_score/value_score/health_score/
-    exchange/fund_asof/updated_at/flags 는 있으면 사용.
+    exchange/fund_asof/updated_at/flags 는 있으면 사용. yfinance 심볼을 못 만드는 픽은 건너뛴다
+    (반환 행이 picks 보다 적을 수 있음).
     """
     m = market.upper()
     if m not in MARKETS:
@@ -387,6 +400,11 @@ def build_ledger_rows(
     for rank, p in enumerate(picks, 1):
         sym = str(getattr(p, "symbol"))
         ys = _pick_yf_symbol(p, m, yf_symbol_fn)
+        if not ys:
+            # 채점할 수 없는 심볼(예: KR 시장에 섞인 ADR) — 영구 no_price 가 되므로 기록 제외.
+            # rank 는 원래 순서를 유지한다 (PK 충돌 없음, 빈 번호는 허용).
+            logger.warning("원장: %s %s yfinance 심볼 매핑 불가 — 기록 제외", m, sym)
+            continue
         bench = bench_symbol or bench_for(m, ys)
         asof = (score_asof or getattr(p, "fund_asof", None)
                 or (str(getattr(p, "updated_at", "") or "")[:10] or None))
@@ -436,7 +454,7 @@ def record_send(
     degraded: bool = False,
     dry_run: bool = False,
     text: str | None = None,
-    yf_symbol_fn: Callable[..., str] | None = None,
+    yf_symbol_fn: Callable[..., str | None] | None = None,
     detail: dict | None = None,
 ) -> bool:
     """발송된 리스트를 원장에 기록. 반환: 원장 쓰기 성공 여부. **예외를 올리지 않음.**
@@ -482,6 +500,8 @@ def record_send(
             bench_symbol=bench_symbol, score_asof=score_asof, yf_symbol_fn=yf_symbol_fn,
             detail=detail,
         )
+        if not rows:
+            raise ValueError("기록할 종목 없음 (yfinance 심볼 매핑 불가)")
         list_key = list_key_of((r[3] for r in rows), rule_version)
         ph = "(" + ",".join("?" * len(_LEDGER_COLS)) + ")"
         sql = (f"INSERT OR IGNORE INTO signal_ledger ({', '.join(_LEDGER_COLS)}) VALUES "
@@ -1441,8 +1461,23 @@ def _score_market(market: str, *, now: datetime, dry_run: bool,
     cur = _normalize_cursor(cursor)
 
     events = pick_events(sends)
-    open_events = [e for e in events
-                   if (outcomes.get((e.symbol, e.sent_date)) or {}).get("status") != _FINAL_OUTCOME]
+    # 채점 대상 이벤트: 확정(done)·폐지 확정(delisted+ret_63)은 제외. 진입가를 영영 못 구하는
+    # no_price 는 발송 후 NO_PRICE_EXPIRE_DAYS 가 지나면 조회 창·티커 수가 시간이 갈수록 늘지 않게 뺀다.
+    expire_before = (asof - timedelta(days=NO_PRICE_EXPIRE_DAYS)).isoformat()
+    open_events = []
+    n_expired = 0
+    for e in events:
+        o = outcomes.get((e.symbol, e.sent_date)) or {}
+        st = o.get("status")
+        if st == _FINAL_OUTCOME or (st == "delisted" and o.get("ret_63") is not None):
+            continue
+        if st == "no_price" and e.sent_date < expire_before:
+            n_expired += 1
+            continue
+        open_events.append(e)
+    if n_expired:
+        logger.info("원장 채점 %s: 진입가 미확보 %d건은 %d일 경과로 조회 대상에서 제외", m, n_expired,
+                    NO_PRICE_EXPIRE_DAYS)
     last = cur["last_date"]
     tickers = {PRIMARY_BENCH[m]} | set(cur["w"]) | set(cur["bench_of"].values())
     # 현재 보유 리스트의 발송일 이후 발송 전부 (늦게 기록된 발송이 다음 날 재조정될 때도 가격 확보)
@@ -1450,8 +1485,22 @@ def _score_market(market: str, *, now: datetime, dry_run: bool,
     for s in sends:
         if since is None or s.sent_date >= since:
             tickers |= {s.yf_symbol, s.bench_symbol}
-    for e in open_events:
-        tickers |= {e.yf_symbol, e.bench_symbol}
+    # 미결 이벤트 티커는 상한(PANEL_MAX_TICKERS) 안에서만 추가 — 넘치면 fetch 가 통째로 실패해
+    # 그 시장 채점 전체가 멈추므로, 가격이 있는 이벤트·최근 발송을 우선하고 나머지는 이번에 건너뛴다.
+    ranked = sorted(open_events, key=lambda e: (
+        (outcomes.get((e.symbol, e.sent_date)) or {}).get("status") == "no_price",
+        -date.fromisoformat(e.sent_date).toordinal()))
+    kept: set[tuple[str, str]] = set()
+    for e in ranked:
+        extra = {e.yf_symbol, e.bench_symbol} - tickers
+        if len(tickers) + len(extra) > PANEL_MAX_TICKERS:
+            continue
+        tickers |= extra
+        kept.add((e.symbol, e.sent_date))
+    if len(kept) < len(open_events):
+        logger.warning("원장 채점 %s: 티커 상한 %d 때문에 미결 이벤트 %d건을 이번 실행에서 건너뜀",
+                       m, PANEL_MAX_TICKERS, len(open_events) - len(kept))
+        open_events = [e for e in open_events if (e.symbol, e.sent_date) in kept]
     starts = [last or min(s.sent_date for s in sends)]
     starts += [e.sent_date for e in open_events]
     # 수익 기준가는 패널 안 직전 유효 가격 → 결측(정지) 중인 종목의 마지막 가격까지 덮도록
@@ -1989,6 +2038,9 @@ def format_backfill_plan(plan: BackfillPlan, *, confirm: bool = False,
         prev_bench = None
         for i, p in enumerate(bm.picks, 1):
             ys = _yf_symbol_fallback(p.symbol, m, None, p.sector or "")
+            if ys is None:
+                cells.append(f"{i} {p.symbol} {p.total_score} (심볼 매핑 불가 — 기록 제외)")
+                continue
             bench = bench_for(m, ys)
             label = p.symbol if m == "US" else f"{ys} {p.name or ''}".strip()
             cell = f"{i} {label} {p.total_score}"

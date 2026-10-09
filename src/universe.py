@@ -362,22 +362,29 @@ def _upsert_universe_row(conn, *, symbol, market, name, sector, industry,
     ))
 
 
+def _build_crypto_upsert(*, symbol, name, price, market_cap, scores) -> str:
+    """크립토 발굴+점수 UPSERT 문 (리터럴 — executescript 배치용)."""
+    now = _utcnow()
+    vals = {
+        "symbol": symbol, "market": "CRYPTO", "name": name, "price": price,
+        "market_cap": market_cap, "total_score": scores["total_score"],
+        "value_score": scores["volatility_score"], "health_score": scores["rank_score"],
+        "enriched": 1, "discovered_at": now, "updated_at": now,
+    }
+    cols = ", ".join(vals)
+    lits = ", ".join(_sql_lit(v) for v in vals.values())
+    upd = ", ".join(f"{c}=excluded.{c}" for c in
+                    ("name", "price", "market_cap", "total_score", "value_score",
+                     "health_score", "enriched", "updated_at"))
+    return (f"INSERT INTO screened ({cols}) VALUES ({lits}) "
+            f"ON CONFLICT(symbol, market) DO UPDATE SET {upd}")
+
+
 def _store_crypto_scored(conn, *, symbol, name, price, market_cap, scores) -> None:
-    """크립토는 발굴 즉시 점수까지 (CoinGecko 가 필요한 데이터 다 줌)."""
-    conn.execute(
-        """
-        INSERT INTO screened (symbol, market, name, price, market_cap,
-                              total_score, value_score, health_score,
-                              enriched, discovered_at, updated_at)
-        VALUES (?, 'CRYPTO', ?, ?, ?, ?, ?, ?, 1, ?, ?)
-        ON CONFLICT(symbol, market) DO UPDATE SET
-            name=excluded.name, price=excluded.price, market_cap=excluded.market_cap,
-            total_score=excluded.total_score, value_score=excluded.value_score,
-            health_score=excluded.health_score, enriched=1, updated_at=excluded.updated_at
-        """,
-        (symbol, name, price, market_cap, scores["total_score"],
-         scores["volatility_score"], scores["rank_score"], _utcnow(), _utcnow()),
-    )
+    """크립토는 발굴 즉시 점수까지 (CoinGecko 가 필요한 데이터 다 줌). 단건용 —
+    대량은 discover 가 _build_crypto_upsert + _flush_updates 로 배치 (Turso 왕복 1회)."""
+    conn.execute(_build_crypto_upsert(
+        symbol=symbol, name=name, price=price, market_cap=market_cap, scores=scores))
 
 
 def _discover_us(conn, market_cap_floor: float) -> int:
@@ -590,16 +597,21 @@ def discover(
                 counts["CRYPTO"] = 0
                 continue
             n = 0
+            batch: list[str] = []
             for c in coins:
                 if (c.get("market_cap") or 0) < CRYPTO_MCAP_FLOOR:
                     continue
-                _store_crypto_scored(
-                    conn, symbol=(c.get("symbol") or "").upper(),
+                batch.append(_build_crypto_upsert(
+                    symbol=(c.get("symbol") or "").upper(),
                     name=c.get("name", ""), price=c.get("current_price") or 0.0,
                     market_cap=c.get("market_cap") or 0.0,
                     scores=calculate_crypto_scores(c),
-                )
+                ))
                 n += 1
+                if len(batch) >= DISCOVER_CHUNK:
+                    _flush_updates(conn, batch)
+                    batch.clear()
+            _flush_updates(conn, batch)
             counts["CRYPTO"] = n
 
     conn.commit()
@@ -612,6 +624,12 @@ def reclassify_us(conn=None) -> dict:
 
     Returns {"changed": n, "excluded": 제외 총수, "by_reason": {...}, "excluded_symbols": set}.
     컬럼이 NULL(첫 discover 전)인 행은 해당 규칙만 건너뜀.
+
+    한계(형제 판정): 형제 그룹을 DB 의 **모든** US 행으로 만든다. 오늘 FMP 응답에 없는
+    미확인 행도 지난 adv_value 그대로 그룹에 들어가는 반면, discover 는 오늘 응답 행만
+    쓴다. 그래서 두 판정이 엇갈려 같은 build 안에서 discover 결과를 reclassify 가 뒤집는
+    경우가 이론상 가능하다(현재 데이터에서 실제 사례는 못 찾음). Turso 레플리카에서는
+    sync 전이면 지난주 로컬 값을 읽는다는 점도 겹친다. 의심되면 build 직후 재실행해 수렴을 본다.
     """
     conn = conn or _conn()
     cols = _cols(conn)
@@ -975,6 +993,9 @@ def calculate_kr_scores(fin: dict, market_cap: float, *, name: str = "") -> dict
     debt_ratio = (debt / eq_total * 100) if (debt is not None and pos_eq_total) else None
     op_margin = (op / rev * 100) if (op is not None and rev) else None
     profit = ni is not None and ni > 0
+    # 일회성 가드가 순이익을 None 으로 만든 경우(op ≤ 0 이고 3개년 이력 없음)는 실제 보고
+    # 순이익이 흑자이므로 '적자' 로 표기하면 사실과 다름 → '일회성 의심' (점수는 0점 유지).
+    profit_detail = "흑자" if profit else ("일회성 의심" if (one_off and ni is None) else "적자")
 
     from src.screener import Component, ScoreCard
 
@@ -991,7 +1012,7 @@ def calculate_kr_scores(fin: dict, market_cap: float, *, name: str = "") -> dict
                   f"{roe:.1f}%" if roe is not None else "—"),
         debt_comp,
         opm_comp,
-        Component("흑자", 15.0 if profit else 0.0, 15, "흑자" if profit else "적자"),
+        Component("흑자", 15.0 if profit else 0.0, 15, profit_detail),
     ]
     per_detail = f"{per:.1f}" if per else "—"
     if one_off:
@@ -1020,13 +1041,17 @@ def _kr_symbols_needing_enrichment(max_age: timedelta) -> list[str]:
     return [s for s, _m in symbols_needing_enrichment(max_age, market="KR")]
 
 
-def _kr_update_cols(sc: dict, fin: dict, year: int | None) -> dict:
+def _kr_update_cols(sc: dict, fin: dict, year: int | None, basis: str | None = None) -> dict:
     """calculate_kr_scores 결과 → UPDATE 컬럼 dict. detail 에 raw(재무 원본) 저장 →
-    이후 시총만 바뀌면 DART 재호출 없이 rescore_kr_offline 으로 재계산 가능."""
+    이후 시총만 바뀌면 DART 재호출 없이 rescore_kr_offline 으로 재계산 가능.
+
+    basis: year 가 없을 때(오프라인 재점수) 기존 detail.basis('FY2025') 를 그대로 보존."""
     detail = dict(sc["detail"])
     detail["raw"] = fin
     if year is not None:
         detail["basis"] = f"FY{year}"
+    elif basis:
+        detail["basis"] = basis
     return {"roe": sc["roe"], "per": sc["per"], "pbr": sc["pbr"],
             "health_score": sc["health_score"], "value_score": sc["value_score"],
             "total_score": sc["total_score"],
@@ -1102,16 +1127,18 @@ def rescore_kr_offline(market_caps: dict[str, float] | None = None) -> dict[str,
     batch: list[str] = []
     for symbol, name, mcap, detail in rows:
         try:
-            raw = (json.loads(detail) or {}).get("raw")
-        except (json.JSONDecodeError, TypeError):
-            raw = None
+            d_old = json.loads(detail) or {}
+            raw = d_old.get("raw")
+            basis = d_old.get("basis")
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            raw, basis = None, None
         if market_caps is not None and symbol in market_caps:
             mcap = market_caps[symbol]
         if not raw or not raw.get("equity") or not mcap:
             out["skipped"] += 1
             continue
         sc = calculate_kr_scores(raw, float(mcap), name=name or "")
-        cols_upd = _kr_update_cols(sc, raw, None)
+        cols_upd = _kr_update_cols(sc, raw, None, basis)
         cols_upd.pop("updated_at")        # 재무 신선도 마커는 유지 (시총만 바뀜)
         cols_upd.pop("enriched")
         batch.append(_build_update(cols_upd, symbol, "KR"))

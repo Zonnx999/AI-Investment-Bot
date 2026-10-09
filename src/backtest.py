@@ -649,6 +649,13 @@ def _simulate(
 
     전략과 벤치마크가 **같은 함수·같은 비용 규약**을 쓰도록 공통화 (BT-03: 무리밸런싱·무비용
     벤치가 전략을 구조적으로 불리하게 만들던 비대칭 제거). t 종가 비중은 t→t+1 수익률부터 적용.
+
+    모델링 단순화(알려진 한계): 목표 비중을 **매일 ffill** 하므로 사실상 '매일 목표 비중으로
+    재조정(비중 드리프트 미모델링)' 이다. 리밸런스 사이에 가격 변동으로 비중이 흐트러지는
+    효과가 없고, 비용은 목표 비중이 **바뀌는 날의 변화분**에만 붙는다. 그래서 벤치는 결과에서
+    '매매 1회' 처럼 보일 수 있고(표기는 월 리밸런스), 정확히 하려면 사이 구간에 비중을 (1+r) 로
+    드리프트시키고 리밸런스일 turnover 를 드리프트 후 비중 기준으로 계산해야 한다.
+    전략·벤치 모두 같은 규약이라 초과수익의 부호를 뒤집지는 않는다 (다음 라운드 후보).
     """
     weights = pd.DataFrame(weight_events).T.reindex(panel.index).ffill().fillna(0.0)
     returns = panel.pct_change()
@@ -663,13 +670,25 @@ def _simulate(
     return net, gross_e, n_trades
 
 
+def _month_is_complete(ts: pd.Timestamp) -> bool:
+    """ts 가 속한 달이 끝났는가 — 다음 영업일이 다른 달이면 완결 (월말 주말은 완결로 본다)."""
+    return (ts + pd.offsets.BDay(1)).month != ts.month
+
+
 def _monthly_rank_ic(
     panel: pd.DataFrame, scores_by_date: dict[pd.Timestamp, dict[str, float]]
 ) -> tuple[float, float, int]:
-    """리밸런스일 점수 vs 다음 리밸런스일까지 수익률의 스피어만 순위상관 → (평균 IC, t, 개월 수)."""
+    """리밸런스일 점수 vs 다음 리밸런스일까지 수익률의 스피어만 순위상관 → (평균 IC, t, 개월 수).
+
+    마지막 리밸런스일이 데이터의 마지막 날이면서 그 달이 아직 끝나지 않았다면(진행 중인 달의
+    부분 구간, 예: 09-30→10-08 6거래일) 그 구간은 IC 쌍에서 제외한다 — 한 달 수익률과 섞이면
+    표본 수와 t 가 부풀려진다.
+    """
     from scipy.stats import spearmanr
 
     dates = list(scores_by_date)
+    if len(dates) >= 2 and dates[-1] == panel.index[-1] and not _month_is_complete(dates[-1]):
+        dates = dates[:-1]
     rhos: list[float] = []
     for a, b in zip(dates[:-1], dates[1:]):
         sc = scores_by_date[a]
