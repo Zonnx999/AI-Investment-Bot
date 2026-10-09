@@ -928,3 +928,63 @@ def test_factor_scores_fetches_two_years(monkeypatch):
     from src.signals import factor_scores
     factor_scores("TEST")
     assert captured["period"] == "2y"
+
+
+# ---------------- RVQ-5: factor_scores 금융업 중립화 ----------------
+
+
+@pytest.fixture
+def _signals_db(tmp_path, monkeypatch):
+    import src.storage as storage_mod
+
+    monkeypatch.setenv("QUANT_BOT_DB_PATH", str(tmp_path / "sig.db"))
+    monkeypatch.setattr(storage_mod, "_storage", None)
+    yield storage_mod
+    monkeypatch.setattr(storage_mod, "_storage", None)
+
+
+_FIN_METRICS = {
+    "grossProfitMargin": 0.45, "returnOnInvestedCapital": 0.18, "returnOnEquity": 0.20,
+    "netDebtToEBITDA": 0.5, "incomeQuality": 1.2, "currentRatio": 2.0, "evToEBITDA": 8.0,
+    "evToSales": 2.0, "priceToBookRatio": 1.5, "earningsYield": 0.07, "freeCashFlowYield": 0.05,
+}
+
+
+def _patch_factor_inputs(monkeypatch):
+    def fake_prices(ticker, period="1y", **k):
+        idx = pd.bdate_range("2022-01-03", periods=520)
+        return pd.DataFrame({"Close": np.linspace(100, 200, 520)}, index=idx)
+
+    monkeypatch.setattr("src.data_fetcher.fetch_prices", fake_prices)
+    monkeypatch.setattr("src.data_fetcher.fetch_quote", lambda t, **k: {"price": 100.0, "lastDividend": 2.0})
+    monkeypatch.setattr("src.signals.latest_fundamentals", lambda t: dict(_FIN_METRICS))
+
+
+def test_factor_scores_applies_fin_neutral_from_universe(_signals_db, monkeypatch):
+    from src.screener import calculate_health_score, calculate_value_score
+    from src.signals import factor_scores
+
+    conn = _signals_db.get_storage().conn
+    conn.executescript(
+        "CREATE TABLE screened (symbol TEXT NOT NULL, market TEXT NOT NULL, name TEXT, sector TEXT, "
+        "industry TEXT, enriched INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (symbol, market));"
+    )
+    conn.execute("INSERT INTO screened VALUES (?,?,?,?,?,1)",
+                 ("BANKX", "US", "Bank", "Financial Services", "Banks - Regional"))
+    conn.commit()
+    _patch_factor_inputs(monkeypatch)
+    fs = factor_scores("BANKX")
+    quote = {"price": 100.0, "lastDividend": 2.0}
+    assert fs.quality == calculate_health_score(_FIN_METRICS, is_fin=True)
+    assert fs.value == calculate_value_score(quote, _FIN_METRICS, is_fin=True)
+    assert fs.quality != calculate_health_score(_FIN_METRICS, is_fin=False)
+
+
+def test_factor_scores_unchanged_when_not_in_universe(_signals_db, monkeypatch):
+    from src.screener import calculate_health_score, calculate_value_score
+    from src.signals import factor_scores
+
+    _patch_factor_inputs(monkeypatch)
+    fs = factor_scores("ZZZZ")
+    assert fs.quality == calculate_health_score(_FIN_METRICS)
+    assert fs.value == calculate_value_score({"price": 100.0, "lastDividend": 2.0}, _FIN_METRICS)

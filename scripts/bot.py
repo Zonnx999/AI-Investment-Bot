@@ -41,6 +41,10 @@ RATE_WINDOW_SEC = 60.0
 # 재시작하면서 Turso 를 다시 프로브. 강등 상태론 구독자 목록·offset 이 원격과 갈라짐.
 DEGRADED_RESTART_SEC = 600
 DEGRADED_EXIT_CODE = 3
+# 조회 명령(/stock·/scan·/ledger) 처리 전 pull — 다이제스트 타이머·재점수가 클라우드에 쓴 최신 상태를 봇의
+# 로컬 레플리카가 반영하게 한다. 마지막 sync 후 이 초 이상 지났을 때만 (Turso 왕복 남용 방지).
+QUERY_PULL_MIN_SEC = 300
+QUERY_PULL_KINDS = ("stock", "scan", "ledger")
 
 
 _GATE_MSG = "🔒 구독자 전용입니다. /start 로 가입 요청 후 소유자 승인을 받으면 이용할 수 있어요."
@@ -64,6 +68,36 @@ def _is_subscriber(chat_id: str, owner: str | None) -> bool:
     if owner and chat_id == owner:
         return True
     return subscribers.subscriber_status(chat_id) == "active"
+
+
+def _now() -> float:
+    """단조 시계 (테스트에서 교체 가능하게 분리)."""
+    return time.monotonic()
+
+
+def _has_query_command(updates: list[dict]) -> bool:
+    """배치에 stock/scan/ledger 조회 명령이 하나라도 있는가 (버튼 라벨 정규화 후 호출)."""
+    for u in updates:
+        _chat, text = _extract(u)
+        if text and bot_commands.parse_command(text).kind in QUERY_PULL_KINDS:
+            return True
+    return False
+
+
+def _pull_before_query(store, updates: list[dict], last_sync: float) -> float:
+    """조회 명령이 있고 마지막 sync 후 QUERY_PULL_MIN_SEC 이상 지났으면 store.sync() 1회.
+
+    새 last_sync(단조 시각)를 반환. sync 실패는 로그만 남기고 삼킨다 — 조회는 로컬 레플리카로
+    그대로 응답 (poison/장애가 루프를 죽이지 않게, §4.10 #11).
+    """
+    now = _now()
+    if now - last_sync < QUERY_PULL_MIN_SEC or not _has_query_command(updates):
+        return last_sync
+    try:
+        store.sync()
+    except Exception:  # noqa: BLE001 — 동기화 장애가 조회 응답·폴링 루프를 막지 않도록
+        logger.warning("조회 전 sync 실패 — 로컬 레플리카로 응답", exc_info=True)
+    return now
 
 
 def _sd_notify(state: str) -> None:
@@ -112,6 +146,7 @@ def run() -> NoReturn:
     # 초기 pull 타임아웃으로 오프라인 파일에 강등돼 떴다면 일정 시간 응답만 하다가
     # 자진 종료 → systemd Restart 가 Turso 를 다시 프로브 (장기 강등 고착 방지)
     restart_at: float | None = None
+    last_sync = _now()                               # 기동 시 초기 pull 이 방금 있었음
     if getattr(store, "init_sync", None) == "timeout":
         restart_at = time.monotonic() + DEGRADED_RESTART_SEC
         logger.warning("Turso 초기 pull 타임아웃 — 오프라인 강등 상태로 시작, %ds 뒤 재시작해 재프로브",
@@ -152,6 +187,9 @@ def run() -> NoReturn:
                 bot_commands.handle_callback(cq, owner)
             except Exception:  # noqa: BLE001 — poison 콜백이 봇을 크래시 루프시키지 않도록
                 logger.exception("콜백 처리 실패 (update_id=%s) — 건너뜀", u.get("update_id"))
+
+        # 1.5) 조회 명령이 있으면 처리 전에 최신 상태 pull (5분 rate-limit, 실패는 삼킴)
+        last_sync = _pull_before_query(store, updates, last_sync)
 
         # 2) 조회 명령 즉답 — /stock·/scan 은 active 구독자(또는 소유자)만, /help·/menu 는 공개
         for u in updates:
@@ -199,6 +237,7 @@ def run() -> NoReturn:
             offset = next_offset
             subscribers.set_updates_offset(offset)
         store.sync()
+        last_sync = _now()
 
 
 def main() -> int:

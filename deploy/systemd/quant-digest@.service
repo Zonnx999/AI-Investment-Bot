@@ -15,8 +15,10 @@ Environment=QUANT_BOT_DB_PATH=/home/ubuntu/AI-Investment-Bot/data/digest_replica
 Environment=QUANT_BOT_SYNC_TIMEOUT=180
 ExecStart=/usr/bin/flock -w 600 /home/ubuntu/AI-Investment-Bot/data/.digest.lock /home/ubuntu/AI-Investment-Bot/.venv/bin/python scripts/send_digest.py --no-sync --market %i
 # 발송 직후 신호 원장 채점 (발송 지연 0). 같은 레플리카라 같은 flock 으로 직렬화, '-' 로 실패는 무시
-# (다음 런이 이어서 채점), timeout 180 으로 행 방지.
-ExecStartPost=-/usr/bin/flock -w 600 /home/ubuntu/AI-Investment-Bot/data/.digest.lock /usr/bin/timeout 180 /home/ubuntu/AI-Investment-Bot/.venv/bin/python scripts/ledger.py score
+# (다음 런이 이어서 채점), timeout 180 으로 행 방지. flock 대기는 60초만 (못 잡으면 포기 — 채점은 다음 런이 이어받음).
+# 시간 예산: TimeoutStartSec(1500) >= ExecStart flock 대기 600 + 본체 여유 + ExecStartPost flock 대기 60 + timeout 180
+# (tests/test_deploy_units.py 가 이 관계를 고정).
+ExecStartPost=-/usr/bin/flock -w 60 /home/ubuntu/AI-Investment-Bot/data/.digest.lock /usr/bin/timeout 180 /home/ubuntu/AI-Investment-Bot/.venv/bin/python scripts/ledger.py score
 SuccessExitStatus=10
-TimeoutStartSec=900
+TimeoutStartSec=1500
 Nice=5

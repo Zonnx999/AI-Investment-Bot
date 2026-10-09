@@ -551,8 +551,16 @@
             .replace(/'/g, '&#39;');
     }
 
+    // 숫자 보간 헬퍼 — 유한한 숫자만 그대로, 그 외(문자열·null·NaN)는 '—'. innerHTML 에 숫자 필드를 넣을 때 사용.
+    function num(v) {
+        return (typeof v === 'number' && Number.isFinite(v)) ? String(v) : '—';
+    }
+    function isNum(v) {
+        return typeof v === 'number' && Number.isFinite(v);
+    }
+
     function scoreBadge(score) {
-        const s = score || 0;
+        const s = isNum(score) ? score : 0;
         if (s >= 60) return 'badge-excellent';
         if (s >= 50) return 'badge-good';
         if (s >= 40) return 'badge-fair';
@@ -560,18 +568,18 @@
     }
 
     function fmtPrice(v, currency) {
-        if (v == null) return '—';
+        if (!isNum(v)) return '—';
         if (currency === 'KRW') return '₩' + Math.round(v).toLocaleString('ko-KR');
         // USD: 1달러 미만이면 소수점 4자리, 이상이면 2자리
         return '$' + (v < 1 ? v.toFixed(4) : v.toFixed(2));
     }
 
     function fmtNum(v, digits = 1) {
-        return v != null ? v.toFixed(digits) : '—';
+        return isNum(v) ? v.toFixed(digits) : '—';
     }
 
     function fmtMcap(v) {
-        if (v == null) return '—';
+        if (!isNum(v)) return '—';
         if (v >= 1e12) return '$' + (v / 1e12).toFixed(1) + 'T';
         if (v >= 1e9)  return '$' + (v / 1e9).toFixed(1) + 'B';
         if (v >= 1e6)  return '$' + (v / 1e6).toFixed(0) + 'M';
@@ -598,9 +606,9 @@
                     <td><span class="sym">${esc(it.symbol)}</span></td>
                     <td><div class="co-name">${esc(it.name)}</div><div class="sector-tag">${esc(it.sector)}</div></td>
                     <td>${fmtPrice(it.price, 'KRW')}</td>
-                    <td><span class="badge ${hcls}">${it.health_score ?? '—'}</span></td>
-                    <td><span class="badge ${vcls}">${it.value_score ?? '—'}</span></td>
-                    <td><span class="badge ${cls}">${it.total_score ?? '—'}</span></td>
+                    <td><span class="badge ${hcls}">${num(it.health_score)}</span></td>
+                    <td><span class="badge ${vcls}">${num(it.value_score)}</span></td>
+                    <td><span class="badge ${cls}">${num(it.total_score)}</span></td>
                     <td style="font-size:12px;color:var(--text-muted)">
                         PER ${fmtNum(it.per)} &nbsp;PBR ${fmtNum(it.pbr,2)}<br>ROE ${fmtNum(it.roe)}%
                     </td>
@@ -610,9 +618,9 @@
                     <td><span class="sym">${esc(it.symbol)}</span></td>
                     <td><div class="co-name">${esc(it.name)}</div><div class="sector-tag">${esc(it.sector)}</div></td>
                     <td>${fmtPrice(it.price, 'USD')}</td>
-                    <td><span class="badge ${hcls}">${it.health_score ?? '—'}</span></td>
-                    <td><span class="badge ${vcls}">${it.value_score ?? '—'}</span></td>
-                    <td><span class="badge ${cls}">${it.total_score ?? '—'}</span></td>
+                    <td><span class="badge ${hcls}">${num(it.health_score)}</span></td>
+                    <td><span class="badge ${vcls}">${num(it.value_score)}</span></td>
+                    <td><span class="badge ${cls}">${num(it.total_score)}</span></td>
                     <td style="font-size:12px;color:var(--text-muted)">
                         배당 ${fmtNum(it.dividend_yield)}%<br>ROE ${fmtNum(it.roe)}%
                     </td>
@@ -623,9 +631,9 @@
                     <td class="co-name">${esc(it.name)}</td>
                     <td>${fmtPrice(it.price, 'USD')}</td>
                     <td>${fmtMcap(it.market_cap)}</td>
-                    <td><span class="badge ${scoreBadge(it.rank_score)}">${it.rank_score ?? '—'}</span></td>
-                    <td><span class="badge ${cls}">${it.total_score ?? '—'}</span></td>
-                    <td style="font-size:12px"><span class="badge ${scoreBadge(it.volatility_score)}">${it.volatility_score ?? '—'}</span></td>
+                    <td><span class="badge ${scoreBadge(it.rank_score)}">${num(it.rank_score)}</span></td>
+                    <td><span class="badge ${cls}">${num(it.total_score)}</span></td>
+                    <td style="font-size:12px"><span class="badge ${scoreBadge(it.volatility_score)}">${num(it.volatility_score)}</span></td>
                 </tr>`;
             }
         }
@@ -709,15 +717,15 @@
                 <div class="panel-metrics">
                     <span class="panel-metric-label">6개월 수익률</span>
                     <span class="panel-metric-value" style="color:${(p.return_6m||0)>=0?'var(--success)':'var(--danger)'}">
-                        ${p.return_6m != null ? (p.return_6m >= 0 ? '+' : '') + p.return_6m.toFixed(1) + '%' : '—'}
+                        ${isNum(p.return_6m) ? (p.return_6m >= 0 ? '+' : '') + p.return_6m.toFixed(1) + '%' : '—'}
                     </span>
                     <span class="panel-metric-label">변동성</span>
-                    <span class="panel-metric-value">${p.vol != null ? p.vol.toFixed(1) + '%' : '—'}</span>
+                    <span class="panel-metric-value">${isNum(p.vol) ? p.vol.toFixed(1) + '%' : '—'}</span>
                     <span class="panel-metric-label">샤프</span>
-                    <span class="panel-metric-value">${p.sharpe != null ? p.sharpe.toFixed(2) : '—'}</span>
+                    <span class="panel-metric-value">${isNum(p.sharpe) ? p.sharpe.toFixed(2) : '—'}</span>
                     <span class="panel-metric-label">현재 낙폭</span>
                     <span class="panel-metric-value" style="color:${(p.drawdown||0)<-5?'var(--danger)':'inherit'}">
-                        ${p.drawdown != null ? p.drawdown.toFixed(1) + '%' : '—'}
+                        ${isNum(p.drawdown) ? p.drawdown.toFixed(1) + '%' : '—'}
                     </span>
                 </div>
             </div>
@@ -740,8 +748,8 @@
             <div class="regime-badge ${regimeCls}">${esc(data.label)}</div>
             <p style="color:var(--text-muted);font-size:13px;margin-bottom:12px">
                 ${isHold
-                    ? `판정 보류 — 평가된 지표 ${data.available ?? '?'}/${data.total ?? 3}개뿐이라 점수를 내지 않습니다.`
-                    : `점수: ${data.score > 0 ? '+' : ''}${data.score}`}
+                    ? `판정 보류 — 평가된 지표 ${isNum(data.available) ? data.available : '?'}/${isNum(data.total) ? data.total : 3}개뿐이라 점수를 내지 않습니다.`
+                    : `점수: ${isNum(data.score) ? (data.score > 0 ? '+' : '') + data.score : '—'}`}
                 &nbsp;·&nbsp;
                 3개 거시 지표 합산 (장단기 금리차 / 하이일드 스프레드 / 실업수당 청구)
             </p>
@@ -765,19 +773,19 @@
         }
 
         const rows = data.items.map(p => {
-            const r2cls = p.r_squared >= 0.3 ? 'r2-high' : p.r_squared >= 0.15 ? 'r2-mid' : 'r2-low';
-            const dircls = p.direction.includes('↑') ? 'dir-up'
-                : p.direction.includes('↓') ? 'dir-down' : 'dir-flat';
+            const r2cls = !isNum(p.r_squared) ? 'r2-low' : p.r_squared >= 0.3 ? 'r2-high' : p.r_squared >= 0.15 ? 'r2-mid' : 'r2-low';
+            const dircls = (typeof p.direction === 'string' && p.direction.includes('↑')) ? 'dir-up'
+                : (typeof p.direction === 'string' && p.direction.includes('↓')) ? 'dir-down' : 'dir-flat';
             // 백테스트 검증을 통과한 예측이 아직 없음 → 전부 '검증 미통과 · 참고용' (p.reliable 은 R² 기준 플래그일 뿐)
             const reliableBadge = '<span class="badge badge-fair" style="font-size:11px">검증 미통과 · 참고용</span>';
             return `<tr>
                 <td style="font-weight:600;font-size:13px">${esc(p.name)}</td>
                 <td style="font-size:12px;color:var(--text-muted)">${esc(p.leading)}</td>
                 <td style="font-size:12px;color:var(--text-muted)">${esc(p.target)}</td>
-                <td>${p.best_lag_months}개월</td>
-                <td class="${r2cls}">${p.r_squared != null ? p.r_squared.toFixed(2) : '—'}</td>
+                <td>${isNum(p.best_lag_months) ? p.best_lag_months + '개월' : '—'}</td>
+                <td class="${r2cls}">${isNum(p.r_squared) ? p.r_squared.toFixed(2) : '—'}</td>
                 <td class="${dircls}">${esc(p.direction)}</td>
-                <td style="font-size:12px">${p.predicted_change_pct != null ? (p.predicted_change_pct >= 0 ? '+' : '') + p.predicted_change_pct.toFixed(1) + '%' : '—'}</td>
+                <td style="font-size:12px">${isNum(p.predicted_change_pct) ? (p.predicted_change_pct >= 0 ? '+' : '') + p.predicted_change_pct.toFixed(1) + '%' : '—'}</td>
                 <td>${reliableBadge}</td>
             </tr>`;
         }).join('');

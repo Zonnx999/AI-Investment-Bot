@@ -452,6 +452,30 @@ class ScreenedStock(TypedDict):
     net_debt_to_ebitda: float
 
 
+def manual_fin_flag(ticker: str) -> bool | None:
+    """수동 경로(screen_one·signals.factor_scores)용 금융업 중립화 여부 — 유니버스 DB 와 같은 판정 (RVQ-5).
+
+    유니버스 DB(screened)의 sector/industry 로 `is_balance_sheet_financial` 을 계산한다. FMP quote 에는
+    sector 가 없어서 인자 없이 점수를 내면 금융주가 DB 점수와 달라졌다. **읽기 전용 단일 SELECT** (스키마 변경·
+    FMP 추가 호출 없음). DB 에 종목이 없거나 읽기 실패면 None → 호출부는 기존 동작(비금융 취급)을 유지.
+    """
+    from src.storage import DB_ERRORS, StorageError, get_storage   # 지연 import — universe/ledger 와의 순환 방지
+
+    try:
+        row = get_storage().conn.execute(
+            "SELECT sector, industry FROM screened WHERE symbol = ? AND market = 'US' "
+            "ORDER BY enriched DESC LIMIT 1",
+            (str(ticker).upper(),),
+        ).fetchone()
+    except (StorageError, *DB_ERRORS) as e:   # 저장소 초기화 실패(StorageError)도 기존 동작으로 폴백
+        logger.debug("금융 판정용 유니버스 조회 실패 — 기존 동작 유지 (%s): %s", ticker, e)
+        return None
+    if not row:
+        logger.debug("유니버스 DB 에 %s 없음 — 금융 중립화 미적용(기존 동작)", ticker)
+        return None
+    return bool(is_balance_sheet_financial(row[0] or "", row[1] or "", str(ticker)))
+
+
 def screen_one(ticker: str) -> ScreenedStock | None:
     """한 종목의 데이터를 받아 dashboard 호환 dict 으로 반환.
 
@@ -475,8 +499,10 @@ def screen_one(ticker: str) -> ScreenedStock | None:
         logger.info("Fundamentals 없음 — %s: 점수 생략 (skip)", ticker)
         return None
 
-    health = calculate_health_score(metrics)
-    value = calculate_value_score(quote, metrics)
+    # 유니버스 DB 와 같은 금융업 중립화 (두 카드에 같은 값). DB 에 없으면 None → 기존 동작.
+    is_fin = manual_fin_flag(ticker)
+    health = calculate_health_score(metrics, is_fin=bool(is_fin))
+    value = calculate_value_score(quote, metrics, is_fin=is_fin)
     total = round((health + value) / 2)
 
     price = _safe(quote, "price", 0.0)

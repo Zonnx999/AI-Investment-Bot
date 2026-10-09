@@ -244,3 +244,84 @@ def test_ledger_and_news_sent_plaintext_others_markdown(fresh_db, owner_set, mon
     assert modes["reply:/news AAPL"] is None
     assert modes["reply:/scan us"] == "Markdown"
     assert modes["reply:/stock AAPL"] == "Markdown"
+
+
+# ---------------- RVOPS-06: 조회 명령 전 pull (rate-limit 300초) ----------------
+
+
+def _run_batches_with_clock(bot, monkeypatch, batches, clock):
+    """batches: 배치 목록(각각 updates). clock: bot._now 가 차례로 돌려줄 값 (마지막 값은 반복)."""
+    events: list[str] = []
+    store = storage_mod.get_storage()
+    monkeypatch.setattr(type(store), "sync", lambda self: events.append("sync") or "ok")
+    pending = list(batches)
+
+    def fake_get_updates(offset=None, timeout=0):
+        if pending:
+            return pending.pop(0)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(bot, "get_updates", fake_get_updates)
+    times = list(clock)
+    monkeypatch.setattr(bot, "_now", lambda: times.pop(0) if len(times) > 1 else times[0])
+    monkeypatch.setattr(bot, "send_safe", lambda *a, **k: events.append("send") or True)
+    monkeypatch.setattr(bot.bot_commands, "respond",
+                        lambda text, chat_id, limiter=None: events.append("respond") or "ok")
+    assert bot.main() == 0
+    return events
+
+
+def test_query_command_pulls_before_responding_when_stale(fresh_db, owner_set, monkeypatch):
+    bot = _load_bot()
+    # clock: 기동(last_sync=0) → 배치1 pull 판정(1000s 경과) → 배치 끝 sync 시각
+    events = _run_batches_with_clock(bot, monkeypatch, [[_msg_update(1, 1, "/scan us")]],
+                                     [0.0, 1000.0, 1000.0])
+    assert events[0] == "sync"                         # 처리 전에 pull
+    assert events.index("sync") < events.index("respond")
+    assert events.count("sync") == 2                   # 사전 pull 1 + 기존 배치 끝 sync 1
+
+
+def test_query_pull_is_rate_limited_to_300s(fresh_db, owner_set, monkeypatch):
+    bot = _load_bot()
+    # 기동 0 → 100초 뒤 조회: 300초 미만이라 사전 pull 없음 (배치 끝 sync 만)
+    events = _run_batches_with_clock(bot, monkeypatch, [[_msg_update(1, 1, "/stock AAPL")]],
+                                     [0.0, 100.0, 100.0])
+    assert events.index("respond") < events.index("sync")
+    assert events.count("sync") == 1
+
+
+def test_non_query_commands_do_not_trigger_pull(fresh_db, owner_set, monkeypatch):
+    bot = _load_bot()
+    events = _run_batches_with_clock(bot, monkeypatch, [[_msg_update(1, 1, "/help")]],
+                                     [0.0, 9999.0, 9999.0])
+    assert events.count("sync") == 1                   # 배치 끝 sync 만 (사전 pull 없음)
+    assert events.index("respond") < events.index("sync")
+
+
+def test_ledger_command_triggers_pull(fresh_db, owner_set, monkeypatch):
+    bot = _load_bot()
+    events = _run_batches_with_clock(bot, monkeypatch, [[_msg_update(1, 1, "/ledger us")]],
+                                     [0.0, 500.0, 500.0])
+    assert events[0] == "sync" and events.count("sync") == 2
+
+
+def test_query_pull_failure_does_not_kill_loop(fresh_db, owner_set, monkeypatch):
+    bot = _load_bot()
+    store = storage_mod.get_storage()
+    calls: list[str] = []
+
+    def flaky(self):
+        calls.append("sync")
+        if len(calls) == 1:
+            raise RuntimeError("sync 장애")
+        return "ok"
+
+    monkeypatch.setattr(type(store), "sync", flaky)
+    sent: list[str] = []
+    monkeypatch.setattr(bot, "get_updates", _one_batch_then_stop([_msg_update(1, 1, "/scan us")]))
+    monkeypatch.setattr(bot, "send_safe", lambda *a, **k: sent.append("send") or True)
+    monkeypatch.setattr(bot.bot_commands, "respond", lambda text, chat_id, limiter=None: "ok")
+    times = iter([0.0, 1000.0] + [1000.0] * 5)
+    monkeypatch.setattr(bot, "_now", lambda: next(times))
+    assert bot.main() == 0                             # 사전 pull 예외에도 루프 생존
+    assert sent == ["send"]                            # 조회 응답은 그대로 나감

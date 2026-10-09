@@ -14,6 +14,10 @@ on:
         description: "시장 (us=미국 / kr=한국)"
         default: "us"
 
+# 최소 권한 — 이 워크플로는 저장소 쓰기가 필요 없음 (SEC-04)
+permissions:
+  contents: read
+
 # 액션 런타임을 Node 24 로 (Node 20 deprecation 경고 제거 — 2026-06 GitHub 마이그레이션)
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -57,6 +61,8 @@ jobs:
           QUANT_BOT_CACHE: "off"
           QUANT_BOT_LOG_DIR: ${{ runner.temp }}/logs
         run: |
+          # 수동 입력 검증 — us|kr 외 값은 실패 (임의 문자열이 스크립트 인자로 가지 않게)
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then case "${DISPATCH_MARKET:-us}" in us|kr) ;; *) echo "::error::market 은 us 또는 kr 만 허용"; exit 1 ;; esac; fi
           python - <<'PY'
           import os, sys, subprocess
           from datetime import datetime
