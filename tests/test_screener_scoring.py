@@ -699,3 +699,21 @@ def test_screen_one_unchanged_when_symbol_not_in_universe(monkeypatch):
     row = screener.screen_one("UNKNOWN")
     assert row["health_score"] == calculate_health_score(GOOD)
     assert row["value_score"] == calculate_value_score(_FIN_QUOTE, GOOD)
+
+
+def test_manual_fin_flag_none_when_storage_init_fails(monkeypatch):
+    """저장소 초기화 실패(StorageError) 도 예외 없이 None → screen_one 은 기존 점수를 낸다."""
+    from src import screener
+    from src.screener import manual_fin_flag
+
+    def _boom():
+        raise _storage_mod.StorageError("init failed")
+
+    monkeypatch.setattr(_storage_mod, "get_storage", _boom)
+    assert manual_fin_flag("X") is None
+
+    monkeypatch.setattr("src.screener.fetch_quote", lambda t: dict(_FIN_QUOTE))
+    monkeypatch.setattr("src.screener.latest_fundamentals", lambda t: dict(GOOD))
+    row = screener.screen_one("X")
+    assert row["health_score"] == calculate_health_score(GOOD)
+    assert row["value_score"] == calculate_value_score(_FIN_QUOTE, GOOD)

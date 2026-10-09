@@ -459,7 +459,7 @@ def manual_fin_flag(ticker: str) -> bool | None:
     sector 가 없어서 인자 없이 점수를 내면 금융주가 DB 점수와 달라졌다. **읽기 전용 단일 SELECT** (스키마 변경·
     FMP 추가 호출 없음). DB 에 종목이 없거나 읽기 실패면 None → 호출부는 기존 동작(비금융 취급)을 유지.
     """
-    from src.storage import DB_ERRORS, get_storage   # 지연 import — universe/ledger 와의 순환 방지
+    from src.storage import DB_ERRORS, StorageError, get_storage   # 지연 import — universe/ledger 와의 순환 방지
 
     try:
         row = get_storage().conn.execute(
@@ -467,7 +467,7 @@ def manual_fin_flag(ticker: str) -> bool | None:
             "ORDER BY enriched DESC LIMIT 1",
             (str(ticker).upper(),),
         ).fetchone()
-    except DB_ERRORS as e:
+    except (StorageError, *DB_ERRORS) as e:   # 저장소 초기화 실패(StorageError)도 기존 동작으로 폴백
         logger.debug("금융 판정용 유니버스 조회 실패 — 기존 동작 유지 (%s): %s", ticker, e)
         return None
     if not row:
