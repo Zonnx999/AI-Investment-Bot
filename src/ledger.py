@@ -10,7 +10,7 @@ src/ledger.py
 1. **원장(signal_ledger)** — 실제 발송된 리스트를 발송 직후 append-only 로 기록.
 2. **채점기(roll_forward)** — '리스트 그대로 보유' 포트폴리오를 일별로 굴려
    ledger_perf 에 **한 번 쓰면 동결**되는 일별 수익을 쌓는다 (상장폐지로 가격 이력이
-   사라져도 과거 성과가 바뀌지 않음). 벤치는 종목별 홈지수 ETF(SPY / 069500.KS /
+   사라져도 과거 성과가 바뀌지 않음). 벤치는 종목별 소속 지수 ETF(SPY / 069500.KS /
    229200.KS) — 종목·벤치 모두 Adj Close(배당 포함)라 대칭.
 3. **픽 결과(pick_outcomes)** — 새로 등장한 종목(픽 이벤트)별 21/63 거래일 수익.
    채운 값은 COALESCE 로 불변.
@@ -83,7 +83,41 @@ MARKETS = ("US", "KR")
 MARKET_TZ = {"US": ZoneInfo("America/New_York"), "KR": ZoneInfo("Asia/Seoul")}
 PRIMARY_BENCH = {"US": "SPY", "KR": "069500.KS"}
 KOSDAQ_BENCH = "229200.KS"      # KODEX 코스닥150 (Adj Close 존재 실조회)
-BENCH_LABEL = {"US": "SPY", "KR": "홈지수"}
+# 구독자 문구의 벤치 라벨 — KR 은 현재 리스트의 bench_symbol 로 동적(bench_label_for): 전부
+# 069500.KS 면 '코스피', 전부 229200.KS 면 '코스닥', 섞이면 '코스피·코스닥'. 아래는 정보가 없을 때 폴백.
+BENCH_LABEL = {"US": "SPY", "KR": "코스피·코스닥"}
+_KR_BENCH_LABEL = {PRIMARY_BENCH["KR"]: "코스피", KOSDAQ_BENCH: "코스닥"}
+
+
+def bench_label_for(market: str, bench_symbols: Iterable[str | None]) -> str:
+    """현재 리스트 종목들의 벤치 심볼 → 구독자용 라벨 (순수, RVM-06).
+
+    US 는 항상 'SPY'. KR 은 069500.KS 만 → '코스피', 229200.KS 만 → '코스닥', 둘 다 → '코스피·코스닥'.
+    알 수 없는 심볼·빈 목록은 시장 폴백(BENCH_LABEL).
+    """
+    m = (market or "").upper()
+    if m != "KR":
+        return BENCH_LABEL.get(m, "벤치")
+    labels = {_KR_BENCH_LABEL.get(str(b)) for b in bench_symbols if b}
+    labels.discard(None)
+    if labels == {"코스피"}:
+        return "코스피"
+    if labels == {"코스닥"}:
+        return "코스닥"
+    if labels == {"코스피", "코스닥"}:
+        return "코스피·코스닥"
+    return BENCH_LABEL["KR"]
+
+
+_LEGACY_BENCH_LABELS = frozenset({"홈지수"})
+
+
+def _bench_label(s: Mapping[str, Any]) -> str:
+    """요약 dict 의 벤치 라벨 — 없거나 옛 표기('홈지수', 재채점 전 state 에 남아 있을 수 있음)면 시장 폴백."""
+    bl = s.get("bench_label")
+    if not bl or bl in _LEGACY_BENCH_LABELS:
+        return BENCH_LABEL.get(str(s.get("market") or "").upper(), "벤치")
+    return str(bl)
 MARKET_FLAG = {"US": "🇺🇸", "KR": "🇰🇷"}
 
 # 07-13 소급 백필 (심사 §6) — 명시 리스트(D5 필터·scan 정렬 변경과 무관하게 고정)
@@ -137,7 +171,7 @@ CREATE TABLE IF NOT EXISTS pick_outcomes (
     entry_px        REAL,
     bench_entry_px  REAL,
     ret_21          REAL,             -- %
-    xs_21           REAL,             -- 홈지수 대비 %p
+    xs_21           REAL,             -- 소속 지수 ETF 대비 %p
     ret_63          REAL,
     xs_63           REAL,
     last_px         REAL,
@@ -271,7 +305,7 @@ def _yf_symbol_fallback(symbol: str, market: str, exchange: str | None = None,
 
 
 def bench_for(market: str, yf_symbol: str) -> str:
-    """종목의 홈지수 ETF (Adj Close). US=SPY, KR .KQ→229200.KS, 그 외 KR→069500.KS."""
+    """종목의 소속 지수 ETF (Adj Close). US=SPY, KR .KQ→229200.KS, 그 외 KR→069500.KS."""
     m = (market or "").upper()
     if m == "US":
         return PRIMARY_BENCH["US"]
@@ -750,7 +784,7 @@ def roll_forward(
       (= sent_date ≤ d 인 마지막 발송)의 구성이 바뀌면 **d 종가에 동일가중 재조정**하고
       턴오버 Σ|Δw| × 편도 ``cost_bps`` 를 port_ret 에서 차감 (벤치 무비용). 첫 진입은
       현금→리스트라 턴오버 1.
-    - 벤치 = 같은 비중으로 각 종목의 홈지수 ETF 를 든 그림자 포트폴리오.
+    - 벤치 = 같은 비중으로 각 종목의 소속 지수 ETF 를 든 그림자 포트폴리오.
     - 결측: 보유 종목(또는 벤치) 가격이 d 에 없고 이후에도 없으면 → 연속 결측이
       ``SUSPEND_DAYS`` 미만이면 **d 에서 멈춤**(행 미기록, 다음 실행 재시도). 이상이면
       거래정지 취급(수익 0, 마지막 가격 유지). ``DELIST_DAYS`` 이상은 delisted 플래그.
@@ -1133,6 +1167,17 @@ def _hstats(outs: Sequence[dict], h: int) -> dict:
             "mean_xs": float(np.mean(xs)) if xs else None}
 
 
+def _current_bench_symbols(cur: dict, vsends: Sequence[LedgerPick]) -> list[str]:
+    """현재 리스트의 벤치 심볼 — 채점 커서(bench_of)가 있으면 그것, 없으면 최신 발송 리스트에서."""
+    benches = [str(b) for b in (cur.get("bench_of") or {}).values() if b]
+    if benches:
+        return benches
+    if not vsends:
+        return []
+    last = max(s.sent_date for s in vsends)
+    return [s.bench_symbol for s in vsends if s.sent_date == last and s.bench_symbol]
+
+
 def summarize(
     market: str,
     perf: Sequence[dict],
@@ -1203,7 +1248,7 @@ def summarize(
         "cum_port": cum_p, "cum_bench": cum_b, "excess_pp": cum_p - cum_b,
         "mdd_port": _mdd_pct(pr), "mdd_bench": _mdd_pct(br),
         "turnover_total": float(sum(float(r["turnover"]) for r in vrows)),
-        "bench_label": BENCH_LABEL[m],
+        "bench_label": bench_label_for(m, _current_bench_symbols(cur, vsends)),
         "blocks": blocks, "min_blocks": MIN_BLOCKS,
         "status": status, "prev_status": prev_status, "status_changed": changed,
         "status_changed_at": status_changed_at,
@@ -1256,9 +1301,9 @@ def _status_text(s: dict) -> str:
     if status == "pending":
         pv = s.get("prev_version")
         if pv and pv.get("rule_version") != s.get("rule_version"):
-            return (f"⏳새 규칙 {s.get('rule_version')} 검증 {n}/{MIN_BLOCKS} "
-                    f"({pv['rule_version']} 초과 {pv['excess_pp']:+.1f}%p)")
-        return f"⏳검증 전 {n}/{MIN_BLOCKS}"
+            return (f"⏳새 규칙 {s.get('rule_version')} 검증 (4주 구간 {n}/{MIN_BLOCKS}, "
+                    f"{pv['rule_version']} 초과 {pv['excess_pp']:+.1f}%p)")
+        return f"⏳검증 전 (4주 구간 {n}/{MIN_BLOCKS})"
     mean, t = b.get("mean"), b.get("t")
     core = f"4주 구간 {n}개 평균 {mean:+.1f}%p" if mean is not None else f"4주 구간 {n}개"
     if t is not None:
@@ -1292,7 +1337,7 @@ def format_ledger_line(summary: dict | None, *, now: datetime | None = None) -> 
     parts = [
         f"📒 성적: {_mmdd(s.get('since') or s.get('entry_date'))} 이후 이 리스트 보유 "
         f"{s['cum_port']:+.1f}%",
-        f"{s.get('bench_label', BENCH_LABEL.get(s.get('market'), '벤치'))} {s['cum_bench']:+.1f}%",
+        f"{_bench_label(s)} {s['cum_bench']:+.1f}%",
         f"초과 {s['excess_pp']:+.1f}%p ({_mmdd(s['price_asof'])} 종가, 비용 포함)",
     ]
     parts += _tails(s)
@@ -1300,9 +1345,16 @@ def format_ledger_line(summary: dict | None, *, now: datetime | None = None) -> 
     return _md_safe(" · ".join(parts))
 
 
-def format_weekly_block(summary: dict | None, *, now: datetime | None = None) -> str | None:
-    """월요일(현지) 확장 2~3줄. 게이트 실패면 None.
+def format_weekly_block(summary: dict | None, *, now: datetime | None = None,
+                        compact: bool = False) -> str | None:
+    """월요일(현지) 확장 블록. 게이트 실패면 None.
 
+    기본(소유자 CLI 등): 3줄 — 머리줄 / '리스트 보유 … / 초과 … · 최대낙폭' / 구간·지평 적중.
+    compact=True (다이제스트 월요일): 일일 성과 줄(format_ledger_line)을 **대체**하는 2줄 —
+      1) 일일 줄과 같은 형식에 기간(since~종가일)·비용 상세를 머리에 접고 꼬리표·판정 상태까지 그대로
+      2) '주간 성적표: 최대낙폭 · 4주 구간 초과 값들 · 지평 적중'
+    같은 날 일일 줄 + 주간 블록을 둘 다 내면 '리스트 보유 … / 초과 …' 가 중복돼 조용한 날 예산을
+    넘겼다 (RVM-05). 블록 값(구간별 초과·최대낙폭)은 일일 줄에 없으니 정보 손실 없음.
     지평 적중은 픽 이벤트 ≥ 6 **그리고** 완료 지평만 (소표본 통계 노출 금지).
     """
     ok, _ = ledger_gate(summary, now=now)
@@ -1310,30 +1362,48 @@ def format_weekly_block(summary: dict | None, *, now: datetime | None = None) ->
         return None
     s = summary
     m = s.get("market", "US")
-    bl = s.get("bench_label", BENCH_LABEL.get(m, "벤치"))
-    lines = [
-        f"📒 주간 성적표 · {MARKET_FLAG.get(m, '')} {_mmdd(s.get('since') or s.get('entry_date'))}"
-        f"~{_mmdd(s['price_asof'])} (배당 포함, 비용 {LEDGER_COST_BPS:.0f}bp)",
-        f"  리스트 보유 {s['cum_port']:+.1f}% / {bl} {s['cum_bench']:+.1f}% / "
-        f"초과 {s['excess_pp']:+.1f}%p · 최대낙폭 {s['mdd_port']:+.1f}% (지수 {s['mdd_bench']:+.1f}%)",
-    ]
+    bl = _bench_label(s)
+    period = f"{_mmdd(s.get('since') or s.get('entry_date'))}~{_mmdd(s['price_asof'])}"
+    mdd = f"최대낙폭 {s['mdd_port']:+.1f}% (지수 {s['mdd_bench']:+.1f}%)"
     b = s.get("blocks") or {}
     n = int(b.get("n") or 0)
-    third = []
-    if n == 0:
-        third.append(f"4주 구간 아직 없음({int(b.get('days_in_partial') or 0)}/{BLOCK_D}거래일)")
-    elif n < MIN_BLOCKS:
-        xs = ", ".join(f"{x:+.1f}" for x in b.get("blocks", []))
-        third.append(f"4주 구간 초과: {xs} → 판정까지 {MIN_BLOCKS - n}구간")
-    else:
-        third.append(_status_text({**s, "status": "testing"}))
+    xs = ", ".join(f"{x:+.1f}" for x in b.get("blocks", []))
     ev = s.get("events") or {}
     shown = []
     for h in HORIZONS:
         hs = ev.get(f"h{h}") or {}
         if int(ev.get("n") or 0) >= MIN_BLOCKS and int(hs.get("n_done") or 0) >= MIN_BLOCKS:
             shown.append(f"{h}일 적중 {hs['hits']}/{hs['n_done']} (평균 {hs['mean_xs']:+.1f}%p)")
-    third.append(" · ".join(shown) if shown else "지평 적중은 픽 6건 이상 완료 후 표시")
+    hits = " · ".join(shown) if shown else "지평 적중은 픽 6건 이상 완료 후 표시"
+
+    if compact:
+        first = [
+            f"📒 성적: {period} 이 리스트 보유 {s['cum_port']:+.1f}%",
+            f"{bl} {s['cum_bench']:+.1f}%",
+            f"초과 {s['excess_pp']:+.1f}%p (배당·비용 {LEDGER_COST_BPS:.0f}bp 포함)",
+        ]
+        first += _tails(s)
+        first.append(_status_text(s))
+        if n == 0:
+            blk = f"4주 구간 아직 없음({int(b.get('days_in_partial') or 0)}/{BLOCK_D}거래일)"
+        else:
+            blk = f"4주 구간 초과 {xs}"          # 판정까지 남은 구간 수는 위 줄의 n/{MIN_BLOCKS} 로
+        second = f"  주간 성적표: {mdd} · {blk} · {hits}"
+        return _md_safe("\n".join([" · ".join(first), second]))
+
+    lines = [
+        f"📒 주간 성적표 · {MARKET_FLAG.get(m, '')} {period} (배당 포함, 비용 {LEDGER_COST_BPS:.0f}bp)",
+        f"  리스트 보유 {s['cum_port']:+.1f}% / {bl} {s['cum_bench']:+.1f}% / "
+        f"초과 {s['excess_pp']:+.1f}%p · {mdd}",
+    ]
+    third = []
+    if n == 0:
+        third.append(f"4주 구간 아직 없음({int(b.get('days_in_partial') or 0)}/{BLOCK_D}거래일)")
+    elif n < MIN_BLOCKS:
+        third.append(f"4주 구간 초과: {xs} → 판정까지 {MIN_BLOCKS - n}구간")
+    else:
+        third.append(_status_text({**s, "status": "testing"}))
+    third.append(hits)
     lines.append("  " + " · ".join(third))
     return _md_safe("\n".join(lines))
 
@@ -1351,7 +1421,7 @@ def format_report(
         return "원장 성적 없음 (채점 전이거나 원장 비어 있음)"
     s = summary
     m = s["market"]
-    bl = s.get("bench_label", BENCH_LABEL[m])
+    bl = _bench_label(s)
     src = "복원" if s.get("has_reconstructed") else "라이브"
     lines = [
         f"== 발송 원장 · {MARKET_FLAG.get(m, m)} ({s.get('rule_version')} {src}, "

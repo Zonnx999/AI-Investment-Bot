@@ -17,7 +17,10 @@ src/digest.py
 설계 원칙
   - 렌더러는 전부 **순수 함수**(이미 계산된 객체 → 문자열, 오프라인 테스트). fetch·DB 읽기는
     `assemble_daily_digest` 만, 쓰기(state 커밋·원장·헬스·sync)는 `send_daily_digest` 가
-    **발송 성공(sent ≥ 1) 이후에만**. dry-run 은 assemble 만 호출하므로 쓰기 0.
+    **발송 성공(sent ≥ 1) 이후에만**. dry-run 은 assemble 만 호출하므로 상태·원장 쓰기 0 —
+    단 유니버스 읽기 경로(`universe._conn`)가 screened 스키마를 보장하므로, 마이그레이션 전 DB
+    에는 멱등 ALTER(컬럼 추가, `storage.add_column_if_missing`)가 수행될 수 있다 (RVM-03).
+    원장 읽기(`ledger._rconn`)는 스키마를 만들지 않는다. 데이터 행은 어느 쪽도 바뀌지 않는다.
   - Markdown 엔티티는 정적 제목·판정 헤더의 `*…*` 만. 동적 문자열(회사명·사유·알림 문구)은
     `utils.md_safe` 를 통과 (CLAUDE.md §4.10 #10). 이탤릭·백틱·링크 금지.
   - 판정은 예측이 아니라 사실의 변화(후보 리스트 diff·새 알림·선정 후 하락)에서만 나온다.
@@ -27,6 +30,7 @@ src/digest.py
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -46,7 +50,14 @@ from src.findings import (
 )
 from src.health import HealthReport, llm_status
 from src.logger import get_logger
-from src.signals import MA_LONG_WINDOW, REGIME_CONFIRM_DATES, Alert, SignalReport, annualized_vol_pct
+from src.signals import (
+    MA_LONG_WINDOW,
+    REGIME_CONFIRM_DATES,
+    Alert,
+    SignalReport,
+    _replica_unsynced,
+    annualized_vol_pct,
+)
 from src.utils import MD_SAFE_NAME_LEN, close_series, md_safe
 
 logger = get_logger(__name__)
@@ -347,7 +358,10 @@ def evidence_from_detail(detail: dict | None, market: str, flags: Sequence[str] 
     parts: list[str] = []
     if market == "KR":
         if "PER" in comps:
-            parts.append(f"PER {comps['PER']}배")
+            # detail 이 '7.7 (일회성 의심→3년평균)' 처럼 설명을 달고 올 수 있다 — 근거 줄에는 숫자 토큰만
+            # + '배'. 일회성 표시는 아래 꼬리표('일회성이익 가드') 하나로 (RVQ-6)
+            per_num = comps["PER"].split(" ", 1)[0]
+            parts.append(f"PER {per_num}배" if per_num != "—" else "PER —")
         if "PBR" in comps:
             parts.append(f"PBR {comps['PBR']}")
     else:
@@ -490,9 +504,13 @@ def _alert_short(a: Alert) -> str:
     return a.category
 
 
+REASON_UNSYNCED = "데이터 동기화 지연 — 후보 비교 보류"
+
+
 def decide_actions(diff: ListDiff, new_alerts: Sequence[Alert], dd10_labels: Sequence[str] = (),
                    warn_count: int = 0, first_run: bool = False,
-                   held_age: int | None = None, baseline_note: str | None = None) -> Verdict:
+                   held_age: int | None = None, baseline_note: str | None = None,
+                   unsynced: bool = False) -> Verdict:
     """'오늘 할 일' 판정 — 사실의 변화만으로 (점수·예측으로 행동을 지시하지 않음).
 
     매수 검토 N = 신규 후보 수(동점 교체 제외), 탈락 N = 탈락 수, 리스크 점검 N = 새 알림 수
@@ -501,13 +519,18 @@ def decide_actions(diff: ListDiff, new_alerts: Sequence[Alert], dd10_labels: Seq
     후보 보류일(``held_age``: 점수 노후 일수)은 후보 diff 를 판정에서 뺀다 — 매수/탈락/기준 수립 0,
     사유 '후보 보류 (점수 N일 경과)'. 원장이 갱신되지 않는 날이라 같은 diff 가 매일 반복되기 때문
     (D1). 새 알림(국면·낙폭·충격)은 보류와 무관하게 남는다.
+    ``unsynced`` (레플리카 초기 pull 실패 — 직전 리스트(원장)가 낡았을 수 있음) 도 후보 diff 를
+    판정에서 뺀다 — 어제 판정이 반복될 수 있어서 (RVM-08). 사유 '데이터 동기화 지연 — 후보 비교 보류'.
     ``baseline_note`` 가 있으면(규칙 버전 전환일) 첫 기록처럼 기준 수립으로 보고 사유를 그 문구로 —
     원장이 그날을 새 규칙의 기준선으로 기록하므로 '매수 검토 N · 탈락 M' 을 내지 않는다.
+    우선순위: 보류 > 동기화 지연 > 전환(기준 수립).
     """
     held = held_age is not None
-    baseline = (diff.first_run or first_run or baseline_note is not None) and not held
-    n_buy = 0 if (baseline or held) else len(diff.new)
-    n_drop = 0 if (baseline or held) else len(diff.dropped)
+    unsynced = bool(unsynced) and not held
+    neutral = held or unsynced
+    baseline = (diff.first_run or first_run or baseline_note is not None) and not neutral
+    n_buy = 0 if (baseline or neutral) else len(diff.new)
+    n_drop = 0 if (baseline or neutral) else len(diff.dropped)
     n_risk = len(new_alerts) + len(dd10_labels)
     parts = []
     if n_buy:
@@ -521,6 +544,8 @@ def decide_actions(diff: ListDiff, new_alerts: Sequence[Alert], dd10_labels: Seq
     reasons: list[str] = []
     if held:
         reasons.append(f"후보 보류 (점수 {held_age}일 경과)")
+    elif unsynced:
+        reasons.append(REASON_UNSYNCED)
     elif baseline:
         reasons.append(md_safe(baseline_note) if baseline_note else "후보 목록 기준 수립 (첫 기록)")
     elif diff.changed:
@@ -637,14 +662,24 @@ def render_kr_market(report: SignalReport | None, overnight_line: str | None) ->
     return lines
 
 
+_SCORE_PAREN_RE = re.compile(r"\((?:[+-]1|0)(?:, ([^)]*))?\)")
+
+
 def _reason_core(reason_line: str) -> str:
-    """RegimeView.reason_line '근거: A · B — 3/3 지표, 10-07 기준' → 'A · B'."""
+    """RegimeView.reason_line '근거: A · B — 3/3 지표, 10-07 기준' → 'A · B' (표시 전용, RVM-06).
+
+    구독자 문구에서 설명 없는 기호·약어를 푼다 — 점수 기여 '(+1)'·'(0)'·'(-1)' 은 떼고
+    (만료 캐시 표기 '(0, 10-06 캐시)' 는 '(10-06 캐시)' 로), 'HY ' 는 '하이일드 ' 로.
+    macro_analyzer 원본 reason_line 은 그대로 (대시보드 등 다른 소비자).
+    """
     core = reason_line or ""
     if core.startswith("근거: "):
         core = core[len("근거: "):]
     if " — " in core:
         core = core.rsplit(" — ", 1)[0]
-    return md_safe(core)
+    core = _SCORE_PAREN_RE.sub(lambda m: f" ({m.group(1)})" if m.group(1) else "", core)
+    parts = [("하이일드 " + p[3:]) if p.startswith("HY ") else p for p in core.split(" · ")]
+    return md_safe(" · ".join(parts))
 
 
 def _active_short(text: str) -> str:
@@ -728,21 +763,46 @@ def _new_lines(v: PickView, market: str) -> list[str]:
     return out
 
 
-def _legend(market: str) -> str:
+def us_basis_label(bases: Iterable[str | None]) -> str:
+    """US 범례의 점수 근거 기간 — 후보 행별 detail.basis 로 (RVQ-4, 순수).
+
+    전부 'ttm' → 'FMP 최근 4분기' / 섞임 → 'FMP 최근 4분기·일부 연간' / ttm 없음(연간 폴백·
+    재점수 전 구형 행 basis None 포함) → 'FMP 연간'. 후보가 없으면 기본 'FMP 최근 4분기'.
+    """
+    items = list(bases)
+    if not items:
+        return "FMP 최근 4분기"
+    n_ttm = sum(1 for b in items if b == "ttm")
+    if n_ttm == len(items):
+        return "FMP 최근 4분기"
+    if n_ttm == 0:
+        return "FMP 연간"
+    return "FMP 최근 4분기·일부 연간"
+
+
+def _legend(market: str, views: Sequence[PickView] = ()) -> str:
     if market == "KR":
         return f"점수 = 재무점수({LABEL_VALUE}+{LABEL_HEALTH}, DART 연간, 가격요인 없음) · 가격 줄은 참고용 · 상세 /stock 코드"
-    return f"점수 = 재무점수({LABEL_VALUE}+{LABEL_HEALTH}, FMP 최근 4분기) · 가격 줄은 참고용, 점수 미반영 · 상세 /stock 티커"
+    basis = us_basis_label(getattr(v.row, "basis", None) for v in views)
+    return f"점수 = 재무점수({LABEL_VALUE}+{LABEL_HEALTH}, {basis}) · 가격 줄은 참고용, 점수 미반영 · 상세 /stock 티커"
+
+
+LEDGER_DEMOTED_TITLE_TAG = " · 검증 미달"
 
 
 def render_candidates(market: str, views: Sequence[PickView], diff: ListDiff, *,
                       hold_age: int | None = None, list_since: str | None = None,
                       collapse_keep: bool = False, compact_new: bool = False,
-                      weights_line: str | None = None, rule_note: str | None = None) -> list[str]:
+                      weights_line: str | None = None, rule_note: str | None = None,
+                      ledger_status: str | None = None) -> list[str]:
     """📋 후보 섹션. hold_age 가 있으면 '후보 보류' 1줄로 대체 (점수 >14일).
 
     rule_note: 규칙 버전 전환 당일 1회 꼬리 줄 ('규칙 v1 기준으로 성과 집계 재시작', D3).
+    ledger_status: 원장 판정 상태 — 'demoted'(성적 미달) 면 제목에 ' · 검증 미달' 을 붙인다
+    (사용자 결정 #9 A안). 종목·줄은 그대로, 설명 줄은 추가하지 않는다 — 📒 줄의 🔻 와 짝.
     """
-    title = f"*📋 {_MARKET_KO.get(market, market)} {LABEL_CANDIDATES} {len(views)}*"
+    title = f"*📋 {_MARKET_KO.get(market, market)} {LABEL_CANDIDATES} {len(views)}"
+    title += (LEDGER_DEMOTED_TITLE_TAG if ledger_status == "demoted" else "") + "*"
     if hold_age is not None:
         return [f"*📋 {_MARKET_KO.get(market, market)} {LABEL_CANDIDATES}* — 보류",
                 f"후보 보류 — 점수 {hold_age}일 경과, 재점수 필요"]
@@ -801,7 +861,7 @@ def render_candidates(market: str, views: Sequence[PickView], diff: ListDiff, *,
         lines.append(weights_line)
     if rule_note:
         lines.append(md_safe(rule_note))
-    lines.append(_legend(market))
+    lines.append(_legend(market, views))
     return lines
 
 
@@ -825,12 +885,15 @@ def render_ledger(summary: dict | None, *, now: datetime, has_history: bool,
     if line is None:
         _ok, footer = lg.ledger_gate(summary, now=now)
         return [], footer
-    # 문구는 WP-LEDGER 출력 그대로 — 제목에 이미 📒 가 있어 선두 이모지만 뗀다
-    lines = [title, md_safe(line[2:] if line.startswith("📒 ") else line)]
+    body = [line]
     if weekly:
-        block = lg.format_weekly_block(summary, now=now)
+        # 월요일: 일일 줄 + 주간 블록을 둘 다 내면 '리스트 보유 … / 초과 …' 가 중복돼 조용한 날 예산을
+        # 넘긴다 → 일일 줄을 **대체**하는 compact 블록 (꼬리표·판정 상태 포함, 정보 손실 0 — RVM-05)
+        block = lg.format_weekly_block(summary, now=now, compact=True)
         if block:
-            lines.extend(md_safe(x) for x in block.splitlines())
+            body = block.splitlines()
+    # 문구는 WP-LEDGER 출력 그대로 — 제목에 이미 📒 가 있어 선두 이모지만 뗀다
+    lines = [title] + [md_safe(x[2:] if x.startswith("📒 ") else x) for x in body]
     return lines, None
 
 
@@ -913,10 +976,13 @@ def render_digest(inp: DigestInputs, *, collapse_keep: bool = False, compact_new
         out += ["", *render_global(inp.report, extra_new=len(inp.dd10_lines))]
     else:
         out += ["", *render_changes_us(alerts, inp.dd10_lines)]
+    # 원장 판정 상태(성적 미달 🔻)는 📒 줄이 구독자에게 보일 때만 제목에 — 설명 줄이 없는 꼬리표라
+    # 📒 줄과 짝으로만 뜻이 통한다 (owner 모드면 📒 가 소유자 DM 으로 가므로 제목도 붙이지 않음)
+    ledger_status = ((inp.ledger_summary or {}).get("status") if inp.show_ledger else None)
     out += ["", *render_candidates(m, inp.views, inp.diff, hold_age=inp.hold_age,
                                    list_since=inp.list_since, collapse_keep=collapse_keep,
                                    compact_new=compact_new, weights_line=inp.weights_line,
-                                   rule_note=inp.rule_note)]
+                                   rule_note=inp.rule_note, ledger_status=ledger_status)]
     footer = None
     if inp.show_ledger:
         lines, footer = render_ledger(inp.ledger_summary, now=inp.now,
@@ -1161,9 +1227,24 @@ def assemble_daily_digest(market: str = "us", *, now: datetime | None = None,
             dropped_rows[str(p.symbol)] = None
     reasons = skip_reasons(market, picks, dropped_rows, (str(r.symbol) for r in lagging), top_n)
     diff = diff_lists(prev_list, picks, dropped_rows, prev_date=prev_date, reasons=reasons)
-    if baseline_note and diff.changed:
-        baseline_note += f" (편입 {len(diff.new)} · 탈락 {len(diff.dropped)})"
+    if baseline_note:
+        # 전환일 판정 사유 — 후보가 실제로 바뀐 날만 '재구성 (편입 N · 탈락 M)'. 목록이 같은데
+        # '재구성' + 후보 섹션 '변화 없음' 이 나란히 보이면 모순처럼 읽혀 (RVM-06)
+        if diff.changed:
+            baseline_note += f" (편입 {len(diff.new)} · 탈락 {len(diff.dropped)})"
+        elif diff.swaps:
+            baseline_note = f"규칙 {universe.RULE_VERSION} 전환 (동점 교체만)"
+        else:
+            baseline_note = f"규칙 {universe.RULE_VERSION} 전환 (후보 동일)"
     list_since = max((starts.get(s) for s in cur_syms if starts.get(s)), default=None)
+    # 레플리카 초기 pull 실패(init_sync 가 동기화 상태 아님)면 직전 리스트(원장)가 낡았을 수 있다 —
+    # 어제 판정이 반복될 수 있어 매수/탈락 판정을 보류 (RVM-08). 새 알림은 signals 가 이미
+    # unsynced 를 다루고, 원장 기록은 실제 보낸 목록 그대로.
+    unsynced = _replica_unsynced(store)
+    if unsynced:
+        prev_txt = f"직전 리스트 기준일 {_mmdd(prev_date)}" if prev_date else "직전 리스트 없음(레플리카 기준)"
+        owner_extra.append(f"동기화 지연: {prev_txt} — 후보 비교 보류 "
+                           f"(init_sync={getattr(store, 'init_sync', None)})")
 
     # --- 가격 지표 (yfinance 캐시, 참고용) + 선정 후 + -10% 1회 알림 ---
     views: list[PickView] = []
@@ -1256,7 +1337,7 @@ def assemble_daily_digest(market: str = "us", *, now: datetime | None = None,
     warn_count = sum(1 for pr in health.problems(now) if pr.user_text)
     alerts = list(report.alerts) if report is not None else []
     verdict = decide_actions(diff, alerts, dd10_labels, warn_count=warn_count, held_age=hold_age,
-                             baseline_note=baseline_note)
+                             baseline_note=baseline_note, unsynced=unsynced)
     weekly = ledger.market_today(market, now).weekday() == 0
     inp = DigestInputs(
         market=market, now=now, verdict=verdict, diff=diff, views=views, report=report,

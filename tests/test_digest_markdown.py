@@ -7,6 +7,7 @@ KR/US × 정상/저하/보류 × 변경일/유지일 × 첫 실행 × 적대적 
 from __future__ import annotations
 
 import itertools
+from datetime import datetime
 
 import pytest
 
@@ -32,12 +33,18 @@ def _alerts():
             Alert("warning", "fx", "원/달러 20일 +5.2% (원화 약세) _*`[", key="fx:enter")]
 
 
-def _inputs(market, condition, change, first_run, adversarial):
+MONDAY_KR = datetime(2026, 10, 12, 8, 30, tzinfo=dg.KST)
+MONDAY_US = datetime(2026, 10, 12, 22, 0, tzinfo=dg.KST)
+
+
+def _inputs(market, condition, change, first_run, adversarial, weekly=False):
     rows = (ADVERSARIAL_ROWS if adversarial else T.KR_ROWS)
     if market == "US":
         rows = [T._row(r.symbol, r.name, r.total_score, r.value_score, r.health_score, "US", "Energy")
                 for r in rows]
     now = T.NOW_KR if market == "KR" else T.NOW_US
+    if weekly:
+        now = MONDAY_KR if market == "KR" else MONDAY_US
     health = T._health(market)
     if condition == "degraded":
         health = T._health(market, universe_as_of="2026-09-29", regime_ok=2, regime_total=3,
@@ -65,13 +72,16 @@ def _inputs(market, condition, change, first_run, adversarial):
     summary = T.SUMMARY_KR if market == "KR" else T.SUMMARY_US
     if condition == "degraded":
         summary = dict(summary, computed_at="2026-10-01T00:00:00+00:00")
+    if weekly:          # 월요일 아침 기준 게이트 통과 (계산 ≤3일·종가 ≤4거래일)
+        summary = dict(summary, computed_at="2026-10-11T23:00:00+00:00", price_asof="2026-10-09")
     return dg.DigestInputs(
         market=market, now=now, verdict=verdict, diff=diff, views=views, report=report,
-        health=health, price_asof="2026-10-07", score_asof="2026-09-29" if condition == "degraded" else "2026-10-05",
+        health=health, price_asof="2026-10-09" if weekly else "2026-10-07",     # 월요일은 금요일 종가
+        score_asof="2026-09-29" if condition == "degraded" else "2026-10-05",
         stale_warn=(condition == "degraded"), hold_age=16 if condition == "hold" else None,
         list_since="2026-09-29", dd10_lines=dd10,
         overnight_line=T.OVERNIGHT if market == "KR" else None,
-        ledger_summary=summary, ledger_has_history=not first_run,
+        ledger_summary=summary, ledger_has_history=not first_run, weekly=weekly,
     )
 
 
@@ -95,6 +105,32 @@ def test_all_combinations_parse_ok_bold_only_and_within_budget(market, condition
     assert "A_B*C`D[E" not in text
     if adversarial and condition != "hold":          # 보류일은 종목 줄 자체가 없음
         assert "A＿B∗CʼD［E" in text
+
+
+@pytest.mark.parametrize("market", ["KR", "US"])
+@pytest.mark.parametrize("adversarial", [False, True])
+def test_monday_quiet_day_with_weekly_block_within_quiet_budget(market, adversarial):
+    """RVM-05: 월요일(주간 블록 포함) 조용한 날도 조용한 날 예산 안 — 중복 '리스트 보유' 줄 제거."""
+    inp = _inputs(market, "normal", False, False, adversarial, weekly=True)
+    text = dg.render_with_budget(inp)
+    assert_bold_only(text)
+    assert "주간 성적표" in text and "최대낙폭" in text
+    assert sum(1 for ln in text.splitlines() if "리스트 보유" in ln) == 1
+    assert len(text) <= dg.LEN_BUDGET_QUIET[market], (len(text), dg.LEN_BUDGET_QUIET[market])
+    assert text.splitlines()[-1] == dg.DISCLAIMER
+    assert text.splitlines()[0].startswith(("*🇰🇷 10-12(월)", "*🇺🇸 10-12(월)"))
+
+
+@pytest.mark.parametrize("market", ["KR", "US"])
+def test_demoted_ledger_title_tag_parses_ok(market):
+    """P5: 제목 안 ' · 검증 미달' 이 굵게 엔티티를 깨지 않는다."""
+    inp = _inputs(market, "normal", True, False, True)
+    inp.ledger_summary = dict(inp.ledger_summary, status="demoted",
+                              blocks={"n": 6, "mean": -2.1, "t": -1.4, "blocks": []})
+    text = dg.render_with_budget(inp)
+    ents = assert_bold_only(text)
+    assert any(inner.endswith("스크리닝 후보 6 · 검증 미달") for _, inner in ents)
+    assert "🔻 4주 구간 6개" in text and len(text) <= dg.LEN_BUDGET_CHANGE
 
 
 def test_adversarial_name_is_lookalike_and_truncated():

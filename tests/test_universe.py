@@ -1659,3 +1659,33 @@ def test_kr_scores_one_off_with_nonpositive_three_year_avg_labels_suspect():
     sc = universe.calculate_kr_scores(fin, 5000.0, name="테스트")
     comp = _kr_comp(sc, "health", "흑자")
     assert comp[1] == 0 and comp[3] == "일회성 의심"
+
+
+# ---------------- S3P-MSG P2: ScanRow.basis (detail.basis → 다이제스트 범례) ----------------
+
+
+def test_scan_row_basis_from_detail(fresh_db):
+    """scan 이 detail JSON 의 basis 를 ScanRow.basis 로 — ttm / annual / FY2025 / 없음(None) / 깨진 JSON."""
+    import json as _json
+
+    conn = universe._conn()
+    cases = {"TTM": {"basis": "ttm", "flags": ["ey_outlier"]}, "ANN": {"basis": "annual", "flags": []},
+             "OLD": {"flags": ["fin_neutral"]}, "BAD": None}
+    for sym, detail in cases.items():
+        _seed_stock(conn, sym, "US", 80)
+        raw = "{not json" if sym == "BAD" else _json.dumps(detail)
+        conn.execute("UPDATE screened SET detail=? WHERE symbol=? AND market='US'", (raw, sym))
+    _seed_stock(conn, "005930", "KR", 85)
+    conn.execute("UPDATE screened SET detail=? WHERE symbol='005930'",
+                 (_json.dumps({"basis": "FY2025", "flags": ["holding"]}),))
+    conn.commit()
+    rows = {r.symbol: r for r in universe.scan(limit=10)}
+    assert rows["TTM"].basis == "ttm" and rows["TTM"].flags == ("ey_outlier",)
+    assert rows["ANN"].basis == "annual"
+    assert rows["OLD"].basis is None and rows["OLD"].flags == ("fin_neutral",)
+    assert rows["BAD"].basis is None and rows["BAD"].flags == ()
+    assert rows["005930"].basis == "FY2025" and rows["005930"].flags == ("holding",)
+    # 위치 인자 생성 호환 (끝에 기본값) · 기존 flags 헬퍼 동작 유지
+    assert universe.ScanRow("A", "US", "A Co", "Tech", 1.0, 2.0, 50, 50, 50, 1.0).basis is None
+    assert universe._flags_from_detail(_json.dumps({"flags": ["x"], "basis": "ttm"})) == ("x",)
+    assert universe._flags_basis_from_detail("[1, 2]") == ((), None)
