@@ -73,7 +73,8 @@ MAX_NEW_LINES = 6
 MAX_KEEP_LINES = 6
 MAX_ACTIVE_SHOWN = 3
 NEW_HIGH_EPS_PCT = 0.05          # 52주 고점比 이 이상이면 '52주 신고가'
-# '선정 후' 수익률 절대값이 이 이상이면 비정상(분할·데이터 오류 의심) — 표시·-10% 판정 제외, 소유자 DM 상세
+# '선정 후' 수익률 절대값이 이 이상이면 비정상(분할·데이터 오류 의심) — '선정 후' 표시 제외, 소유자 DM 상세.
+# 하락 쪽은 -10% 1회 알림을 끄지 않고 '확인 필요' 문구로 발화 (RVQ-3 — 진짜 급락일 수 있음)
 SINCE_ABS_MAX_PCT = 60.0
 # KR 아침 🌐 '경보 유지' 목록에서 뺄 자산 — 🇰🇷 한국 시장 섹션이 이미 '⚠️ 경보 중' 으로 표시
 
@@ -1187,11 +1188,14 @@ def assemble_daily_digest(market: str = "us", *, now: datetime | None = None,
             price_dates.append(m.asof)
         kind = "new" if sym in diff.new else ("base" if diff.first_run else "keep")
         since_pct = None
+        raw_since = None
         anomaly = False
         if kind != "new":
             since_pct, src = since_pct_for(m, entries.get(sym))
+            raw_since = since_pct
             if since_pct is not None and abs(since_pct) > SINCE_ABS_MAX_PCT:
-                # 분할 미반영·데이터 오류 의심 — 표시는 52주 위치로, -10% 판정 제외, 소유자에게만 (D2)
+                # 분할 미반영·데이터 오류 의심 — 표시는 52주 위치로, 소유자 상세 (D2). 단 하락 쪽은
+                # 진짜 급락(파산 위험·사기 폭로)일 수도 있어 침묵하지 않고 '확인 필요' 1회 알림 (RVQ-3)
                 anomaly = True
                 anomalies.append(sym)
                 owner_extra.append(f"선정 후 수익률 이상치 {sym} ({since_pct:+.1f}%, 진입가 출처 {src})")
@@ -1209,11 +1213,18 @@ def assemble_daily_digest(market: str = "us", *, now: datetime | None = None,
         views.append(PickView(row=p, kind=kind, metrics=m, since_pct=since_pct,
                               since_date=starts.get(sym), evidence=evidence))
         thr = settings.pick_dd_alert_pct
-        if (thr and not anomaly and since_pct is not None and since_pct <= thr and starts.get(sym)
-                and dd_state.get(sym) != starts.get(sym)):
-            dd10_new[sym] = starts[sym]
-            dd10_lines.append(f"{_name(p) or sym} 선정 후 {since_pct:+.1f}% — 보유 시 점검 (1회 알림)")
-            dd10_labels.append(f"{_name(p) or sym} {since_pct:+.0f}%")
+        if thr and starts.get(sym) and dd_state.get(sym) != starts.get(sym):
+            if not anomaly and since_pct is not None and since_pct <= thr:
+                dd10_new[sym] = starts[sym]
+                dd10_lines.append(f"{_name(p) or sym} 선정 후 {since_pct:+.1f}% — 보유 시 점검 (1회 알림)")
+                dd10_labels.append(f"{_name(p) or sym} {since_pct:+.0f}%")
+            elif anomaly and raw_since is not None and raw_since <= thr:
+                # 이상치 하락: 급락인지 분할·데이터 오류인지 판별 불가 → 같은 1회 알림 상태 키로 '확인 필요'.
+                # 가짜 급락의 비용은 안내 1줄, 진짜 급락을 놓치는 비용은 그보다 크다 (RVQ-3)
+                dd10_new[sym] = starts[sym]
+                dd10_lines.append(f"{_name(p) or sym} 선정 후 {raw_since:+.1f}% — 분할·데이터 오류 가능, "
+                                  "가격 확인 필요 (1회 알림)")
+                dd10_labels.append(f"{_name(p) or sym} {raw_since:+.0f}% (확인 필요)")
     if dd10_new and report is not None and report.pending_state is not None:
         report.pending_state.setdefault("pick_dd10", {}).setdefault(market, {}).update(dd10_new)
     if anomalies:

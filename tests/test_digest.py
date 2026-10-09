@@ -779,7 +779,8 @@ def test_assemble_held_day_verdict_is_neutral_even_if_list_differs(fresh_db, mon
 
 def test_assemble_since_pct_split_safe_and_anomaly_guard(fresh_db, monkeypatch):
     """D2 수용: 진입 후 2:1 분할 — 저장 entry_px 100(분할 전), 프레임 adj 는 50→55 → +10%, dd10 미발화.
-    |선정 후| > 60% 는 이상치 — 표시 52주 위치·dd10 미발화·소유자 상세."""
+    |선정 후| > 60% 는 이상치 — 표시 52주 위치·소유자 상세. 하락 이상치는 침묵 대신 '확인 필요'
+    1회 알림(RVQ-3: 진짜 급락일 수 있음) — 같은 시작일이면 재발화 없음."""
     rows = KR_ROWS[:2]
     prev = _prev(*[(r.symbol, r.total_score) for r in rows])
     split_m = dg.PriceMetrics(price=55.0, asof="2026-10-07", adj_last=55.0, vs_ma200_pct=-5.0,
@@ -797,18 +798,44 @@ def test_assemble_since_pct_split_safe_and_anomaly_guard(fresh_db, monkeypatch):
     lines = b.text.splitlines()
     assert any(ln.startswith("009970 ") and "선정 후 +10.0%" in ln for ln in lines)
     assert any(ln.startswith("007700 ") and "52주 고점比 -70%" in ln and "선정 후" not in ln for ln in lines)
-    assert b.dd10_new == {} and b.verdict.label == "없음"
+    assert b.dd10_new == {"007700": "2026-07-13"} and b.verdict.label == "리스크 점검 1"
+    assert "F&F홀딩스 -70% (확인 필요)" in b.verdict.reasons
+    assert "⚠️ F&F홀딩스 선정 후 -70.0% — 분할·데이터 오류 가능, 가격 확인 필요 (1회 알림)" in b.text
     assert any("선정 후 수익률 이상치 007700 (-70.0%" in x for x in b.owner_extra)
     # 고정 키 — 소유자 DM signature 에 들어가 처음 나타난 날 1회 알림 (구독자 상태 줄에는 안 나감)
     assert "선정 후 수익률 이상치" in b.health.optional_failures
     assert "이상치" not in (b.health.status_line(NOW_KR) or "")
     assert b.owner_extra is b.health.notes                     # D4: 상세는 health.notes 로 흘러간다
+    # 같은 진입(시작일)이 이미 알림 상태에 있으면 재발화 없음 (1회성)
+    _wire(monkeypatch, picks=rows, prev=prev,
+          starts={"009970": "2026-07-13", "007700": "2026-07-13"},
+          entries={"009970": dict(ent), "007700": dict(ent)},
+          metrics={"009970": split_m, "007700": bad_m}, dd_state={"KR": {"007700": "2026-07-13"}})
+    b1 = dg.assemble_daily_digest("kr", now=NOW_KR)
+    assert b1.dd10_new == {} and b1.verdict.label == "없음"
     # 창 밖 진입(프레임이 진입일을 못 덮음) → 저장 entry_px 그대로 (소급 위험은 채점기와 같은 폴백)
     old_ent = {"entry_px": 50.0, "entry_date": "2025-01-02", "first_sent_date": "2025-01-02"}
     _wire(monkeypatch, picks=rows[:1], prev=prev[:1], starts={"009970": "2025-01-02"},
           entries={"009970": old_ent}, metrics={"009970": split_m})
     b2 = dg.assemble_daily_digest("kr", now=NOW_KR)
     assert "선정 후 +10.0%" in b2.text
+
+
+def test_assemble_upside_anomaly_stays_silent(fresh_db, monkeypatch):
+    """RVQ-3 경계: 상승 쪽 이상치(+80%)는 알림 대상 아님 — 표시 제외·소유자 상세만."""
+    rows = KR_ROWS[:1]
+    prev = _prev(("009970", 92))
+    idx = pd.bdate_range("2026-07-13", periods=60)
+    up_m = dg.PriceMetrics(price=180.0, asof="2026-10-07", adj_last=180.0, vs_ma200_pct=5.0,
+                           dd_52w_pct=0.0, mdd_1y_pct=-5.0, vol_pct=30.0,
+                           adj_close=pd.Series([100.0] * 59 + [180.0], index=idx))
+    _wire(monkeypatch, picks=rows, prev=prev, starts={"009970": "2026-07-13"},
+          entries={"009970": {"entry_px": 100.0, "entry_date": "2026-07-13",
+                              "first_sent_date": "2026-07-13"}},
+          metrics={"009970": up_m})
+    b = dg.assemble_daily_digest("kr", now=NOW_KR)
+    assert b.dd10_new == {} and b.verdict.label == "없음"
+    assert any("선정 후 수익률 이상치 009970 (+80.0%" in x for x in b.owner_extra)
 
 
 def test_assemble_entry_must_match_inclusion_round_exactly(fresh_db, monkeypatch):
