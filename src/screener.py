@@ -370,7 +370,11 @@ def value_scorecard(quote: dict, metrics: dict, *, is_fin: bool | None = None) -
     fcf = _safe(metrics, "freeCashFlowYield")
 
     price = _safe(quote, "price", 1.0)
-    last_div = _safe(quote, "lastDividend") or _safe(quote, "lastAnnualDividend")
+    # 배당: quote 의 배당 필드 → 없으면 지표의 주당배당(dividendPerShare). FMP /stable/quote 실응답에는
+    # lastDividend·lastAnnualDividend 가 없어 수동 경로(screen_one·factor_scores)의 배당점수가 항상 0
+    # 이었다 (§4.10 #6). 유니버스 경로는 quote_like 에 같은 값을 이미 넣으므로 결과 불변.
+    last_div = (_safe(quote, "lastDividend") or _safe(quote, "lastAnnualDividend")
+                or _safe(metrics, "dividendPerShare"))
     dy = (last_div / max(price, 0.01)) * 100 if price else 0.0
 
     # 음수 배수(적자 EBITDA / 자본잠식 음수 PBR)는 '저평가' 아님 → 0점.
@@ -506,7 +510,8 @@ def screen_one(ticker: str) -> ScreenedStock | None:
     total = round((health + value) / 2)
 
     price = _safe(quote, "price", 0.0)
-    last_dividend = _safe(quote, "lastDividend") or _safe(quote, "lastAnnualDividend")
+    last_dividend = (_safe(quote, "lastDividend") or _safe(quote, "lastAnnualDividend")
+                     or _safe(metrics, "dividendPerShare"))
     dividend_pct = (last_dividend / max(price, 0.01)) * 100 if price else 0.0
 
     return {

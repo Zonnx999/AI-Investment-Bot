@@ -717,3 +717,24 @@ def test_manual_fin_flag_none_when_storage_init_fails(monkeypatch):
     row = screener.screen_one("X")
     assert row["health_score"] == calculate_health_score(GOOD)
     assert row["value_score"] == calculate_value_score(_FIN_QUOTE, GOOD)
+
+
+def test_value_dividend_falls_back_to_metrics_when_quote_lacks_it():
+    """FMP /stable/quote 실응답엔 배당 필드가 없음 — 지표의 dividendPerShare 로 같은 배당점수 (§4.10 #6).
+    유니버스 경로(quote_like 에 lastAnnualDividend)와 수동 경로(실제 quote)가 같은 점수가 된다."""
+    from src import screener
+
+    metrics = {"evToEBITDA": 8.0, "evToSales": 2.0, "priceToBookRatio": 1.5,
+               "earningsYield": 0.08, "freeCashFlowYield": 0.06, "dividendPerShare": 3.0}
+    real_quote = {"symbol": "X", "price": 100.0, "marketCap": 1e10, "name": "X Corp"}   # 배당 키 없음
+    shim = {"symbol": "X", "price": 100.0, "lastAnnualDividend": 3.0}
+    manual = screener.value_scorecard(real_quote, metrics, is_fin=False)
+    universe_like = screener.value_scorecard(shim, metrics, is_fin=False)
+    assert manual.total == universe_like.total
+    div = [c for c in manual.components if "배당" in c.label]
+    assert div and div[0].points > 0
+    # 둘 다 없으면 배당 0 (기존과 같음)
+    no_div = screener.value_scorecard(real_quote, {k: v for k, v in metrics.items() if k != "dividendPerShare"},
+                                      is_fin=False)
+    assert [c for c in no_div.components if "배당" in c.label][0].points == 0
+

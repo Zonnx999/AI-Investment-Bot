@@ -83,14 +83,14 @@ MARKETS = ("US", "KR")
 MARKET_TZ = {"US": ZoneInfo("America/New_York"), "KR": ZoneInfo("Asia/Seoul")}
 PRIMARY_BENCH = {"US": "SPY", "KR": "069500.KS"}
 KOSDAQ_BENCH = "229200.KS"      # KODEX 코스닥150 (Adj Close 존재 실조회)
-# 구독자 문구의 벤치 라벨 — KR 은 현재 리스트의 bench_symbol 로 동적(bench_label_for): 전부
+# 구독자 문구의 벤치 라벨 — KR 은 성과 기간 리스트들의 bench_symbol 로 동적(bench_label_for): 전부
 # 069500.KS 면 '코스피', 전부 229200.KS 면 '코스닥', 섞이면 '코스피·코스닥'. 아래는 정보가 없을 때 폴백.
 BENCH_LABEL = {"US": "SPY", "KR": "코스피·코스닥"}
 _KR_BENCH_LABEL = {PRIMARY_BENCH["KR"]: "코스피", KOSDAQ_BENCH: "코스닥"}
 
 
 def bench_label_for(market: str, bench_symbols: Iterable[str | None]) -> str:
-    """현재 리스트 종목들의 벤치 심볼 → 구독자용 라벨 (순수, RVM-06).
+    """성과 기간 리스트들의 벤치 심볼 → 구독자용 라벨 (순수, RVM-06).
 
     US 는 항상 'SPY'. KR 은 069500.KS 만 → '코스피', 229200.KS 만 → '코스닥', 둘 다 → '코스피·코스닥'.
     알 수 없는 심볼·빈 목록은 시장 폴백(BENCH_LABEL).
@@ -1167,15 +1167,15 @@ def _hstats(outs: Sequence[dict], h: int) -> dict:
             "mean_xs": float(np.mean(xs)) if xs else None}
 
 
-def _current_bench_symbols(cur: dict, vsends: Sequence[LedgerPick]) -> list[str]:
-    """현재 리스트의 벤치 심볼 — 채점 커서(bench_of)가 있으면 그것, 없으면 최신 발송 리스트에서."""
-    benches = [str(b) for b in (cur.get("bench_of") or {}).values() if b]
-    if benches:
-        return benches
-    if not vsends:
-        return []
-    last = max(s.sent_date for s in vsends)
-    return [s.bench_symbol for s in vsends if s.sent_date == last and s.bench_symbol]
+def _period_bench_symbols(cur: dict, vsends: Sequence[LedgerPick]) -> list[str]:
+    """성과 기간(현 규칙 버전)에 쓰인 벤치 심볼 전부 — 채점 커서(bench_of) + 그 기간 발송 리스트.
+
+    cum_bench 는 규칙 버전 시작 이후 모든 리스트의 그림자 벤치를 누적한 값이므로, 라벨도 현재
+    리스트만이 아니라 기간 전체의 합집합으로 정한다 (과거에 코스닥 종목이 있었으면 '코스피·코스닥').
+    """
+    benches = {str(b) for b in (cur.get("bench_of") or {}).values() if b}
+    benches.update(str(s.bench_symbol) for s in vsends if s.bench_symbol)
+    return sorted(benches)
 
 
 def summarize(
@@ -1248,7 +1248,7 @@ def summarize(
         "cum_port": cum_p, "cum_bench": cum_b, "excess_pp": cum_p - cum_b,
         "mdd_port": _mdd_pct(pr), "mdd_bench": _mdd_pct(br),
         "turnover_total": float(sum(float(r["turnover"]) for r in vrows)),
-        "bench_label": bench_label_for(m, _current_bench_symbols(cur, vsends)),
+        "bench_label": bench_label_for(m, _period_bench_symbols(cur, vsends)),
         "blocks": blocks, "min_blocks": MIN_BLOCKS,
         "status": status, "prev_status": prev_status, "status_changed": changed,
         "status_changed_at": status_changed_at,
@@ -1328,7 +1328,7 @@ def format_ledger_line(summary: dict | None, *, now: datetime | None = None) -> 
     """메시지 1줄. 게이트를 못 넘으면 None (호출부는 ``ledger_gate`` 의 푸터를 표시).
 
     예: ``📒 성적: 07-13 이후 이 리스트 보유 -0.7% · SPY +4.0% · 초과 -4.7%p
-    (10-07 종가, 비용 포함) · 소급 포함 · ⏳검증 전 3/6``
+    (10-07 종가, 비용 포함) · 소급 포함 · ⏳검증 전 (4주 구간 3/6)``
     """
     ok, _ = ledger_gate(summary, now=now)
     if not ok:
@@ -1349,7 +1349,8 @@ def format_weekly_block(summary: dict | None, *, now: datetime | None = None,
                         compact: bool = False) -> str | None:
     """월요일(현지) 확장 블록. 게이트 실패면 None.
 
-    기본(소유자 CLI 등): 3줄 — 머리줄 / '리스트 보유 … / 초과 … · 최대낙폭' / 구간·지평 적중.
+    기본: 3줄 — 머리줄 / '리스트 보유 … / 초과 … · 최대낙폭' / 구간·지평 적중. 현재 운영 호출부는
+    없음(다이제스트는 compact 만 사용) — 지평 적중 표시 규칙을 고정하는 테스트와 향후 상세 보기용.
     compact=True (다이제스트 월요일): 일일 성과 줄(format_ledger_line)을 **대체**하는 2줄 —
       1) 일일 줄과 같은 형식에 기간(since~종가일)·비용 상세를 머리에 접고 꼬리표·판정 상태까지 그대로
       2) '주간 성적표: 최대낙폭 · 4주 구간 초과 값들 · 지평 적중'

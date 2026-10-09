@@ -23,7 +23,9 @@ QUANT_BOT_DIGEST_WEIGHTS, 기본 0)로만 켠다 — 예전 --no-llm/--no-weight
 
 dry-run 의 쓰기 범위 (RVM-03): 상태(signals/health state)·원장(signal_ledger 등) 쓰기 0, 텔레그램 발송 0.
 단 유니버스 읽기 경로(universe._conn)가 screened 스키마를 보장하므로 **마이그레이션 전 DB 에는 멱등
-ALTER(컬럼 추가, storage.add_column_if_missing)** 를 수행할 수 있다 — 데이터 행은 바뀌지 않는다.
+스키마 보장(CREATE TABLE IF NOT EXISTS · 컬럼 추가 ALTER, storage.add_column_if_missing)** 이 일어날 수
+있고, 외부 조회 결과는 같은 DB 의 cache 테이블에 저장된다(@cached) — 상태·원장·헬스 데이터 행은 바뀌지
+않는다. Turso 모드에서는 이 스키마·캐시 쓰기도 원격 쓰기다.
 운영 레플리카가 아닌 사본으로 점검할 때는 QUANT_BOT_DB_PATH 로 사본 경로를 지정할 것.
 """
 
@@ -61,7 +63,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--market", choices=["us", "kr"], default="us",
                         help="다이제스트 시장 (us=미국 저녁, kr=한국 아침)")
     parser.add_argument("--dry-run", action="store_true",
-                        help="전송 없이 미리보기만 (state·원장·헬스 불변 — 단 스키마 컬럼 추가는 멱등 수행될 수 있음)")
+                        help="전송 없이 미리보기만 (state·원장·헬스 불변 — 단 스키마 보장·조회 캐시 저장은 일어날 수 있음)")
     parser.add_argument("--top", type=int, default=6, help="스크리닝 후보 상위 N개 (기본 6)")
     parser.add_argument("--no-sync", action="store_true",
                         help="구독 동기화(getUpdates) 건너뛰고 발송만")

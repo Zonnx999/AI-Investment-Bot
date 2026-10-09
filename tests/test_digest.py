@@ -1032,6 +1032,11 @@ def test_candidates_title_tagged_when_ledger_demoted_only():
     # 보류일 제목은 별도 형식 — 영향 없음
     assert dg.render_candidates("KR", _kr_views(), diff, hold_age=16, ledger_status="demoted")[0] == \
         "*📋 한국 스크리닝 후보* — 보류"
+    # 옛 규칙 버전의 요약(전환 당일 채점 전)이 demoted 여도 새 규칙 리스트 제목에는 붙이지 않는다
+    old_rule = dict(demoted, rule_version="v0")
+    assert "검증 미달" not in dg.render_digest(_kr_quiet_inputs(ledger_summary=old_rule, rule_version="v1"))
+    assert "검증 미달" in dg.render_digest(_kr_quiet_inputs(ledger_summary=dict(demoted, rule_version="v1"),
+                                                           rule_version="v1"))
 
 
 def test_decide_actions_unsynced_neutralizes_diff_with_priority():
@@ -1068,6 +1073,7 @@ def test_assemble_unsynced_replica_holds_list_verdict_but_records_ledger(fresh_d
     assert b.diff.changed and (b.verdict.n_buy, b.verdict.n_drop) == (0, 0)
     assert b.record_ledger and not b.hold
     assert "신규 1 · 탈락 1" in b.text                              # 후보 섹션의 diff 표시는 유지
+    assert "(직전 리스트 10-07 기준 · 동기화 지연)" in b.text          # 단 비교 기준이 낡았을 수 있음을 표시
     assert any(x.startswith("동기화 지연: 직전 리스트 기준일 10-07") for x in b.owner_extra)
     assert "일부 데이터 갱신 지연" in b.text                        # health storage_error 상태 줄
     assert_bold_only(b.text)

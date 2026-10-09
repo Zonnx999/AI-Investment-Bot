@@ -19,8 +19,9 @@ src/digest.py
     `assemble_daily_digest` 만, 쓰기(state 커밋·원장·헬스·sync)는 `send_daily_digest` 가
     **발송 성공(sent ≥ 1) 이후에만**. dry-run 은 assemble 만 호출하므로 상태·원장 쓰기 0 —
     단 유니버스 읽기 경로(`universe._conn`)가 screened 스키마를 보장하므로, 마이그레이션 전 DB
-    에는 멱등 ALTER(컬럼 추가, `storage.add_column_if_missing`)가 수행될 수 있다 (RVM-03).
-    원장 읽기(`ledger._rconn`)는 스키마를 만들지 않는다. 데이터 행은 어느 쪽도 바뀌지 않는다.
+    에는 멱등 스키마 보장(CREATE IF NOT EXISTS·컬럼 추가 ALTER)이 수행될 수 있고, 외부 조회는
+    같은 DB 의 cache 테이블에 저장된다(@cached) (RVM-03). 원장 읽기(`ledger._rconn`)는 스키마를
+    만들지 않는다. 상태·원장·헬스 데이터 행은 바뀌지 않는다.
   - Markdown 엔티티는 정적 제목·판정 헤더의 `*…*` 만. 동적 문자열(회사명·사유·알림 문구)은
     `utils.md_safe` 를 통과 (CLAUDE.md §4.10 #10). 이탤릭·백틱·링크 금지.
   - 판정은 예측이 아니라 사실의 변화(후보 리스트 diff·새 알림·선정 후 하락)에서만 나온다.
@@ -794,12 +795,14 @@ def render_candidates(market: str, views: Sequence[PickView], diff: ListDiff, *,
                       hold_age: int | None = None, list_since: str | None = None,
                       collapse_keep: bool = False, compact_new: bool = False,
                       weights_line: str | None = None, rule_note: str | None = None,
-                      ledger_status: str | None = None) -> list[str]:
+                      ledger_status: str | None = None, compare_note: str | None = None) -> list[str]:
     """📋 후보 섹션. hold_age 가 있으면 '후보 보류' 1줄로 대체 (점수 >14일).
 
     rule_note: 규칙 버전 전환 당일 1회 꼬리 줄 ('규칙 v1 기준으로 성과 집계 재시작', D3).
     ledger_status: 원장 판정 상태 — 'demoted'(성적 미달) 면 제목에 ' · 검증 미달' 을 붙인다
     (사용자 결정 #9 A안). 종목·줄은 그대로, 설명 줄은 추가하지 않는다 — 📒 줄의 🔻 와 짝.
+    compare_note: 비교 기준이 낡았을 수 있는 날(레플리카 동기화 지연)의 제목 꼬리 — 예
+    '직전 리스트 10-07 기준' (판정은 이미 중립화, 🆕/➖ 표시는 정보로 남기되 기준을 드러냄).
     """
     title = f"*📋 {_MARKET_KO.get(market, market)} {LABEL_CANDIDATES} {len(views)}"
     title += (LEDGER_DEMOTED_TITLE_TAG if ledger_status == "demoted" else "") + "*"
@@ -827,6 +830,8 @@ def render_candidates(market: str, views: Sequence[PickView], diff: ListDiff, *,
         head = f"{title} — " + " · ".join(bits)
     else:
         head = f"{title} — 변화 없음" + (f" ({_mmdd(list_since)} 이후 동일)" if list_since else "")
+    if compare_note:
+        head += f" ({md_safe(compare_note)})"
     lines = [head]
 
     for v in new_views[:MAX_NEW_LINES]:
@@ -959,6 +964,8 @@ class DigestInputs:
     predictions: list = field(default_factory=list)
     weights_line: str | None = None
     rule_note: str | None = None            # 규칙 버전 전환 당일 1회 (D3)
+    compare_note: str | None = None         # 동기화 지연일 후보 비교 기준 표기 (RVM-08)
+    rule_version: str | None = None         # 현재 규칙 버전 — 옛 버전 요약의 '검증 미달' 제목 차단용
 
 
 def render_digest(inp: DigestInputs, *, collapse_keep: bool = False, compact_new: bool = False,
@@ -978,11 +985,15 @@ def render_digest(inp: DigestInputs, *, collapse_keep: bool = False, compact_new
         out += ["", *render_changes_us(alerts, inp.dd10_lines)]
     # 원장 판정 상태(성적 미달 🔻)는 📒 줄이 구독자에게 보일 때만 제목에 — 설명 줄이 없는 꼬리표라
     # 📒 줄과 짝으로만 뜻이 통한다 (owner 모드면 📒 가 소유자 DM 으로 가므로 제목도 붙이지 않음)
-    ledger_status = ((inp.ledger_summary or {}).get("status") if inp.show_ledger else None)
+    # 옛 규칙 버전의 요약(전환 당일 채점 전)이 'demoted' 여도 새 규칙 리스트에는 붙이지 않는다
+    summ = inp.ledger_summary or {}
+    same_rule = inp.rule_version is None or summ.get("rule_version") in (None, inp.rule_version)
+    ledger_status = summ.get("status") if (inp.show_ledger and same_rule) else None
     out += ["", *render_candidates(m, inp.views, inp.diff, hold_age=inp.hold_age,
                                    list_since=inp.list_since, collapse_keep=collapse_keep,
                                    compact_new=compact_new, weights_line=inp.weights_line,
-                                   rule_note=inp.rule_note, ledger_status=ledger_status)]
+                                   rule_note=inp.rule_note, ledger_status=ledger_status,
+                                   compare_note=inp.compare_note)]
     footer = None
     if inp.show_ledger:
         lines, footer = render_ledger(inp.ledger_summary, now=inp.now,
@@ -1241,7 +1252,9 @@ def assemble_daily_digest(market: str = "us", *, now: datetime | None = None,
     # 어제 판정이 반복될 수 있어 매수/탈락 판정을 보류 (RVM-08). 새 알림은 signals 가 이미
     # unsynced 를 다루고, 원장 기록은 실제 보낸 목록 그대로.
     unsynced = _replica_unsynced(store)
+    compare_note = None
     if unsynced:
+        compare_note = (f"직전 리스트 {_mmdd(prev_date)} 기준" if prev_date else "직전 리스트 없음") + " · 동기화 지연"
         prev_txt = f"직전 리스트 기준일 {_mmdd(prev_date)}" if prev_date else "직전 리스트 없음(레플리카 기준)"
         owner_extra.append(f"동기화 지연: {prev_txt} — 후보 비교 보류 "
                            f"(init_sync={getattr(store, 'init_sync', None)})")
@@ -1345,7 +1358,8 @@ def assemble_daily_digest(market: str = "us", *, now: datetime | None = None,
         hold_age=hold_age, list_since=list_since, dd10_lines=dd10_lines, overnight_line=overnight,
         ledger_summary=summary, ledger_has_history=bool(prev_list), weekly=weekly,
         show_ledger=(settings.ledger_line == "on"), predictions=predictions,
-        weights_line=weights_line, rule_note=rule_note,
+        weights_line=weights_line, rule_note=rule_note, compare_note=compare_note,
+        rule_version=universe.RULE_VERSION,
     )
     text = render_with_budget(inp)
     if settings.ledger_line == "owner":

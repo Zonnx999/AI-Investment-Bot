@@ -188,8 +188,11 @@ def run() -> NoReturn:
             except Exception:  # noqa: BLE001 — poison 콜백이 봇을 크래시 루프시키지 않도록
                 logger.exception("콜백 처리 실패 (update_id=%s) — 건너뜀", u.get("update_id"))
 
-        # 1.5) 조회 명령이 있으면 처리 전에 최신 상태 pull (5분 rate-limit, 실패는 삼킴)
-        last_sync = _pull_before_query(store, updates, last_sync)
+        # 1.5) 조회 명령이 있으면 처리 전에 최신 상태 pull (5분 rate-limit, 실패는 삼킴).
+        #      초기 pull 타임아웃 강등(restart_at) 중에는 건너뜀 — 오프라인 파일이라 pull 대상이 없고
+        #      sync 가 타임아웃까지 루프를 붙잡아 워치독 여유만 줄인다 (재시작이 복구 수단).
+        if restart_at is None:
+            last_sync = _pull_before_query(store, updates, last_sync)
 
         # 2) 조회 명령 즉답 — /stock·/scan 은 active 구독자(또는 소유자)만, /help·/menu 는 공개
         for u in updates:

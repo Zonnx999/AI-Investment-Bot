@@ -290,6 +290,28 @@ def test_query_pull_is_rate_limited_to_300s(fresh_db, owner_set, monkeypatch):
     assert events.count("sync") == 1
 
 
+def test_query_pull_rate_limit_spans_batches(fresh_db, owner_set, monkeypatch):
+    """배치 끝 sync 도 타이머를 갱신 — 300초 안의 두 번째 조회 배치는 사전 pull 없음, 넘으면 다시."""
+    bot = _load_bot()
+    two = [[_msg_update(1, 1, "/scan us")], [_msg_update(2, 1, "/stock AAPL")]]
+    events = _run_batches_with_clock(bot, monkeypatch, two, [0.0, 1000.0, 1000.0, 1100.0, 1100.0])
+    assert events.count("sync") == 3                   # 사전 pull → 배치 끝 → (2번째: 배치 끝만)
+    bot = _load_bot()
+    two = [[_msg_update(1, 1, "/scan us")], [_msg_update(2, 1, "/stock AAPL")]]
+    events = _run_batches_with_clock(bot, monkeypatch, two, [0.0, 1000.0, 1000.0, 1400.0, 1400.0])
+    assert events.count("sync") == 4                   # 2번째 배치도 400초 경과 → 사전 pull
+
+
+def test_query_pull_skipped_while_degraded_at_start(fresh_db, owner_set, monkeypatch):
+    """초기 pull 타임아웃 강등(오프라인 파일)으로 떴으면 사전 pull 을 하지 않는다 — 재시작이 복구 수단."""
+    bot = _load_bot()
+    monkeypatch.setattr(storage_mod.get_storage(), "init_sync", "timeout")
+    events = _run_batches_with_clock(bot, monkeypatch, [[_msg_update(1, 1, "/scan us")]],
+                                     [0.0, 1000.0, 1000.0])
+    assert events.count("sync") == 1                   # 배치 끝 sync 만
+    assert events.index("respond") < events.index("sync")
+
+
 def test_non_query_commands_do_not_trigger_pull(fresh_db, owner_set, monkeypatch):
     bot = _load_bot()
     events = _run_batches_with_clock(bot, monkeypatch, [[_msg_update(1, 1, "/help")]],

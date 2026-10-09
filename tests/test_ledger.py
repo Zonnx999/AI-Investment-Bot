@@ -755,19 +755,20 @@ def test_bench_label_for_kr_is_dynamic_by_list_benches():
     assert "홈지수" not in ledger.BENCH_LABEL.values()
 
 
-def test_summarize_kr_bench_label_from_cursor_or_latest_sends(fresh_db):
+def test_summarize_kr_bench_label_covers_whole_period(fresh_db):
+    """라벨은 누적 벤치(cum_bench)가 섞은 지수 전부 — 현 규칙 버전 기간의 발송 리스트 + 커서 합집합."""
     perf = _perf([0.0] * 30, [0.0] * 30)
+    kospi_only = [_pick("2026-07-13", "005930", market="KR", yf="005930.KS"),
+                  _pick("2026-10-07", "005930", market="KR", yf="005930.KS")]
+    cur = {"rule_version": "v1", "list_key": "v1|005930", "bench_of": {"005930.KS": "069500.KS"}}
+    assert ledger.summarize("KR", perf, cur, {}, kospi_only, now=NOW)["bench_label"] == "코스피"
+    # 지금 리스트는 코스피만이어도 기간 중 코스닥 종목이 있었으면 누적 벤치에 229200 구간이 섞임
     sends = [_pick("2026-07-13", "005930", market="KR", yf="005930.KS"),
              _pick("2026-07-13", "035760", rank=2, market="KR", yf="035760.KQ"),
-             _pick("2026-10-07", "005930", market="KR", yf="005930.KS")]      # 최신 리스트: 코스피만
-    cur = {"rule_version": "v1", "list_key": "v1|005930",
-           "bench_of": {"005930.KS": "069500.KS"}}
-    s = ledger.summarize("KR", perf, cur, {}, sends, now=NOW)
-    assert s["bench_label"] == "코스피"
-    cur2 = {"rule_version": "v1", "bench_of": {"005930.KS": "069500.KS", "035760.KQ": "229200.KS"}}
-    assert ledger.summarize("KR", perf, cur2, {}, sends, now=NOW)["bench_label"] == "코스피·코스닥"
-    # 커서에 벤치가 없으면(채점 전) 최신 발송 리스트의 bench_symbol 로
-    assert ledger.summarize("KR", perf, {"rule_version": "v1"}, {}, sends, now=NOW)["bench_label"] == "코스피"
+             _pick("2026-10-07", "005930", market="KR", yf="005930.KS")]
+    assert ledger.summarize("KR", perf, cur, {}, sends, now=NOW)["bench_label"] == "코스피·코스닥"
+    # 커서에 벤치가 없어도(채점 전) 발송 리스트로
+    assert ledger.summarize("KR", perf, {"rule_version": "v1"}, {}, kospi_only, now=NOW)["bench_label"] == "코스피"
     assert ledger.summarize("US", perf, {"rule_version": "v1"}, {}, [], now=NOW)["bench_label"] == "SPY"
     line = ledger.format_ledger_line(_summary(market="KR", bench_label="코스닥"), now=NOW)
     assert "코스닥 +4.0%" in line and "홈지수" not in line
