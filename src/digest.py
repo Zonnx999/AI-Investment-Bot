@@ -682,7 +682,7 @@ def _new_lines(v: PickView, market: str) -> list[str]:
 def _legend(market: str) -> str:
     if market == "KR":
         return f"점수 = 재무점수({LABEL_VALUE}+{LABEL_HEALTH}, DART 연간, 가격요인 없음) · 가격 줄은 참고용 · 상세 /stock 코드"
-    return f"점수 = 재무점수({LABEL_VALUE}+{LABEL_HEALTH}, FMP 연간) · 가격 줄은 참고용, 점수 미반영 · 상세 /stock 티커"
+    return f"점수 = 재무점수({LABEL_VALUE}+{LABEL_HEALTH}, FMP 최근 4분기) · 가격 줄은 참고용, 점수 미반영 · 상세 /stock 티커"
 
 
 def render_candidates(market: str, views: Sequence[PickView], diff: ListDiff, *,
