@@ -12,8 +12,8 @@
 **중요: 이것은 챗봇이 아닙니다.** 결정론적 신호 생성 + 자동 알림 시스템입니다. 처음에는 LLM 챗봇으로 설계했지만 Phase 3 종료 시점에 사용자가 비용·결정성을 이유로 방향을 전환했습니다. **LLM 은 선택적 양념 레이어**(뉴스 센티먼트 분류, 일일 요약 한 줄)일 뿐 엔진이 아닙니다.
 
 - GitHub: https://github.com/Zonnx999/AI-Investment-Bot
-- 로컬 경로: `/Users/leom/Developer/AI-Investment_Bot/AI-Investment-Bot/`
-  - 부모 폴더는 언더스코어 `AI-Investment_Bot`, repo 는 하이픈 `AI-Investment-Bot` — 헷갈리지 말 것.
+- 로컬 경로(현재 머신): `/Users/deepblue/Developer/AI-Investment-Bot/`
+  - 이전 머신 경로(이력): `/Users/leom/Developer/AI-Investment_Bot/AI-Investment-Bot/` — 문서·메모에 남은 옛 경로는 이쪽.
 
 ---
 
@@ -33,21 +33,25 @@
 - **Python 3.12** (3.10+ 호환)
 - 가상환경: `.venv/` (프로젝트 루트)
 - 패키지 관리: `pyproject.toml` + `pip install -e ".[dev]"` (5단계에서 전환 완료. `requirements.txt` 는 호환용 포인터)
-- 핵심 라이브러리: `pandas`, `numpy`, `scipy`, `yfinance`, `fredapi`, `pycoingecko`, `requests`, `python-dotenv`, `anthropic`(선택), `streamlit`(선택)
+- 핵심 라이브러리: `pandas`, `numpy`, `scipy`, `yfinance`, `pycoingecko`, `requests`, `python-dotenv`, `anthropic`(선택), `streamlit`(선택)
+  - `fredapi` 는 코드에서 더 이상 import 하지 않음(FRED 는 REST 직접 호출). `pyproject.toml` 에 일부러 남겨 둠 — 전환 push 를 구 autopull 이 처리할 때 pyproject 변경이 있으면 서버 의존성이 무고정 업그레이드되기 때문. **다음 의존성 변경 때 제거**.
+  - 버전 고정: `requirements.lock`(CI·Actions 가 사용, pandas 3.x·yfinance 1.7 등). 서버 적용 방식은 `docs/DEPLOYMENT.md §6.1`.
 
 ### 데이터 소스
 
 | 소스 | 라이브러리 / 엔드포인트 | 키 필요 | 용도 |
 |---|---|---|---|
-| Yahoo Finance | `yfinance` | ❌ | 주가/ETF/선물/환율 |
-| FRED (St. Louis Fed) | `fredapi` | ✅ FRED_API_KEY | 거시 지표 |
+| Yahoo Finance | `yfinance` | ❌ | 주가/ETF/선물/환율. 한국 종목 접미사: KOSPI → `.KS`, KOSDAQ → `.KQ` (`universe.yf_symbol`). 원장 채점·수익률은 **Adj Close**(§4.10 17) |
+| FRED (St. Louis Fed) | REST `api.stlouisfed.org/fred/series/observations` (`src/http.py` 세션) | ✅ FRED_API_KEY | 거시 지표. 상태코드별 예외(401/403/429/5xx 구분 — 502 를 '시리즈 없음'으로 오분류하던 것 수정), 실패 시 최대 7일 stale-if-error(설정·ID 오류는 캐시로 가리지 않음), 예외 메시지에 키·URL 금지 |
 | CoinGecko | `pycoingecko` | ❌ | 암호화폐 |
-| FMP | `https://financialmodelingprep.com/stable/...?symbol=...` | ✅ FMP_API_KEY (유료) | 재무제표 시계열, 전 종목 발굴(company-screener) |
+| FMP | `https://financialmodelingprep.com/stable/...?symbol=...` | ✅ FMP_API_KEY (유료) | 재무제표 시계열, 전 종목 발굴(company-screener), **점수는 TTM**(`/stable/key-metrics-ttm` + `/stable/ratios-ttm`, 최근 4분기·현재 시총 기준; 불가 시 연간 폴백). bulk 엔드포인트(`key-metrics-ttm-bulk`)는 현재 플랜에서 402 |
 | 한국 무역 | FRED (OECD 출처) | ✅ FRED_API_KEY | 한국 수출·수입·무역수지 |
 | KRX (한국거래소) | `data-dbg.krx.co.kr/svc/apis/sto/*` (AUTH_KEY 헤더) | ✅ KRX_API_KEY | 한국 전 종목 일별매매·기본정보 (Phase 9a, API별 신청 필요) |
-| DART (전자공시) | `opendart.fss.or.kr/api/*` (crtfc_key 쿼리) | ✅ DART_API_KEY | 한국 재무제표 → ROE/PER/PBR (Phase 9b). corpCode 로 6자리↔8자리 매핑 |
+| DART (전자공시) | `opendart.fss.or.kr/api/*` (crtfc_key 쿼리) | ✅ DART_API_KEY | 한국 재무제표 → ROE/PER/PBR (Phase 9b). corpCode 로 6자리↔8자리 매핑. 재무는 `fnlttSinglAcntAll`(전체 계정): 연결(CFS) 먼저, status 013 이면 별도(OFS) 1회 재시도, `account_id` 로 **지배주주 귀속** 순이익·자본 추출(총계 기준이던 지주사 PER/PBR 왜곡 수정) |
 
 **FMP 중요 사실 (2026-05 기준):** 2025-08-31 이후 가입자는 `/stable/` 엔드포인트만 사용 가능. `/api/v3/` 는 레거시. URL 패턴은 `?symbol=AAPL&apikey=...` (티커가 쿼리 파라미터). `/stable/key-metrics` 는 P/E 를 직접 안 주고 `earningsYield` 형태로 줌 → 역수 취해 계산.
+
+**LLM 요약 (NVIDIA NIM):** MiniMax 모델(m2·m2.7)은 NIM 에서 퇴역(HTTP 410) → 일일 메시지에서 **기본 OFF**(`QUANT_BOT_LLM=1` 로만 켬). 기본 모델 id 는 `deepseek-ai/deepseek-v4.1-flash`(응답 23~37초). 404/410 은 `ModelRetiredError` 로 분류되어 헬스(소유자 DM)로 올라감. 서버 `.env` 에 `MINIMAX_MODEL` 이 남아 있으면 기본값을 덮어쓰니 켤 때 함께 확인.
 
 API 키는 모두 프로젝트 루트의 `.env` 파일에 저장 — gitignore 됨.
 
@@ -63,24 +67,32 @@ API 키는 모두 프로젝트 루트의 `.env` 파일에 저장 — gitignore �
 - **실전 예외 처리** — broad `except Exception` 금지. 단 layered 패턴의 최후 fallback 자리는 예외이며 `# noqa: BLE001` 주석 필수.
 - **logging 모듈 사용** — 진단/에러는 `logger.*`. `print()` 는 사용자 대시보드 출력(stdout deliverable)에만 사용.
 - **모듈 독립 테스트 가능** — 다른 모듈 없이도 import + 실행 가능해야 함.
-- **테스트 그린 유지** — 작업 후 `python -m pytest` (오프라인, ~2.5초) 통과 필수. 새 로직에는 테스트 추가 (네트워크 없는 테스트만 — 합성 데이터/로컬 서버).
+- **테스트 그린 유지** — 작업 후 `python -m pytest` (오프라인) 통과 필수. 2026-10-09 실측: **1,057 통과 / 3 스킵, 약 35초** (autopull 시나리오 테스트가 git/bash 를 실제로 돌려서 예전보다 느림). 새 로직에는 테스트 추가 (네트워크 없는 테스트만 — 합성 데이터/로컬 서버). CI(`.github/workflows/ci.yml`, 잡 이름 `pytest`)가 같은 스위트를 `requirements.lock` 환경에서 돌리고, 서버 autopull 은 이 잡이 녹색인 코드 커밋만 배포한다.
 
 ### 4.3 새 기능 짜기 전 — 코드 오딧 우선
 영향 받는 파일들 먼저 Read 하고, 영향도 분석 후 작업 시작. 추측 금지.
 
 ### 4.4 모듈 책임 분리 원칙
 - `src/http.py` — 표준 HTTP 세션 (retry/backoff, 타임아웃 강제, API 키 마스킹, 풀링)
-- `src/storage.py` — SQLite 캐시 (`@cached` 데코레이터, TTL, best-effort — 캐시 장애가 파이프라인을 막지 않음)
+- `src/storage.py` — SQLite/Turso 캐시 (`@cached` 데코레이터, TTL, best-effort — 캐시 장애가 파이프라인을 막지 않음) + state 테이블. 연결 상태 API: `init_sync`("local"|"ok"|"error"|"timeout"|"offline")·`degraded`·`require_remote(what)`·`put_state -> bool`·`sync -> str`
 - `src/data_fetcher.py` — **모든** 외부 API 호출 전담 (다른 모듈은 여기서만 데이터 받음). 전 함수 투명 캐싱, `QUANT_BOT_CACHE` 로 제어
 - `src/macro_analyzer.py` — 거시 조망, 자산 간 분석, 시장 국면
 - `src/risk_engine.py` — 종목/자산 리스크 계산
-- `src/signals.py` — 신호 엔진 (팩터 점수/스크리닝 룰/변화 알림). 판정 로직은 순수 함수, fetch+state 는 오케스트레이터만
-- `src/universe.py` — 전 종목 유니버스 DB (discover/enrich/scan). SQLite `screened` 테이블 복합 PK(symbol,market). 스캔은 오프라인 API 0콜
-- `src/predictors.py` — 선행지표 lead-lag 예측 (M2→BTC, 한국수출→반도체). 분석은 순수 함수, fetch 는 predict_* 만
+- `src/signals.py` — 신호 엔진 (팩터 점수/스크리닝 룰/변화 알림). 판정 로직은 순수 함수, fetch 는 오케스트레이터만. `generate_signal_report` 는 **상태를 쓰지 않고**, 발송 성공 후 `commit_signal_state(report)` 만 `signals/global:v2` 를 갱신
+- `src/universe.py` — 전 종목 유니버스 DB (discover/enrich/scan). SQLite `screened` 테이블 복합 PK(symbol,market). 스캔은 오프라인 API 0콜. US 보통주 분류기(`excluded`)·`pick_top`(섹터 상한 2·KR 지주사 상한 2)·`freshness`·`yf_symbol`·`RULE_VERSION`
+- `src/predictors.py` — 선행지표 lead-lag 예측 (M2→BTC, 한국수출→반도체). 분석은 순수 함수, fetch 는 predict_* 만. `PredictorSpec` 레지스트리(발표 지연 포함), 검증 안 된 `research_only` 는 운영 `PREDICTORS` 에서 제외
+- `src/ledger.py` — **신호 원장**: 발송한 후보 리스트 기록(append-only)·채점(`roll_forward`, 리스트 그대로 보유 vs 벤치)·유니버스 스냅샷·07-13 소급 백필·성과 줄/주간 블록 포매터. universe/digest 를 import 하지 않음(duck typing). CLI 는 `scripts/ledger.py`
+- `src/health.py` — 헬스 리포트(순수): 구독자 '⚙️ 상태' 줄(고정 어휘, Markdown 금지 문자 없음)·소유자 평문 DM·발송 보류 판정·signature(DM 중복 억제)
+- `src/backtest.py` — 검증 프로토콜(순수): 비용 포함 시뮬레이션, 무선견 선행지표 워크포워드 + 베이스라인 2종·부호검정·Holm 보정, 운영 모멘텀 top-N, 블록 부트스트랩·월별 순위 IC. 실행은 `scripts/check_backtest.py`
+- `src/findings.py` — `Finding` 공통 dataclass + **사용자 표시 라벨 상수 단일 출처**(`LABEL_VALUE`/`LABEL_HEALTH`/`LABEL_CANDIDATES`/`DISCLAIMER`, 크립토 라벨). 다이제스트·봇·대시보드·스크립트가 여기서만 import
+- `src/digest.py` — 일일 메시지 v2: 렌더러는 순수, `assemble_daily_digest`(읽기 전용) → `send_daily_digest`(발송 성공 후에만 상태·원장 커밋)
 - `src/exceptions.py` — 도메인 예외 계층
 - `src/logger.py` — 로깅 설정 (KST timestamp + offset)
 - `src/config.py` — 환경변수 로딩, Settings dataclass
-- `src/utils.py` — 2곳 이상에서 반복되는 순수 헬퍼만 (도메인 로직 금지)
+- `src/utils.py` — 2곳 이상에서 반복되는 순수 헬퍼만 (도메인 로직 금지). `md_safe`/`strip_md` 포함
+- `scripts/ledger.py` — 원장 CLI (`snapshot`/`backfill`/`score`/`report`/`ic`). `score` 는 다이제스트 유닛 ExecStartPost 가 호출
+- `scripts/notify_owner.py` — 소유자 평문 DM 1통(systemd `OnFailure` 및 autopull 알림용). DB/pandas 를 import 하지 않음, 항상 exit 0
+- `deploy/systemd/` — 서버 systemd 유닛·타이머 **원본**(저장소 관리). 서버에는 복사해 설치 (`docs/DEPLOYMENT.md §0`)
 
 ### 4.5 예외 처리 규칙
 - 외부 라이브러리 예외(`requests.HTTPError`, `ValueError` 등)는 라이브러리 경계에서 **도메인 예외로 변환** (`raise CustomError(...) from original_error` 로 원인 체인 보존)
@@ -186,11 +198,56 @@ Telegram legacy `Markdown` 은 **백슬래시 이스케이프(`\_`)를 지원 �
 로컬 `origin/main` ref 가 stale 해서 "이미 푸시됨"이라 잘못 단정한 적 있음. 상태는 `git rev-list --count origin/main..main`
 (+ `git fetch` 선행) 으로 확인하고 말할 것.
 
+**(13) 점수 체계는 하나 — 선정에 쓴 점수를 그대로 표시.**
+사고: CALM 이 DB 종합 92 로 1위 선정됐는데 메시지엔 라이브 4팩터 공식 **48**(모멘텀 0)로 표시 — 사용자는 "왜 48점이 1위?"를
+설명할 수 없다. → 후보 선정(`universe.pick_top`)·다이제스트·`/stock`·`/scan`·대시보드가 **DB `total_score` 와 같은 라벨(`findings` 상수)·
+같은 기준일**을 쓴다. 표면을 추가하면 `tests/test_surface_consistency.py` 로 정합을 고정.
+
+**(14) 검증 안 된 신호는 메시지에 싣지 않는다. 성과는 원장으로 잰다.**
+사고: '신뢰도 R² 0.62' 로 보낸 BTC 선행지표 예측이 무선견 워크포워드 검증(`check_backtest`)에서는 7개 전부 베이스라인 수준(통과 0/7)이었다.
+→ 예측·제안 비중은 기본 OFF(플래그로만 재활성화). 보낸 종목의 사후 성과는 신호 원장(`src/ledger.py`)이 기록·채점하고, 판정은 20거래일 블록 6개
+(≈6개월) 이후 월요일에만 바뀐다. 표본이 부족하면 '검증 전' 을 항상 함께 표시.
+
+**(15) best-effort 레이어도 실패를 헬스로 올린다 — 조용한 실패 금지.**
+사고: LLM 요약이 HTTP 410 으로 몇 달 동안 조용히 빠졌고, 대시보드 export 가 46회 연속 실패했고, 유니버스 재점수 타이머가 아예 없었는데 아무도 몰랐다.
+→ "실패해도 파이프라인은 계속" 은 유지하되, 실패는 `HealthReport`(상태 줄·소유자 DM)·종료코드·systemd `OnFailure` 로 반드시 보이게. 새 선택 기능을 넣으면
+실패 시 어느 경로로 사람에게 알려지는지 먼저 정할 것.
+
+**(16) 외부 모델·엔드포인트는 퇴역한다 — 기본 OFF + 분류.**
+NIM 의 MiniMax 모델 퇴역(HTTP 410)이 일반 오류로 뭉개져 원인 파악이 늦었다. 외부 모델 id 는 하드 의존 금지: 기본 OFF, 404/410 은 `ModelRetiredError`,
+`finish_reason=="length"`(잘린 응답)는 실패로 분류, 켜기 전 실호출 1회.
+
+**(17) yfinance Adj Close 는 배당·분할 때 과거 전체가 재조정된다.**
+원장 리뷰에서 발견: 저장해 둔 과거 절대가격을 새로 받은 가격으로 나누면 배당이 빠지고 분할일엔 가짜 −50% 수익이 영구 기록될 뻔했다.
+→ 수익률은 **같은 다운로드 안의 두 시점**끼리만 계산(원장 채점기, 다이제스트 '선정 후' 도 같은 프레임의 진입일 Adj Close 기준). 저장한 `entry_px` 는 프레임 창
+밖일 때의 폴백일 뿐.
+
+**(18) libsql 호출은 GIL 을 쥔 채 블로킹할 수 있다 — 프로세스 경계만 확실.**
+2026-07-06 노트북 Turso sync() 무한 행 사고. connect/sync/execute 가 GIL 을 쥔 채 네이티브 블로킹 → 스레드 워치독·시그널 같은 in-process 가드는 무력.
+쓰기도 원격 왕복. → 초기 pull 은 자식 프로세스 프로브(타임아웃 시 오프라인 파일로 강등), push 전 소켓 사전점검, 서버는 systemd 워치독
+(`Type=notify` + `WatchdogSec=300`, `TimeoutStartSec`)과 `QUANT_BOT_OFFLINE=1` 킬스위치. 새 DB 호출 경로를 만들면 "행이 걸리면 누가 죽이나" 를 먼저 답할 것.
+
+**(19) 병렬 작업의 계약은 실제 코드로 확인 — 문서상 시그니처 가정 금지.**
+병렬 구현을 병합할 때 `require_remote` 반환값(None/예외), `format_report` 인자, 원장 진입점이 서로 다르게 가정된 것이 병합 후에야 드러났다.
+→ 다른 WP 가 제공할 함수는 병합 후 `grep`/Read 로 시그니처·반환 계약을 확인하고, 둘을 잇는 계약 테스트를 둔다.
+
+**(20) 점수·필터·정렬 규칙을 바꾸면 `universe.RULE_VERSION` 을 올린다.**
+원장은 규칙 버전 단위로 성과를 끊어 판정한다(옛 규칙 성과와 섞지 않음). v0 = 2026-07-10 동결 규칙, v1 = 2026-10 수정 라운드. 올리면 전환일 메시지에
+'규칙 v1 로 후보 재구성' 이 나가고 종목별 '선정 후' 는 새 회차부터 다시 센다.
+
+**(21) dry-run·진단 스크립트는 상태를 쓰지 않는다. 상태 커밋은 발송 성공 후.**
+사고: 기존 `generate_signal_report` 가 알림 상태를 직접 갱신해, `--dry-run` 이나 `check_signals` 가 다음 실발송의 '변화' 를 먹어치웠다.
+→ 리포트 생성은 읽기 전용, 상태는 `commit_signal_state(report)` / `ledger.record_send` 가 발송 성공(sent ≥ 1) 뒤에만. dry-run 무쓰기는 테스트(해시 불변)로 고정.
+
+**(22) company-screener 에 보통주가 아닌 증권이 섞인다 — 이름만으론 못 거른다.**
+상장 후순위채(baby bond)·우선주가 US 후보 상위에 올랐다(MGR·AFGE 는 이름이 모회사 이름이라 이름 규칙이 못 잡음). → `universe.classify_us_securities`:
+이름 규칙 + 같은 모회사 '형제' 비교(가격·거래대금) + OTC·셸·거래대금 하한. 규칙이 못 잡는 영구우선주(예: STRC 류)는 알려진 한계 — `docs/CURRENT_STATE.md §2`.
+
 ---
 
 ## 5. 폴더 경로 표준
 
-- 로컬 작업 폴더: `/Users/leom/Developer/AI-Investment_Bot/AI-Investment-Bot/`
+- 로컬 작업 폴더: `/Users/deepblue/Developer/AI-Investment-Bot/` (이전 머신: `/Users/leom/Developer/AI-Investment_Bot/AI-Investment-Bot/`)
 - 가상환경: `.venv/`
 - 로그: `logs/quant_bot.log`
 - 데이터 캐시: `data/` (gitignore)
