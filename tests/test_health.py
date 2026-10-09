@@ -181,6 +181,25 @@ def test_owner_text_regime_full_unchanged():
     assert "국면 지표: 3/3 반영" in _healthy().owner_text(NOW, held=False)
 
 
+def test_notes_go_to_owner_text_but_not_signature_and_roundtrip():
+    """D4: notes 는 소유자 DM 상세 전용 — signature(중복 억제)에 안 들어가고 state 에는 저장된다."""
+    h = _healthy(optional_failures=["가격 조회 실패"], notes=["가격 조회 실패 3종목: A, B, C"])
+    assert h.signature(NOW) == ["optional:가격 조회 실패"]
+    h2 = _healthy(optional_failures=["가격 조회 실패"], notes=["가격 조회 실패 1종목: Z"])
+    assert h.signature(NOW) == h2.signature(NOW)                 # 상세가 바뀌어도 같은 문제
+    text = h.owner_text(NOW, held=False)
+    lines = text.splitlines()
+    assert "선택 기능 실패: 가격 조회 실패" in lines and "가격 조회 실패 3종목: A, B, C" in lines
+    assert lines[-1].startswith("조치: journalctl")
+    assert "3종목" not in (h.status_line(NOW) or "")             # 구독자 줄에는 상세 없음
+    back = HealthReport.from_state(json.loads(json.dumps(h.to_state(), ensure_ascii=False)))
+    assert back.notes == h.notes
+    # notes 키가 없는 옛 state 도 복원된다
+    old = h.to_state()
+    del old["notes"]
+    assert HealthReport.from_state(old).notes == []
+
+
 def test_from_state_missing_started_at_raises_value_error():
     d = _healthy().to_state()
     del d["started_at"]

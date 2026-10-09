@@ -46,6 +46,23 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_choice(name: str, default: str, allowed: tuple[str, ...]) -> str:
+    """환경변수 → 허용값 중 하나 (소문자 비교). 비어 있으면 default, 허용값 밖이면 default + 경고.
+
+    logger 는 지연 import — src.logger 는 config 를 쓰지 않으므로 순환 없음(모듈 상단 import 를
+    피하는 건 config 가 가장 먼저 로드되는 모듈이라 로깅 설정 시점을 뒤로 미루기 위함).
+    """
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    if raw in allowed:
+        return raw
+    from src.logger import get_logger
+
+    get_logger(__name__).warning("%s=%r 는 허용값 %s 밖 — %r 로 동작", name, raw, allowed, default)
+    return default
+
+
 @dataclass(frozen=True)
 class Settings:
     """API 키와 경로를 한 곳에 모아두는 설정 객체."""
@@ -85,8 +102,9 @@ class Settings:
     # hold 일 이상이면 후보 섹션을 '후보 보류' 1줄로 대체하고 원장에 기록하지 않음 (>14일 = 15)
     universe_warn_days: int = _env_int("QUANT_BOT_UNIVERSE_WARN_DAYS", 8)
     universe_hold_days: int = _env_int("QUANT_BOT_UNIVERSE_HOLD_DAYS", 15)
-    # 원장 성과 줄 표시: on(구독자 메시지) | owner(소유자 DM 에만) | off
-    ledger_line: str = os.getenv("QUANT_BOT_LEDGER_LINE", "on").strip().lower() or "on"
+    # 원장 성과 줄 표시: on(구독자 메시지) | owner(매 런 소유자 평문 DM 에 성과 줄) | off.
+    # 허용값 밖이면 'on' 폴백 + 경고 로그 (오타가 조용히 '성과 줄 없음' 이 되지 않게)
+    ledger_line: str = _env_choice("QUANT_BOT_LEDGER_LINE", "on", ("on", "owner", "off"))
     # '오늘 할 일: 없음' 이고 경고가 없는 날 무음 도착(disable_notification) — 기본 꺼짐(항상 소리)
     silent_quiet: bool = _env_flag("QUANT_BOT_DIGEST_SILENT_QUIET")
     # 후보 선정 후 하락 1회 알림 임계(%) — 0 이면 끔 (사용자 옵션 D: 기본 -10 / -15 / 끄기)
