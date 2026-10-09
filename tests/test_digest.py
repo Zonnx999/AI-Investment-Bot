@@ -156,8 +156,8 @@ GOLDEN_A_KR_QUIET = """\
 간밤 미국 S&P500 7,802 -0.2% · 나스닥 27,539 -0.2% · 10년물 5.28% · VIX 15.1
 
 *🌐 글로벌* (아침 1회)
-국면 🟢 위험선호 (Risk-on) (지표 3/3, 현황 설명용) — 금리차 +0.51%p(+1) · HY 3.03%(0) · 실업수당 z-1.4(+1)
-새 알림 없음 · 경보 유지 5: KOSPI -25% · KOSDAQ -27% · 장기국채 (20Y+) -12% · 외 2
+국면 🟢 위험선호 (Risk-on) · 지표 3/3, 현황 설명용 — 금리차 +0.51%p(+1) · HY 3.03%(0) · 실업수당 z-1.4(+1)
+새 알림 없음 · 경보 유지 3: 장기국채 (20Y+) -12% · 금 -24% · 비트코인 -33%
 
 *📋 한국 스크리닝 후보 6* — 변화 없음 (09-29 이후 동일)
 009970 영원무역홀딩스 92 · 170,900원 · 200일선 -10% · 선정 후 -11.5%
@@ -277,6 +277,22 @@ def test_decide_actions_first_run_is_baseline_not_buy():
     assert v.reasons[0] == "후보 목록 기준 수립 (첫 기록)"
 
 
+def test_decide_actions_held_day_neutralizes_list_diff_but_keeps_alerts():
+    """D1: 후보 보류일 — diff 가 있어도 매수/탈락/기준 수립 0, 새 알림은 그대로 '리스크 점검'."""
+    diff = dg.ListDiff(prev_date="2026-07-13", first_run=False, new=["X"],
+                       dropped=[dg.DroppedPick("Z", "z", "순위 밖")], kept=["A"])
+    v = dg.decide_actions(diff, [], held_age=91)
+    assert v.label == "없음" and v.n_buy == 0 and v.n_drop == 0
+    assert v.reasons == ["후보 보류 (점수 91일 경과)", "새 알림 없음"]
+    # 원장이 비어 있는(첫 기록) 보류일도 '기준 수립' 이 아니다
+    v0 = dg.decide_actions(dg.diff_lists([], KR_ROWS), [], held_age=16)
+    assert v0.label == "없음" and "기준 수립" not in " ".join(v0.reasons)
+    alerts = [Alert("warning", "drawdown", "금 -12%", key="dd:금:enter")]
+    v2 = dg.decide_actions(diff, alerts, warn_count=1, held_age=16)
+    assert v2.label == "리스크 점검 1"
+    assert v2.reasons == ["후보 보류 (점수 16일 경과)", "금 낙폭 경보", "⚠️ 데이터 점검 1건"]
+
+
 def test_diff_lists_reasons_filter_score_rank():
     prev = _prev(("009970", 92), ("MGR", 86), ("CALM", 92), ("GONE", 80))
     cur = [KR_ROWS[0], _row("NEW1", "신규", 95, 90, 90)]
@@ -316,9 +332,10 @@ def test_render_header_and_basis_formats():
     assert dg.render_header("KR", NOW_KR, v) == "*🇰🇷 10-08(목) 08:30 · 오늘 할 일: 없음* — 후보 변화 없음 · 새 알림 없음"
     assert dg.render_basis("US", NOW_US, "2026-10-07", "2026-10-05", stale_warn=False) == \
         "기준: 시세 10-07 종가 · 점수 10-05 (3일 전) · 개장 전"
-    # 시세가 2영업일 이상 전이면 휴장 표기, 점수 기준일 없으면 명시
+    # 시세가 2영업일 이상 전이면 '휴장 또는 지연' (휴장 단정 금지, D6), 점수 기준일 없으면 명시
     assert dg.render_basis("KR", NOW_KR, "2026-10-02", None, stale_warn=False) == \
-        "기준: 시세 10-02 종가 (휴장) · 점수 기준일 없음"
+        "기준: 시세 10-02 종가 (휴장 또는 지연) · 점수 기준일 없음"
+    assert "(휴장" not in dg.render_basis("KR", NOW_KR, "2026-10-07", None, stale_warn=False)
 
 
 def test_render_candidates_hold_replaces_section():
@@ -382,6 +399,20 @@ def test_render_global_pending_and_prev_label():
     assert dg.render_global(None) == ["*🌐 글로벌* (아침 1회)", "국면 조회 실패"]
 
 
+def test_render_global_label_no_double_parens_and_kr_assets_deduped():
+    """D5: 비유지 라벨은 유지 경로와 같은 ' · ' 구분(괄호 연속 금지), 경보 유지에서 KOSPI·KOSDAQ 제외."""
+    lines = dg.render_global(_report())
+    assert lines[1].startswith("국면 🟢 위험선호 (Risk-on) · 지표 3/3, 현황 설명용 — ")
+    assert ") (" not in lines[1]
+    assert lines[2] == "새 알림 없음 · 경보 유지 3: 장기국채 (20Y+) -12% · 금 -24% · 비트코인 -33%"
+    # KOSPI·KOSDAQ 만 경보 중이면 '경보 없음'
+    only_kr = dg.render_global(_report(active=["KOSPI -25% (임계 -12%)", "KOSDAQ -27% (임계 -15%)"]))
+    assert only_kr[2] == "새 알림 없음 · 경보 없음"
+    # 3개 초과는 '외 N' — 제외 후 개수 기준
+    many = dg.render_global(_report(active=_ACTIVE + ["원자재 -11% (임계 -10%)"]))
+    assert many[2].endswith("· 외 1") and "경보 유지 4:" in many[2]
+
+
 def test_render_kr_market_handles_missing_context():
     rep = _report(kr=False)
     lines = dg.render_kr_market(rep, None)
@@ -393,6 +424,13 @@ def test_render_ledger_variants(monkeypatch):
     assert lines == ["*📒 지난 후보 성과*", "첫 발송 — 성과 기록 시작"] and footer is None
     lines, footer = dg.render_ledger(None, now=NOW_KR, has_history=True)
     assert lines[1] == "채점 전 — 발송 후 자동 채점"
+    # D1: 후보 보류일 + 요약 없음 → '첫 발송'/'자동 채점' 대신 '원장 미기록' (기록이 실제로 안 되므로)
+    for hist in (False, True):
+        lines, footer = dg.render_ledger(None, now=NOW_KR, has_history=hist, held=True)
+        assert lines == ["*📒 지난 후보 성과*", "후보 보류 중 — 원장 미기록"] and footer is None
+    # 요약이 있으면 보류일에도 지난 성과는 그대로 보여 준다
+    lines, _ = dg.render_ledger(SUMMARY_KR, now=NOW_KR, has_history=True, held=True)
+    assert lines[1].startswith("성적: 07-13 이후")
     stale = dict(SUMMARY_KR, computed_at="2026-10-01T00:00:00+00:00")
     lines, footer = dg.render_ledger(stale, now=NOW_KR, has_history=True)
     assert lines == [] and footer.startswith("성적표 6일째 미갱신")
@@ -420,6 +458,64 @@ def test_price_metrics_from_frame_hand_calc():
     assert m.mdd_1y_pct == pytest.approx(-10.0)
     assert m.asof == idx[-1].strftime("%Y-%m-%d")
     assert dg.price_metrics_from_frame(pd.DataFrame()) is None
+    # D2: Adj Close 시리즈를 함께 돌려준다 (tz 없는 날짜 index)
+    assert m.adj_close is not None and len(m.adj_close) == 260 and m.adj_close.index.tz is None
+    assert float(m.adj_close.iloc[0]) == pytest.approx(98.0)
+    # tz-aware index 도 날짜로 정규화
+    df_tz = df.copy()
+    df_tz.index = idx.tz_localize("America/New_York")
+    m2 = dg.price_metrics_from_frame(df_tz)
+    assert m2.adj_close.index.tz is None and str(m2.adj_close.index[0])[:10] == "2025-10-01"
+
+
+# ----------------------------------------------------------------------
+# D2: 진입 기준가는 같은 프레임에서 — 분할 소급에도 '선정 후' 가 실제 수익률
+# ----------------------------------------------------------------------
+
+
+def _split_frame(entry="2026-07-13", periods=80, split_at=40, ratio=2.0):
+    """진입 후 ratio:1 분할 — yfinance 식으로 과거 Adj Close 가 전부 1/ratio 로 소급됨.
+    분할 전 '원래' 가격 100 → 분할 소급 후 50, 마지막 날은 실제 +10% (55)."""
+    idx = pd.bdate_range(entry, periods=periods)
+    raw = [100.0] * split_at + [110.0 / ratio] * (periods - split_at)   # 분할 후 거래 가격
+    adj = [v / ratio if i < split_at else v for i, v in enumerate(raw)]   # 소급 반영
+    return pd.Series(adj, index=idx)
+
+
+def test_entry_base_from_frame_rules():
+    adj = _split_frame()
+    assert dg.entry_base_from_frame(adj, "2026-07-13", None) == (50.0, "frame")
+    # entry_date 없으면 first_sent_date 당일 또는 이후 첫 거래일 (07-18 토요일 → 07-20 월요일)
+    assert dg.entry_base_from_frame(adj, None, "2026-07-18") == (50.0, "frame")
+    assert dg.entry_base_from_frame(adj, None, "2026-07-14") == (50.0, "frame")
+    # 프레임 첫 관측보다 앞선 발송일은 (하루 차이라도) 창 밖 — 프레임이 진입일을 덮는지 알 수 없음
+    assert dg.entry_base_from_frame(adj, None, "2026-07-11") == (None, "out_of_window")
+    # 프레임 첫 관측 이전 진입 → 저장 entry_px 폴백 대상
+    assert dg.entry_base_from_frame(adj, "2025-01-02", None) == (None, "out_of_window")
+    assert dg.entry_base_from_frame(None, "2026-07-13", None) == (None, "missing")
+    assert dg.entry_base_from_frame(adj, None, None) == (None, "missing")
+    assert dg.entry_base_from_frame(adj, "2030-01-01", None) == (None, "missing")
+
+
+def test_since_pct_uses_frame_entry_after_split_not_stored_px():
+    """저장 entry_px 는 분할 전 100, 오늘 adj 55 → 순진 계산 -45%. 프레임 기준은 +10%."""
+    adj = _split_frame()
+    m = dg.PriceMetrics(price=55.0, asof="2026-10-30", adj_last=55.0, vs_ma200_pct=None,
+                        dd_52w_pct=None, mdd_1y_pct=None, vol_pct=None, adj_close=adj)
+    ent = {"entry_px": 100.0, "entry_date": "2026-07-13", "first_sent_date": "2026-07-13"}
+    since, src = dg.since_pct_for(m, ent)
+    assert src == "frame" and since == pytest.approx(10.0)
+    # 창 밖 진입 → 저장 entry_px
+    ent_old = {"entry_px": 50.0, "entry_date": "2025-01-02", "first_sent_date": "2025-01-02"}
+    since2, src2 = dg.since_pct_for(m, ent_old)
+    assert src2 == "stored" and since2 == pytest.approx(10.0)
+    # 시리즈 없음(구 테스트 스텁) → 저장 entry_px
+    m_no = dg.PriceMetrics(price=55.0, asof="x", adj_last=55.0, vs_ma200_pct=None, dd_52w_pct=None,
+                           mdd_1y_pct=None, vol_pct=None)
+    assert dg.since_pct_for(m_no, {"entry_px": 50.0}) == (pytest.approx(10.0), "stored")
+    assert dg.since_pct_for(m_no, {"entry_px": None}) == (None, "none")
+    assert dg.since_pct_for(None, ent) == (None, "none")
+    assert dg.since_pct_for(m, None) == (None, "none")
 
 
 def test_predictions_and_weights_only_behind_flags():
@@ -491,7 +587,16 @@ def _wire(monkeypatch, *, picks, prev=(), starts=None, entries=None, summary=Non
     monkeypatch.setattr(ledger_mod, "last_sent_list",
                         lambda m: ("2026-10-07" if prev else None, list(prev)))
     monkeypatch.setattr(ledger_mod, "inclusion_start", lambda m, syms=None: dict(starts or {}))
-    monkeypatch.setattr(ledger_mod, "entry_prices", lambda m: dict(entries or {}))
+    # 실제 entry_prices(market, starts) 는 (symbol, starts[symbol]) 정확 일치만 돌려준다 (D3) —
+    # 스텁은 entries 에 first_sent_date 가 있으면 같은 규칙을 흉내 내고, 없으면 그대로.
+    def _entries(m, st=None):
+        out = {}
+        for s, e in (entries or {}).items():
+            if st is not None and e.get("first_sent_date") and st.get(s) != e["first_sent_date"]:
+                continue
+            out[s] = e
+        return out
+    monkeypatch.setattr(ledger_mod, "entry_prices", _entries)
     monkeypatch.setattr(ledger_mod, "load_summary", lambda m: summary)
     mt = metrics or {}
     monkeypatch.setattr(dg, "_price_metrics",
@@ -548,6 +653,129 @@ def test_assemble_stale_scores_warn_and_hold(fresh_db, monkeypatch):
     b2 = dg.assemble_daily_digest("kr", now=NOW_KR)
     assert "후보 보류 — 점수 15일 경과, 재점수 필요" in b2.text
     assert b2.record_ledger is False and not b2.hold          # 보류 섹션이지만 발송은 함
+
+
+def test_assemble_held_day_verdict_is_neutral_even_if_list_differs(fresh_db, monkeypatch):
+    """D1 수용: 점수 16일 전 + 직전 원장과 다른 picks → 첫 줄에 매수/탈락/기준 수립 없음, '후보 보류' 포함."""
+    rows16 = [ScanRow(**{**r.__dict__, "fund_asof": "2026-09-22"}) for r in KR_ROWS]
+    prev = _prev(("OLD1", 95), ("OLD2", 94), *[(r.symbol, r.total_score) for r in KR_ROWS[2:]])
+    _wire(monkeypatch, picks=rows16, prev=prev,
+          fresh={"fund_asof": "2026-09-22", "price_asof": None, "age_days": 16})
+    b = dg.assemble_daily_digest("kr", now=NOW_KR)
+    first = b.text.splitlines()[0]
+    assert "오늘 할 일: 없음" in first and "후보 보류 (점수 16일 경과)" in first
+    assert "매수 검토" not in first and "탈락" not in first and "기준 수립" not in first
+    assert b.diff.changed and b.verdict.n_buy == 0 and b.verdict.n_drop == 0   # diff 는 남되 판정만 중립
+    assert b.record_ledger is False and b.dd10_new == {}
+    # 원장이 빈 보류일: '첫 발송 — 성과 기록 시작' 대신 '후보 보류 중 — 원장 미기록'
+    _wire(monkeypatch, picks=rows16, fresh={"fund_asof": "2026-09-22", "price_asof": None, "age_days": 16})
+    b0 = dg.assemble_daily_digest("kr", now=NOW_KR)
+    assert "첫 발송" not in b0.text and "후보 보류 중 — 원장 미기록" in b0.text
+    assert "기준 수립" not in b0.text.splitlines()[0]
+    # 보류일에도 새 알림은 '리스크 점검' 으로 남는다
+    alert = Alert("warning", "drawdown", "금 52주 고점 대비 -12%", key="dd:금:enter")
+    _wire(monkeypatch, picks=rows16, prev=prev, report=_report(alerts=[alert]),
+          fresh={"fund_asof": "2026-09-22", "price_asof": None, "age_days": 16})
+    b2 = dg.assemble_daily_digest("kr", now=NOW_KR)
+    assert "오늘 할 일: 리스크 점검 1" in b2.text.splitlines()[0]
+    assert "후보 보류 (점수 16일 경과)" in b2.text.splitlines()[0]
+    assert_bold_only(b2.text)
+
+
+def test_assemble_since_pct_split_safe_and_anomaly_guard(fresh_db, monkeypatch):
+    """D2 수용: 진입 후 2:1 분할 — 저장 entry_px 100(분할 전), 프레임 adj 는 50→55 → +10%, dd10 미발화.
+    |선정 후| > 60% 는 이상치 — 표시 52주 위치·dd10 미발화·소유자 상세."""
+    rows = KR_ROWS[:2]
+    prev = _prev(*[(r.symbol, r.total_score) for r in rows])
+    split_m = dg.PriceMetrics(price=55.0, asof="2026-10-07", adj_last=55.0, vs_ma200_pct=-5.0,
+                              dd_52w_pct=-11.0, mdd_1y_pct=-11.0, vol_pct=30.0, adj_close=_split_frame())
+    bad_idx = pd.bdate_range("2026-07-13", periods=60)
+    bad_m = dg.PriceMetrics(price=30.0, asof="2026-10-07", adj_last=30.0, vs_ma200_pct=-5.0,
+                            dd_52w_pct=-70.0, mdd_1y_pct=-70.0, vol_pct=30.0,
+                            adj_close=pd.Series([100.0] * 59 + [30.0], index=bad_idx))
+    ent = {"entry_px": 100.0, "entry_date": "2026-07-13", "first_sent_date": "2026-07-13"}
+    _wire(monkeypatch, picks=rows, prev=prev,
+          starts={"009970": "2026-07-13", "007700": "2026-07-13"},
+          entries={"009970": dict(ent), "007700": dict(ent)},
+          metrics={"009970": split_m, "007700": bad_m})
+    b = dg.assemble_daily_digest("kr", now=NOW_KR)
+    lines = b.text.splitlines()
+    assert any(ln.startswith("009970 ") and "선정 후 +10.0%" in ln for ln in lines)
+    assert any(ln.startswith("007700 ") and "52주 고점比 -70%" in ln and "선정 후" not in ln for ln in lines)
+    assert b.dd10_new == {} and b.verdict.label == "없음"
+    assert any("선정 후 수익률 이상치 007700 (-70.0%" in x for x in b.owner_extra)
+    assert b.owner_extra is b.health.notes                     # D4: 상세는 health.notes 로 흘러간다
+    # 창 밖 진입(프레임이 진입일을 못 덮음) → 저장 entry_px 그대로 (소급 위험은 채점기와 같은 폴백)
+    old_ent = {"entry_px": 50.0, "entry_date": "2025-01-02", "first_sent_date": "2025-01-02"}
+    _wire(monkeypatch, picks=rows[:1], prev=prev[:1], starts={"009970": "2025-01-02"},
+          entries={"009970": old_ent}, metrics={"009970": split_m})
+    b2 = dg.assemble_daily_digest("kr", now=NOW_KR)
+    assert "선정 후 +10.0%" in b2.text
+
+
+def test_assemble_entry_must_match_inclusion_round_exactly(fresh_db, monkeypatch):
+    """D3 수용: v0 백필(07-13) 진입가만 있고 현재 회차(v1, 10-08) 결과가 없으면 since_pct None·dd10 미발화.
+    v1 결과가 생기면 v1 진입가 기준."""
+    rows = KR_ROWS[:1]
+    prev = _prev(("009970", 92))                                # v1 live 리스트 (10-07)
+    v0_entry = {"entry_px": 100.0, "entry_date": "2026-07-13", "first_sent_date": "2026-07-13"}
+    m = _metrics(78.0, -5, -22, -22, 30, adj=78.0)             # v0 기준이면 -22% → 가짜 dd10
+    _wire(monkeypatch, picks=rows, prev=prev, starts={"009970": "2026-10-08"},
+          entries={"009970": v0_entry}, metrics={"009970": m})
+    b = dg.assemble_daily_digest("kr", now=NOW_KR)
+    assert "선정 후" not in b.text and "52주 고점比 -22%" in b.text
+    assert b.dd10_new == {} and b.verdict.label == "없음"
+    v1_entry = {"entry_px": 80.0, "entry_date": "2026-10-08", "first_sent_date": "2026-10-08"}
+    _wire(monkeypatch, picks=rows, prev=prev, starts={"009970": "2026-10-08"},
+          entries={"009970": v1_entry}, metrics={"009970": m})
+    b2 = dg.assemble_daily_digest("kr", now=NOW_KR)
+    assert "선정 후 -2.5%" in b2.text and b2.dd10_new == {}
+
+
+def test_assemble_rule_version_transition_day_notes_restart(fresh_db, monkeypatch):
+    """D3: 직전 리스트가 옛 규칙(v0)이면 그날 1회 '규칙 v1 기준으로 성과 집계 재시작' + 옛 진입가 미사용."""
+    from src.ledger import LedgerPick
+
+    rows = KR_ROWS[:2]
+    prev = [LedgerPick("2026-07-13", "KR", i + 1, r.symbol, r.symbol, "069500.KS", "v0", "reconstructed",
+                       name=r.name, total_score=r.total_score) for i, r in enumerate(rows)]
+    ent = {"entry_px": 100.0, "entry_date": "2026-07-13", "first_sent_date": "2026-07-13"}
+    _wire(monkeypatch, picks=rows, prev=prev, starts={r.symbol: "2026-07-13" for r in rows},
+          entries={r.symbol: dict(ent) for r in rows},
+          metrics={r.symbol: _metrics(70.0, -5, -30, -30, 30, adj=70.0) for r in rows})
+    b = dg.assemble_daily_digest("kr", now=NOW_KR)
+    assert "규칙 v1 기준으로 성과 집계 재시작" in b.text
+    assert "선정 후" not in b.text and b.dd10_new == {}
+    assert any("규칙 버전 전환 v0 → v1" in x for x in b.owner_extra)
+    assert_bold_only(b.text)
+    # 직전 리스트가 현재 규칙이면 표기 없음
+    _wire(monkeypatch, picks=rows, prev=_prev(*[(r.symbol, r.total_score) for r in rows]))
+    assert "성과 집계 재시작" not in dg.assemble_daily_digest("kr", now=NOW_KR).text
+
+
+def test_assemble_price_failure_uses_fixed_key_and_notes(fresh_db, monkeypatch):
+    """D4: optional_failures 는 고정 키('가격 조회 실패'), 개수·종목은 notes — signature 가 매일 안 바뀐다."""
+    _wire(monkeypatch, picks=KR_ROWS)
+    monkeypatch.setattr(dg, "_price_metrics", lambda sym, market, ex, sec: None if sym in ("009970", "007700")
+                        else _metrics(100.0, 1.0, -5.0, -10.0, 20.0))
+    b = dg.assemble_daily_digest("kr", now=NOW_KR)
+    assert b.health.optional_failures == ["가격 조회 실패"]
+    assert "가격 조회 실패 2종목: 009970, 007700" in b.health.notes
+    assert b.health.signature(NOW_KR) == ["optional:가격 조회 실패"]
+    assert "가격 조회 실패" in b.text and "2종목" not in b.text
+
+
+def test_assemble_owner_ledger_line_mode_puts_line_in_notes(fresh_db, monkeypatch):
+    """D7: QUANT_BOT_LEDGER_LINE=owner — 구독자 본문에는 📒 없음, 소유자 상세에 성과 줄."""
+    prev = _prev(*[(r.symbol, r.total_score) for r in KR_ROWS])
+    _wire(monkeypatch, picks=KR_ROWS, prev=prev, summary=SUMMARY_KR)
+    object.__setattr__(settings, "ledger_line", "owner")
+    try:
+        b = dg.assemble_daily_digest("kr", now=NOW_KR)
+    finally:
+        object.__setattr__(settings, "ledger_line", "on")
+    assert "*📒 지난 후보 성과*" not in b.text
+    assert any(x.startswith("성과: 성적: 07-13 이후") for x in b.health.notes)
 
 
 def test_assemble_hold_when_no_picks_or_degraded(fresh_db, monkeypatch):

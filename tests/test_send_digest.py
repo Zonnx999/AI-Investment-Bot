@@ -190,7 +190,38 @@ def test_send_ledger_failure_and_md_fallback_go_to_owner_dm(fresh_db, owner, mon
     dg.send_daily_digest("kr", now=NOW)
     dm = calls.owner_dm[-1]
     assert "선택 기능 실패: 원장 기록" in dm and "Markdown 평문 폴백 2회" in dm
-    assert "원장: 기록 실패" in dm
+    assert "원장: 기록 실패" in dm and "판정: 없음" in dm
+    # D4: 폴백은 put_state 전에 고정 키로 반영 — 저장 signature == DM 판정 signature
+    saved = storage_mod.get_storage().get_state("health", "digest:KR")
+    assert saved["signature"] == ["optional:Markdown 평문 폴백", "optional:원장 기록"]
+    assert "Markdown 평문 폴백 2회" in saved["notes"] and "선택 기능 실패: Markdown 평문 폴백" in dm
+
+
+def test_send_no_fallback_line_when_zero(fresh_db, owner, monkeypatch):
+    """D4(a): fb=0 이면 '평문 폴백' 문구가 DM·signature 어디에도 없다."""
+    calls = _wire_send(monkeypatch, _bundle(), ledger_ok=False)      # 원장 실패 → DM 발생
+    dg.send_daily_digest("kr", now=NOW)
+    assert calls.owner_dm and "평문 폴백" not in calls.owner_dm[-1]
+    assert storage_mod.get_storage().get_state("health", "digest:KR")["signature"] == ["optional:원장 기록"]
+
+
+def test_send_owner_ledger_mode_dms_every_run(fresh_db, owner, monkeypatch):
+    """D7: QUANT_BOT_LEDGER_LINE=owner — signature 가 같아도 매 런 소유자 DM (성과 줄 전달 경로)."""
+    object.__setattr__(settings, "ledger_line", "owner")
+    try:
+        b = _bundle()
+        b.health.notes.append("성과: 성적: 07-13 이후 이 리스트 보유 -2.4%")
+        calls = _wire_send(monkeypatch, b)
+        dg.send_daily_digest("kr", now=NOW)
+        assert len(calls.owner_dm) == 1 and "성과: 성적: 07-13 이후" in calls.owner_dm[0]
+        calls2 = _wire_send(monkeypatch, _bundle())
+        dg.send_daily_digest("kr", now=NOW)
+        assert len(calls2.owner_dm) == 1                 # 정상·변화 없음이어도 보낸다
+    finally:
+        object.__setattr__(settings, "ledger_line", "on")
+    calls3 = _wire_send(monkeypatch, _bundle())
+    dg.send_daily_digest("kr", now=NOW)
+    assert calls3.owner_dm == []                         # on 모드: 하트비트는 다이제스트 자체
 
 
 def test_send_owner_dm_once_per_signature_change(fresh_db, owner, monkeypatch):

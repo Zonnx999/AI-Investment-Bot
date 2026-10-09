@@ -46,7 +46,7 @@ import json
 import math
 import re
 import sys
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -245,8 +245,11 @@ def _rconn():
 
 def _yf_symbol_fallback(symbol: str, market: str, exchange: str | None = None,
                         sector: str | None = "") -> str | None:
-    """yfinance 심볼 — **universe.yf_symbol 과 동일 규칙** (병합 후 하나로 합칠 예정).
+    """yfinance 심볼 — universe.yf_symbol 이 없을 때(오프라인·순환 import 회피)의 대체 규칙.
 
+    universe.yf_symbol 과 접미사 규칙은 같지만 **KR 비표준 코드를 None 으로 거르는 가드**가
+    추가돼 있다 (universe 쪽은 항상 문자열을 돌려줌). 이 가드는 _pick_yf_symbol 이 전달받은
+    yf_symbol_fn 과 무관하게 공통 적용한다.
     KR: 6자리 영숫자 코드(005930, 0126Z0)가 아니면 **None** (US ADR 이 섞인 행 — 'KT.KQ'
     같은 존재하지 않는 심볼이 영구 no_price 가 되는 것 방지). exchange 가 있으면
     KOSDAQ→.KQ / 그 외 .KS. exchange 가 None 이면 sector(KRX 소속부)가 비어있지 않으면
@@ -356,11 +359,17 @@ class LedgerPick:
 
 def _pick_yf_symbol(p: Any, market: str,
                     yf_symbol_fn: Callable[..., str | None] | None) -> str | None:
-    """픽의 yfinance 심볼. 매핑 불가(KR 비표준 코드 등)면 None — 호출부가 처리한다."""
+    """픽의 yfinance 심볼. 매핑 불가(KR 비표준 코드 등)면 None — 호출부가 처리한다.
+
+    KR 비표준 코드(6자리 영숫자 아님) 가드는 ``yf_symbol_fn`` 이 무엇이든 공통 적용 —
+    universe.yf_symbol 은 'KT' 에도 'KT.KS' 를 돌려주므로 호출부 함수에 맡기면 영구 no_price 행이 생긴다.
+    """
     explicit = getattr(p, "yf_symbol", None)
     if isinstance(explicit, str) and explicit:
         return explicit
     sym = str(getattr(p, "symbol"))
+    if market.upper() == "KR" and not _KR_CODE_RE.fullmatch(sym):
+        return None
     exchange = getattr(p, "exchange", None)
     sector = getattr(p, "sector", "") or ""
     if yf_symbol_fn is not None:
@@ -538,6 +547,19 @@ def _put_run(market: str, sent_date: str, payload: dict) -> None:
 # ----------------------------------------------------------------------
 
 
+def _is_missing_table(exc: BaseException) -> bool:
+    """'no such table' — 원장 스키마가 아직 없는 정상 상태(첫 발송 전·dry-run). 스키마를 만들지 않는다."""
+    return "no such table" in str(exc).lower()
+
+
+def _log_read_failure(what: str, market: str, exc: BaseException) -> None:
+    """읽기 실패 로그 — 테이블 없음은 DEBUG(조용히 빈 값), 그 외 DB 오류는 WARNING+traceback."""
+    if _is_missing_table(exc):
+        logger.debug("%s (%s): 원장 테이블 없음 — 빈 결과", what, market)
+    else:
+        logger.warning("%s (%s) — 빈 결과", what, market, exc_info=True)
+
+
 def load_sends(market: str) -> list[LedgerPick]:
     """시장의 원장 전체 (sent_date, rank 순). DB 오류면 빈 리스트."""
     try:
@@ -546,8 +568,8 @@ def load_sends(market: str) -> list[LedgerPick]:
             "source, name, total_score FROM signal_ledger WHERE market=? "
             "ORDER BY sent_date, rank", (market.upper(),),
         ).fetchall()
-    except (StorageError, *DB_ERRORS):
-        logger.warning("원장 읽기 실패 (%s) — 빈 결과", market, exc_info=True)
+    except (StorageError, *DB_ERRORS) as e:
+        _log_read_failure("원장 읽기 실패", market, e)
         return []
     return [LedgerPick(*r) for r in rows]
 
@@ -559,8 +581,8 @@ def load_perf(market: str) -> list[dict]:
             f"SELECT {', '.join(_PERF_COLS)} FROM ledger_perf WHERE market=? ORDER BY date",
             (market.upper(),),
         ).fetchall()
-    except (StorageError, *DB_ERRORS):
-        logger.warning("원장 성과 읽기 실패 (%s) — 빈 결과", market, exc_info=True)
+    except (StorageError, *DB_ERRORS) as e:
+        _log_read_failure("원장 성과 읽기 실패", market, e)
         return []
     return [dict(zip(_PERF_COLS, r)) for r in rows]
 
@@ -572,8 +594,8 @@ def load_outcomes(market: str) -> dict[tuple[str, str], dict]:
             f"SELECT {', '.join(_OUTCOME_COLS)} FROM pick_outcomes WHERE market=? "
             "ORDER BY first_sent_date, symbol", (market.upper(),),
         ).fetchall()
-    except (StorageError, *DB_ERRORS):
-        logger.warning("픽 결과 읽기 실패 (%s) — 빈 결과", market, exc_info=True)
+    except (StorageError, *DB_ERRORS) as e:
+        _log_read_failure("픽 결과 읽기 실패", market, e)
         return {}
     out = {}
     for r in rows:
@@ -1486,10 +1508,12 @@ def _score_market(market: str, *, now: datetime, dry_run: bool,
         if since is None or s.sent_date >= since:
             tickers |= {s.yf_symbol, s.bench_symbol}
     # 미결 이벤트 티커는 상한(PANEL_MAX_TICKERS) 안에서만 추가 — 넘치면 fetch 가 통째로 실패해
-    # 그 시장 채점 전체가 멈추므로, 가격이 있는 이벤트·최근 발송을 우선하고 나머지는 이번에 건너뛴다.
+    # 그 시장 채점 전체가 멈추므로, 가격이 있는 이벤트 → **오래된 발송** 순으로 우선한다.
+    # 오래된 미결부터 63일 지평을 채워 확정(done)시켜야 다음 실행에서 자리가 비고 뒤 이벤트가
+    # 처리된다 (최근 우선이면 오래된 이벤트가 영영 뒤로 밀린다).
     ranked = sorted(open_events, key=lambda e: (
         (outcomes.get((e.symbol, e.sent_date)) or {}).get("status") == "no_price",
-        -date.fromisoformat(e.sent_date).toordinal()))
+        e.sent_date))
     kept: set[tuple[str, str]] = set()
     for e in ranked:
         extra = {e.yf_symbol, e.bench_symbol} - tickers
@@ -2097,25 +2121,42 @@ def inclusion_start(market: str, symbols: Iterable[str] | None = None) -> dict[s
     return {s: d for s, d in start.items() if s in wanted and s in current}
 
 
-def entry_prices(market: str) -> dict[str, dict]:
+def _entry_info(first: str, row: dict) -> dict:
+    return {
+        "entry_px": _num(row.get("entry_px")),
+        "entry_date": row.get("entry_date"),
+        "first_sent_date": first,
+        "bench_entry_px": _num(row.get("bench_entry_px")),
+        "last_px": _num(row.get("last_px")),
+        "last_px_date": row.get("last_px_date"),
+        "status": row.get("status"),
+    }
+
+
+def entry_prices(market: str, starts: Mapping[str, str] | None = None) -> dict[str, dict]:
     """심볼 → 채점기가 채운 진입 정보 {entry_px, entry_date, first_sent_date, last_px,
-    last_px_date, bench_entry_px, status}. 같은 심볼이 여러 번 진입했으면 가장 최근 진입.
+    last_px_date, bench_entry_px, status}.
+
+    ``starts`` (inclusion_start 결과: 심볼 → 연속 포함 시작일) 를 주면 **(symbol, starts[symbol])
+    정확 일치** 행만 돌려준다 — 규칙 버전이 바뀌어 회차가 리셋됐는데(starts=v1 첫 발송일) 옛
+    회차(v0 백필)의 진입가로 '선정 후' 를 계산하는 어긋남 방지. 일치 행이 없으면 그 심볼은 결과에
+    없음 (호출부: since_pct=None → 52주 위치 표시, -10% 알림 미평가).
+    ``starts`` 가 None 이면 하위호환 — 같은 심볼이 여러 번 진입했으면 가장 최근 진입.
 
     진입가는 **채점기(scripts/ledger.py score)** 가 Adj Close 로 채운다 — 발송 경로는 가격
     API 를 추가하지 않는다. 아직 채점 전이면 해당 심볼이 비어 있고, 표시는 '52주 위치' 로 대체.
     """
     outs = load_outcomes(market)
+    if starts is not None:
+        out: dict[str, dict] = {}
+        for sym, first in starts.items():
+            row = outs.get((str(sym), str(first)))
+            if row is not None:
+                out[str(sym)] = _entry_info(str(first), row)
+        return out
     best: dict[str, dict] = {}
     for (sym, first), row in outs.items():
         cur = best.get(sym)
         if cur is None or str(first) > str(cur.get("first_sent_date") or ""):
-            best[sym] = {
-                "entry_px": _num(row.get("entry_px")),
-                "entry_date": row.get("entry_date"),
-                "first_sent_date": first,
-                "bench_entry_px": _num(row.get("bench_entry_px")),
-                "last_px": _num(row.get("last_px")),
-                "last_px_date": row.get("last_px_date"),
-                "status": row.get("status"),
-            }
+            best[sym] = _entry_info(first, row)
     return best

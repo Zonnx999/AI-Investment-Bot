@@ -11,9 +11,12 @@ DB·네트워크·텔레그램을 건드리지 않음 — 값 수집(storage.ini
 메시지 규칙
 -----------
 - 구독자 '상태' 줄은 **해석에 영향을 주는 항목만**, 고정 어휘로만 만든다. 동적 문자열
-  (지표 id·예외 메시지 등)은 절대 넣지 않는다 — 텔레그램 legacy Markdown 은 `_ * [ ] \``
-  하나만 불균형이어도 메시지 전체가 파싱 실패한다 (CLAUDE.md §4.10 #10).
+  (지표 id·예외 메시지 등)은 절대 넣지 않는다 — 텔레그램 legacy Markdown 은 밑줄·별표·
+  대괄호·백틱 하나만 불균형이어도 메시지 전체가 파싱 실패한다 (CLAUDE.md §4.10 #10).
 - 소유자 DM 은 평문(parse_mode=None) 전제라 실패 상세(지표 id, 예외 이름)를 넣어도 된다.
+- ``optional_failures`` 는 **고정 키만** ('가격 조회 실패', 'Markdown 평문 폴백', '원장 기록' …) —
+  Problem.code 가 signature 에 들어가므로 개수·종목이 섞이면 매일 코드가 바뀌어 중복 억제가
+  무력화된다. 개수·종목 같은 상세는 ``notes`` (소유자 DM 전용, signature 제외) 에 넣는다.
 """
 
 from __future__ import annotations
@@ -120,7 +123,8 @@ class HealthReport:
     regime_total: int | None = None            # 국면 지표 전체 개수
     regime_failures: list[str] = field(default_factory=list)   # 소유자용 상세 (예: "yield_curve — FRED HTTP 502")
     llm: str = "off"                           # off | ok | retired | timeout | error:<Cls>
-    optional_failures: list[str] = field(default_factory=list)  # predictions / weights / names 등
+    optional_failures: list[str] = field(default_factory=list)  # 고정 키만 (모듈 docstring)
+    notes: list[str] = field(default_factory=list)             # 소유자 DM 상세 줄 — signature 제외
     state_write_ok: bool = True
     sent: int = 0
     failed: int = 0
@@ -207,7 +211,9 @@ class HealthReport:
         return self.storage == "timeout" or universe_count == 0
 
     def signature(self, now: datetime) -> list[str]:
-        """문제 코드 정렬 목록 — 직전 실행과 같으면 소유자 DM 을 다시 보내지 않음."""
+        """문제 코드 정렬 목록 — 직전 실행과 같으면 소유자 DM 을 다시 보내지 않음.
+
+        ``notes`` 는 포함하지 않는다 (상세 줄이 바뀌어도 같은 문제면 DM 을 반복하지 않게)."""
         return sorted(p.code for p in self.problems(now))
 
     def needs_owner_dm(self, now: datetime, prev_state: dict | None, held: bool = False) -> bool:
@@ -274,6 +280,7 @@ class HealthReport:
         for p in probs.values():
             if p.code.startswith("optional:") or p.code == "state_write":
                 lines.append(p.owner_text)
+        lines.extend(str(n) for n in self.notes if n)
         lines.append(f"조치: journalctl -u {self._unit()} -n 50 --no-pager")
         return "\n".join(lines)
 

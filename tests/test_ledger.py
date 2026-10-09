@@ -1213,22 +1213,112 @@ def test_score_expiry_is_configurable(fresh_db, monkeypatch):
 
 
 def test_score_caps_open_event_tickers(fresh_db, monkeypatch, caplog):
-    """미결 이벤트가 많아도 티커 수는 상한 이내 — 최근 이벤트를 우선하고 경고를 남긴다."""
-    dates = pd.bdate_range("2026-07-13", periods=40)
-    cols = {f"T{i}": [100.0 + i] * 40 for i in range(10)}
-    panel = _panel(dates, SPY=[100.0] * 40, **cols)
+    """미결 이벤트가 많아도 티커 수는 상한 이내 — **오래된** 미결 이벤트를 우선(확정시켜 자리를 비움)하고
+    경고를 남긴다. 다음 실행에서는 확정된 이벤트가 빠지고 그다음 오래된 이벤트가 처리된다 (D8)."""
+    short = pd.bdate_range("2026-07-13", periods=40)
+    panel_short = _panel(short, SPY=[100.0] * 40, **{f"T{i}": [100.0 + i] * 40 for i in range(10)})
     for i in range(10):                                     # 매일 다른 종목 1개 리스트 → 이벤트 10개
-        ledger.record_send("US", dates[i].strftime("%Y-%m-%d"), [Row(f"T{i}")],
+        ledger.record_send("US", short[i].strftime("%Y-%m-%d"), [Row(f"T{i}")],
                            rule_version="v1", source="reconstructed")
-    fetch, calls = _fake_fetch_factory(panel)
-    now = datetime(2026, 9, 4, 23, tzinfo=timezone.utc)
-    ledger.score(("US",), now=now, fetch=fetch)             # 1차: 커서 확립 (상한 기본값)
+    fetch, calls = _fake_fetch_factory(panel_short)
+    ledger.score(("US",), now=datetime(2026, 9, 4, 23, tzinfo=timezone.utc), fetch=fetch)  # 1차: 커서 확립
+    assert all(o["status"] == "open" for o in ledger.load_outcomes("US").values())
+
+    # 2차: 상한 4 (= SPY + 현재 보유 T9 + 2자리), 패널은 80거래일 → 63일 지평을 채울 수 있음
+    long = pd.bdate_range("2026-07-13", periods=80)
+    panel_long = _panel(long, SPY=[100.0] * 80, **{f"T{i}": [100.0 + i] * 80 for i in range(10)})
+    fetch2, calls2 = _fake_fetch_factory(panel_long)
+    now2 = datetime(2026, 11, 2, 23, tzinfo=timezone.utc)
     monkeypatch.setattr(ledger, "PANEL_MAX_TICKERS", 4)
     with caplog.at_level("WARNING"):
-        ledger.score(("US",), now=now, fetch=fetch)
-    tick = set(calls[-1][0])
+        ledger.score(("US",), now=now2, fetch=fetch2)
+    tick = set(calls2[-1][0])
     assert len(tick) <= 4
     assert {"SPY", "T9"} <= tick                            # 핵심(벤치·현재 보유)은 유지
-    assert "T8" in tick                                     # 최근 이벤트 우선
-    assert "T0" not in tick
+    assert {"T0", "T1"} <= tick and "T8" not in tick        # 오래된 미결 우선
     assert any("티커 상한" in r.message for r in caplog.records)
+    outs = ledger.load_outcomes("US")
+    assert outs[("T0", short[0].strftime("%Y-%m-%d"))]["status"] == "done"
+    assert outs[("T1", short[1].strftime("%Y-%m-%d"))]["status"] == "done"
+    assert outs[("T2", short[2].strftime("%Y-%m-%d"))]["status"] == "open"
+    # 3차: 확정된 T0·T1 이 빠져 다음으로 오래된 T2·T3 가 처리된다
+    ledger.score(("US",), now=now2, fetch=fetch2)
+    tick3 = set(calls2[-1][0])
+    assert {"T2", "T3"} <= tick3 and not ({"T0", "T1"} & tick3)
+    outs3 = ledger.load_outcomes("US")
+    assert outs3[("T2", short[2].strftime("%Y-%m-%d"))]["status"] == "done"
+
+
+# ---------------- D8: 읽기 함수 테이블 없음 → DEBUG · KR 비표준 코드 공통 가드 ----------------
+
+
+def test_read_helpers_missing_table_are_quiet_and_create_nothing(fresh_db, caplog):
+    """원장 테이블이 없으면(첫 발송 전·dry-run) 읽기는 조용히 빈 값 — WARNING 0, 스키마 생성 0."""
+    import logging
+
+    assert not _table_exists("signal_ledger")
+    with caplog.at_level(logging.DEBUG, logger="src.ledger"):
+        assert ledger.load_sends("US") == []
+        assert ledger.load_perf("US") == []
+        assert ledger.load_outcomes("US") == {}
+        assert ledger.last_sent_list("US") == (None, [])
+        assert ledger.inclusion_start("US", ["A"]) == {}
+        assert ledger.entry_prices("US") == {}
+        assert ledger.entry_prices("US", {"A": "2026-07-13"}) == {}
+        assert ledger.load_summary("US") is None
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("테이블 없음" in r.getMessage() for r in caplog.records)
+    assert not _table_exists("signal_ledger") and not _table_exists("pick_outcomes")
+
+
+def test_read_helpers_other_db_errors_still_warn(fresh_db, caplog, monkeypatch):
+    import logging
+    import sqlite3
+
+    class _BadConn:
+        def execute(self, *a, **k):
+            raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(ledger, "_rconn", lambda: _BadConn())
+    with caplog.at_level(logging.WARNING, logger="src.ledger"):
+        assert ledger.load_sends("US") == []
+    assert any(r.levelno == logging.WARNING and "원장 읽기 실패" in r.getMessage() for r in caplog.records)
+
+
+def test_pick_yf_symbol_kr_non_code_is_none_regardless_of_fn():
+    """record_send 가 universe.yf_symbol 을 넘겨도 KR 비표준 코드(ADR 등)는 기록 제외."""
+    always = lambda sym, market, exchange, sector: f"{sym}.KS"      # noqa: E731 — universe.yf_symbol 흉내
+    assert ledger._pick_yf_symbol(Row("KT"), "KR", always) is None
+    assert ledger._pick_yf_symbol(Row("005930"), "KR", always) == "005930.KS"
+    assert ledger._pick_yf_symbol(Row("KT"), "US", always) == "KT.KS"   # US 는 fn 그대로
+    rows = ledger.build_ledger_rows("KR", "2026-10-08", [Row("KT"), Row("005930")], rule_version="v1",
+                                    source="live", sent_at="2026-10-08T00:00:00+00:00",
+                                    yf_symbol_fn=always)
+    assert [r[3] for r in rows] == ["005930"]
+
+
+# ---------------- D3: entry_prices(starts) 정확 일치 ----------------
+
+
+def test_entry_prices_exact_round_match(fresh_db):
+    """v0 백필(07-13) 결과만 있고 v1 회차(10-08) 결과가 없으면 starts 기반 조회는 비어 있다."""
+    conn = ledger._conn()
+    ledger._upsert_outcomes(conn, [{
+        **{c: None for c in ledger._OUTCOME_COLS},
+        "market": "US", "symbol": "CALM", "first_sent_date": "2026-07-13", "yf_symbol": "CALM",
+        "bench_symbol": "SPY", "rule_version": "v0", "source": "reconstructed", "entry_date": "2026-07-13",
+        "entry_px": 100.0, "bench_entry_px": 500.0, "status": "open", "updated_at": "x",
+    }])
+    legacy = ledger.entry_prices("US")
+    assert legacy["CALM"]["entry_px"] == 100.0 and legacy["CALM"]["first_sent_date"] == "2026-07-13"
+    assert ledger.entry_prices("US", {"CALM": "2026-10-08"}) == {}
+    exact = ledger.entry_prices("US", {"CALM": "2026-07-13", "HG": "2026-07-13"})
+    assert set(exact) == {"CALM"} and exact["CALM"]["entry_date"] == "2026-07-13"
+    ledger._upsert_outcomes(conn, [{
+        **{c: None for c in ledger._OUTCOME_COLS},
+        "market": "US", "symbol": "CALM", "first_sent_date": "2026-10-08", "yf_symbol": "CALM",
+        "bench_symbol": "SPY", "rule_version": "v1", "source": "live", "entry_date": "2026-10-08",
+        "entry_px": 80.0, "bench_entry_px": 510.0, "status": "open", "updated_at": "x",
+    }])
+    assert ledger.entry_prices("US", {"CALM": "2026-10-08"})["CALM"]["entry_px"] == 80.0
+    assert ledger.entry_prices("US")["CALM"]["entry_px"] == 80.0          # 하위호환: 최근 회차
