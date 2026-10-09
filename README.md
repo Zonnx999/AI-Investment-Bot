@@ -24,13 +24,13 @@
   - 첫 줄이 **"오늘 할 일"**(없음 / 매수 검토 / 탈락 / 리스크 점검) — 읽고 넘길 수 있게, **변화가 있는 날만 길어집니다**.
   - 후보는 선정에 쓴 **하나의 점수**(밸류+건전성)를 그대로 표시, 기준일·종목별 "선정 후" 수익률 포함.
   - 낙폭·변동성·신용·환율·국면 전환·시장 충격 알림은 모두 "지난번 대비 변화"만 울리고, 데이터가 묵거나 지표가 빠지면 상태 줄/소유자 DM 으로 **눈에 보이게** 알립니다.
-- **신호 원장 (`src/ledger.py`)** — 발송한 후보 리스트를 기록하고, "그대로 보유했다면" 벤치(SPY / 한국 홈지수 ETF) 대비 성과를 비용 포함으로 매일 채점해 메시지에 1줄(`📒 지난 후보 성과`)로 보여 줍니다. 판정은 20거래일 블록 6개(≈6개월) 뒤부터 — 그 전엔 `⏳검증 전`.
+- **신호 원장 (`src/ledger.py`)** — 발송한 후보 리스트를 기록하고, "그대로 보유했다면" 벤치(SPY / 코스피·코스닥 ETF) 대비 성과를 비용 포함으로 매일 채점해 메시지에 1줄(`📒 지난 후보 성과`, 월요일엔 2줄 블록)로 보여 줍니다. 판정은 20거래일 블록 6개(≈6개월) 뒤부터 — 그 전엔 `⏳검증 전 (4주 구간 n/6)`, 성적 미달로 판정되면 후보 제목에 `검증 미달`.
 - **검증 프로토콜 (`scripts/check_backtest.py`)** — 원장 성과 · 유니버스 순위 IC · 선행지표 7개 무선견 워크포워드(베이스라인·부호검정·Holm 보정) · 운영 모멘텀 진단 · SPY 200일선. 현재 선행지표는 통과 0/7.
 - **전 종목 유니버스 스캔** — US/KR/크립토 (US 2190 / KR 517 / CRYPTO 68), Turso(libSQL) 클라우드 DB, 오프라인 전수 스캔(API 0콜). 4팩터 + health/value 스코어카드(구성요소 분해).
-  US 보통주 필터(상장 후순위채·우선주 제외), FMP TTM 기준 점수, 금융업 50% 중립, KR 지배주주 귀속(DART), 섹터/지주사 상한. 주 1회 재점수 타이머.
+  US 보통주 필터(상장 후순위채·우선주 제외), FMP TTM 기준 점수, 금융업 50% 중립, KR 지배주주 귀속(DART), 섹터/지주사 상한, 재보강 누락(1주 이상 뒤처진) 행은 후보 제외. 주 1회 재점수 타이머.
 - **상시 인터랙티브 봇** (Oracle 서버, systemd) — 소유자 승인제 멀티유저, 가입 요청은 인라인 `[✅ 승인][❌ 거절]` 버튼.
   `/stock <티커> [us|kr|crypto]` · `/scan [us|kr] [개수]` · `/ledger [us|kr]` · `/news <티커>` · `/help`, 소유자 `/approve` `/deny` `/announce`.
-- **운영 안전장치** — CI(pytest) 통과 커밋만 서버 자동 배포 + 기동 실패 시 자동 롤백, 헬스 리포트 → 소유자 DM, 실패 유닛 `OnFailure` 알림, systemd 유닛 원본을 저장소(`deploy/systemd/`)에서 관리.
+- **운영 안전장치** — CI(pytest) 통과 커밋만 서버 자동 배포 + 기동 실패 시 자동 롤백, 서버 `.venv` ↔ `requirements.lock` 불일치 감시(소유자 DM), 헬스 리포트 → 소유자 DM, 실패 유닛 `OnFailure` 알림, 재점수 직후 다이제스트 레플리카 미리 pull, systemd 유닛 원본을 저장소(`deploy/systemd/`)에서 관리.
 - **라이브 대시보드** — GitHub Pages 5탭(한국 / 미국 / 크립토 / 시장국면 / 선행지표). ⚠️ Dashboard Export 워크플로가 7월 이후 중단 상태(GitHub 자동 비활성화) — 수리분은 이 브랜치에 포함, 배포 때 재활성화.
 - 선행지표 예측·제안 비중(Kelly 사이징)·LLM 요약은 코드를 보존하되 **기본 제거**(검증 전) — 환경변수 플래그로만 켭니다.
 - 자세한 모듈 맵·현재 상태·열린 이슈는 [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md).
@@ -76,7 +76,7 @@ AI-Investment-Bot/
 │   └── utils.py           # 공용 순수 헬퍼 (clip, 종가 추출, md_safe 등)
 │
 ├── scripts/               # 실행 진입점 (얇은 오케스트레이터)
-│   ├── send_digest.py         # ★ 텔레그램 다이제스트 발송 (--dry-run = 쓰기 0) ★
+│   ├── send_digest.py         # ★ 텔레그램 다이제스트 발송 (--dry-run = 상태·원장 쓰기 0) ★
 │   ├── bot.py                 # ★ 상시 폴링 봇 워커 (systemd quant-bot) ★
 │   ├── ledger.py              # ★ 신호 원장 CLI (snapshot/backfill/score/report/ic) ★
 │   ├── check_backtest.py      # ★ 검증 리포트 (원장·IC·선행지표·모멘텀·200일선) ★
@@ -84,6 +84,8 @@ AI-Investment-Bot/
 │   ├── scan.py                # 오프라인 전수 발굴 (--check 티커)
 │   ├── export_dashboard.py    # Turso → dashboard/*.json (Actions 평일)
 │   ├── notify_owner.py        # 소유자 평문 DM (systemd OnFailure / autopull)
+│   ├── warm_replica.py        # 레플리카 미리 pull (재점수 유닛 ExecStartPost)
+│   ├── lock_drift.py          # 서버 .venv ↔ requirements.lock 불일치 점검 (autopull 이 호출)
 │   ├── server_autopull.sh     # 서버 자동 배포 (CI 게이트 + 롤백, systemd timer)
 │   ├── check_market_regime.py / check_signals.py / check_predictions.py / check_portfolio.py   # 수동 점검 (상태 쓰기 없음)
 │   ├── check_risk.py / check_macro.py / check_crypto.py / check_korea.py / check_fundamentals.py / screen_value.py
@@ -99,7 +101,7 @@ AI-Investment-Bot/
 ├── data/                  # 데이터 캐시·유니버스 DB (gitignore)
 ├── notebooks/             # 실험용 노트북 (gitignore)
 ├── logs/                  # quant_bot.log (gitignore)
-└── tests/                 # pytest — 오프라인 테스트 1,057개, 약 35초 (python -m pytest)
+└── tests/                 # pytest — 오프라인 테스트 1,132개, 약 40초 (python -m pytest)
 ```
 
 ## 첫 실행 (Quick Start)
@@ -116,7 +118,7 @@ uv pip install --python .venv/bin/python -e ".[dev,hosting]"
 ```bash
 cp .env.example .env
 ```
-테스트(오프라인 1,057개, 약 35초)와 첫 실행(발송·쓰기 없는 미리보기):
+테스트(오프라인 1,132개, 약 40초)와 첫 실행(발송 없는 미리보기):
 ```bash
 .venv/bin/python -m pytest
 .venv/bin/python scripts/send_digest.py --market kr --dry-run

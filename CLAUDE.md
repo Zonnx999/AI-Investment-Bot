@@ -67,7 +67,7 @@ API 키는 모두 프로젝트 루트의 `.env` 파일에 저장 — gitignore �
 - **실전 예외 처리** — broad `except Exception` 금지. 단 layered 패턴의 최후 fallback 자리는 예외이며 `# noqa: BLE001` 주석 필수.
 - **logging 모듈 사용** — 진단/에러는 `logger.*`. `print()` 는 사용자 대시보드 출력(stdout deliverable)에만 사용.
 - **모듈 독립 테스트 가능** — 다른 모듈 없이도 import + 실행 가능해야 함.
-- **테스트 그린 유지** — 작업 후 `python -m pytest` (오프라인) 통과 필수. 2026-10-09 실측: **1,057 통과 / 3 스킵, 약 35초** (autopull 시나리오 테스트가 git/bash 를 실제로 돌려서 예전보다 느림). 새 로직에는 테스트 추가 (네트워크 없는 테스트만 — 합성 데이터/로컬 서버). CI(`.github/workflows/ci.yml`, 잡 이름 `pytest`)가 같은 스위트를 `requirements.lock` 환경에서 돌리고, 서버 autopull 은 이 잡이 녹색인 코드 커밋만 배포한다.
+- **테스트 그린 유지** — 작업 후 `python -m pytest` (오프라인) 통과 필수. 2026-10-09 실측: **1,132개, 약 40초** — libsql 설치 환경(CI·프로젝트 `.venv` — `.[dev,hosting]`)은 전부 통과, 미설치 환경은 libsql 전용 3개가 스킵돼 1,129 통과 / 3 스킵 (autopull 시나리오 테스트가 git/bash 를 실제로 돌려서 예전보다 느림). 새 로직에는 테스트 추가 (네트워크 없는 테스트만 — 합성 데이터/로컬 서버). CI(`.github/workflows/ci.yml`, 잡 이름 `pytest`)가 같은 스위트를 `requirements.lock` 환경에서 돌리고, 서버 autopull 은 이 잡이 녹색인 코드 커밋만 배포한다.
 
 ### 4.3 새 기능 짜기 전 — 코드 오딧 우선
 영향 받는 파일들 먼저 Read 하고, 영향도 분석 후 작업 시작. 추측 금지.
@@ -79,7 +79,7 @@ API 키는 모두 프로젝트 루트의 `.env` 파일에 저장 — gitignore �
 - `src/macro_analyzer.py` — 거시 조망, 자산 간 분석, 시장 국면
 - `src/risk_engine.py` — 종목/자산 리스크 계산
 - `src/signals.py` — 신호 엔진 (팩터 점수/스크리닝 룰/변화 알림). 판정 로직은 순수 함수, fetch 는 오케스트레이터만. `generate_signal_report` 는 **상태를 쓰지 않고**, 발송 성공 후 `commit_signal_state(report)` 만 `signals/global:v2` 를 갱신
-- `src/universe.py` — 전 종목 유니버스 DB (discover/enrich/scan). SQLite `screened` 테이블 복합 PK(symbol,market). 스캔은 오프라인 API 0콜. US 보통주 분류기(`excluded`)·`pick_top`(섹터 상한 2·KR 지주사 상한 2)·`freshness`·`yf_symbol`·`RULE_VERSION`
+- `src/universe.py` — 전 종목 유니버스 DB (discover/enrich/scan). SQLite `screened` 테이블 복합 PK(symbol,market). 스캔은 오프라인 API 0콜. US 보통주 분류기(`excluded`)·`pick_top`(섹터 상한 2·KR 지주사 상한 2·KR 비표준 코드 건너뜀)·`freshness`·`yf_symbol`·`RULE_VERSION`. **재보강 누락 행 제외**: `scan` 은 시장 기준일(보강 행 `updated_at` 날짜의 중앙값)보다 `ROW_LAG_EXCLUDE_DAYS`(7)일 이상 뒤처진 행을 기본으로 뺌 (`include_lagging=True` 로 포함, 진단은 `lagging_rows`)
 - `src/predictors.py` — 선행지표 lead-lag 예측 (M2→BTC, 한국수출→반도체). 분석은 순수 함수, fetch 는 predict_* 만. `PredictorSpec` 레지스트리(발표 지연 포함), 검증 안 된 `research_only` 는 운영 `PREDICTORS` 에서 제외
 - `src/ledger.py` — **신호 원장**: 발송한 후보 리스트 기록(append-only)·채점(`roll_forward`, 리스트 그대로 보유 vs 벤치)·유니버스 스냅샷·07-13 소급 백필·성과 줄/주간 블록 포매터. universe/digest 를 import 하지 않음(duck typing). CLI 는 `scripts/ledger.py`
 - `src/health.py` — 헬스 리포트(순수): 구독자 '⚙️ 상태' 줄(고정 어휘, Markdown 금지 문자 없음)·소유자 평문 DM·발송 보류 판정·signature(DM 중복 억제)
@@ -90,8 +90,10 @@ API 키는 모두 프로젝트 루트의 `.env` 파일에 저장 — gitignore �
 - `src/logger.py` — 로깅 설정 (KST timestamp + offset)
 - `src/config.py` — 환경변수 로딩, Settings dataclass
 - `src/utils.py` — 2곳 이상에서 반복되는 순수 헬퍼만 (도메인 로직 금지). `md_safe`/`strip_md` 포함
-- `scripts/ledger.py` — 원장 CLI (`snapshot`/`backfill`/`score`/`report`/`ic`). `score` 는 다이제스트 유닛 ExecStartPost 가 호출
-- `scripts/notify_owner.py` — 소유자 평문 DM 1통(systemd `OnFailure` 및 autopull 알림용). DB/pandas 를 import 하지 않음, 항상 exit 0
+- `scripts/ledger.py` — 원장 CLI (`snapshot`/`backfill`/`score`/`report`/`ic`). `score` 는 다이제스트 유닛 ExecStartPost 가 호출. 저장소가 강등(초기 pull 타임아웃 → 빈 오프라인 파일)이면 어떤 명령도 실행하지 않고 **exit 3**
+- `scripts/notify_owner.py` — 소유자 평문 DM 1통(systemd `OnFailure` 및 autopull 알림용). DB/pandas 를 import 하지 않음, 항상 exit 0. journal 꼬리는 줄 절단 **전에** 마스킹(경계에 걸친 키 접두부 누출 방지)
+- `scripts/warm_replica.py` — 레플리카 미리 pull: `QUANT_BOT_DB_PATH` 파일을 열어 초기 sync 만 하고 `init_sync=… elapsed=…s` 1줄 출력. 재점수 유닛 `ExecStartPost` 가 재점수 직후 다이제스트 레플리카에 실행 (월요일 다이제스트의 첫 pull 이 한 주치 델타를 한 번에 받다 강등되는 것 방지)
+- `scripts/lock_drift.py` — 서버 `.venv` 설치 버전 ↔ `requirements.lock` 핀 비교(표준 라이브러리만, 설치는 안 함). 불일치면 exit 3 + 요약 1줄. autopull 이 15분마다 호출해 lock 내용당 1회 소유자 DM
 - `deploy/systemd/` — 서버 systemd 유닛·타이머 **원본**(저장소 관리). 서버에는 복사해 설치 (`docs/DEPLOYMENT.md §0`)
 
 ### 4.5 예외 처리 규칙
@@ -232,16 +234,24 @@ NIM 의 MiniMax 모델 퇴역(HTTP 410)이 일반 오류로 뭉개져 원인 파
 → 다른 WP 가 제공할 함수는 병합 후 `grep`/Read 로 시그니처·반환 계약을 확인하고, 둘을 잇는 계약 테스트를 둔다.
 
 **(20) 점수·필터·정렬 규칙을 바꾸면 `universe.RULE_VERSION` 을 올린다.**
-원장은 규칙 버전 단위로 성과를 끊어 판정한다(옛 규칙 성과와 섞지 않음). v0 = 2026-07-10 동결 규칙, v1 = 2026-10 수정 라운드. 올리면 전환일 메시지에
-'규칙 v1 로 후보 재구성' 이 나가고 종목별 '선정 후' 는 새 회차부터 다시 센다.
+원장은 규칙 버전 단위로 성과를 끊어 판정한다(옛 규칙 성과와 섞지 않음). v0 = 2026-07-10 동결 규칙, v1 = 2026-10 수정 라운드. 올리면 전환일 메시지의 판정 사유가
+'규칙 v1 로 후보 재구성 (편입 N · 탈락 M)'(후보가 같으면 '규칙 v1 전환 (후보 동일)')이 되고 종목별 '선정 후' 는 새 회차부터 다시 센다.
 
 **(21) dry-run·진단 스크립트는 상태를 쓰지 않는다. 상태 커밋은 발송 성공 후.**
 사고: 기존 `generate_signal_report` 가 알림 상태를 직접 갱신해, `--dry-run` 이나 `check_signals` 가 다음 실발송의 '변화' 를 먹어치웠다.
-→ 리포트 생성은 읽기 전용, 상태는 `commit_signal_state(report)` / `ledger.record_send` 가 발송 성공(sent ≥ 1) 뒤에만. dry-run 무쓰기는 테스트(해시 불변)로 고정.
+→ 리포트 생성은 읽기 전용, 상태는 `commit_signal_state(report)` / `ledger.record_send` 가 발송 성공(sent ≥ 1) 뒤에만. dry-run 의 상태·원장 무쓰기는 테스트(해시 불변)로 고정.
+단 dry-run 도 **스키마 보장**(`CREATE IF NOT EXISTS`·멱등 컬럼 추가)과 **조회 캐시 저장**(`@cached`)은 할 수 있다 — Turso 모드에선 이것도 원격 쓰기 (`scripts/send_digest.py` docstring). 운영 레플리카가 아닌 사본으로 점검.
 
 **(22) company-screener 에 보통주가 아닌 증권이 섞인다 — 이름만으론 못 거른다.**
 상장 후순위채(baby bond)·우선주가 US 후보 상위에 올랐다(MGR·AFGE 는 이름이 모회사 이름이라 이름 규칙이 못 잡음). → `universe.classify_us_securities`:
 이름 규칙 + 같은 모회사 '형제' 비교(가격·거래대금) + OTC·셸·거래대금 하한. 규칙이 못 잡는 영구우선주(예: STRC 류)는 알려진 한계 — `docs/CURRENT_STATE.md §2`.
+
+**(23) 신선도는 행 단위로도 본다 — 재보강 실패 1행이 시장 전체 판단을 막지 않게.**
+다이제스트의 점수 기준일은 후보들 중 가장 오래된 `updated_at`(min) 이다. 그래서 주간 재점수에서 갱신에 실패한 행(상폐·DART 미제출·no_data) 하나가 옛 점수로 후보에 남으면
+그 1행이 시장 전체를 '후보 보류'·'주간 갱신 지연' 으로 끌고 갈 수 있었다 (최종 리뷰에서 재현, 수정 후 DB 사본 스모크로 확인).
+→ `universe.scan` 이 시장 기준일 — 보강 행 `updated_at` 날짜의 **중앙값** — 보다 7일 이상 뒤처진 행을 후보에서 뺀다. 기준을 MAX 가 아니라 중앙값으로 잡은 이유: 수동 `--enrich --limit 1` 같은
+소수 행 갱신이 기준을 끌어올려 나머지 전부를 '뒤처짐' 으로 만들지 않게. 빠진 행은 조용히 버리지 않고 소유자 DM 고정 키 `재보강 누락 종목` 으로 보이게 한다 (#15).
+시장 단위 집계(min/max)로 신선도를 판정하는 코드를 쓸 땐 "이상 행 하나가 결과를 뒤집지 않는가" 를 먼저 물을 것.
 
 ---
 
