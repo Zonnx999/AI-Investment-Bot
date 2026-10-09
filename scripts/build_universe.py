@@ -233,6 +233,8 @@ def main() -> int:
             print("\n[3] 한국 보강 건너뜀 (--markets 에 KR 없음)")
 
     # 재점수 결과 단면 저장 (규칙 버전과 함께) — 원장 판정·IC 의 재료. best-effort.
+    # 스냅샷은 로컬 레플리카를 읽으므로, 방금 쓴 점수가 클라우드와 합쳐진(또는 push 된) 뒤에 찍는다 (RVOPS-05).
+    get_storage().sync()
     snap = ledger.snapshot_universe("rescore", rule_version=universe.RULE_VERSION)
     if any(r.get("written") for r in snap.values() if isinstance(r, dict)):
         print(f"\n[4] 재점수 후 유니버스 스냅샷 저장 (규칙 {universe.RULE_VERSION})")

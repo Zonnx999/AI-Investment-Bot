@@ -51,3 +51,5 @@ data/.*
 # 로컬 에이전트 설정 / 깨진 venv 백업
 .claude/settings.local.json
 .venv.broken-*/
+.claude/worktrees/
+.claude/scheduled_tasks.lock
