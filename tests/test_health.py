@@ -7,11 +7,11 @@ from datetime import datetime
 
 import pytest
 
+from src.config import settings
 from src.exceptions import ApiHttpError, ApiTimeoutError, DataValidationError, ModelRetiredError
 from src.health import (
     KST,
     MD_FORBIDDEN,
-    UNIVERSE_STALE_DAYS,
     HealthReport,
     llm_status,
 )
@@ -51,12 +51,16 @@ def test_status_line_exact_for_today_case():
 
 
 def test_universe_stale_threshold_boundary():
-    # 정확히 임계일 = 아직 신선, 임계+1 = 노후
-    fresh = _healthy(universe_as_of="2026-09-30T03:00:00+00:00")     # 8일 전
+    """RVM-04: 경계는 기준 줄 ⚠️·/scan 과 같은 'age >= settings.universe_warn_days(8)' —
+    7일 전 = 신선, 정확히 8일 전 = 노후 (예전 'age > 8' 과 달리 8일째도 상태 줄에 나온다)."""
+    assert settings.universe_warn_days == 8
+    fresh = _healthy(universe_as_of="2026-10-01T03:00:00+00:00")     # 7일 전
+    edge = _healthy(universe_as_of="2026-09-30T03:00:00+00:00")      # 8일 전 — 경계 포함
     stale = _healthy(universe_as_of="2026-09-29T03:00:00+00:00")     # 9일 전
-    assert UNIVERSE_STALE_DAYS == 8
     assert fresh.status_line(NOW) is None
+    assert edge.status_line(NOW) == "⚙️ 상태: 발굴 데이터 09-30 기준(8일 전)"
     assert stale.status_line(NOW) == "⚙️ 상태: 발굴 데이터 09-29 기준(9일 전)"
+    assert [p.code for p in edge.problems(NOW)] == ["universe_stale"]
 
 
 def test_universe_missing_and_storage_error_user_text():
