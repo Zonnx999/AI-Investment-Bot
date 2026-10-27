@@ -693,3 +693,84 @@ def test_degraded_and_require_remote_use_plain_attribute(tmp_path):
         assert s.degraded is False
     finally:
         s.close()
+
+
+# ---------------- Turso 연결 끊김 → 재연결 후 1회 재시도 (Storage.write) ----------------
+# 실사고 2026-10-19·21: KR 다이제스트 발송 직후 put_state 가 Hrana "connection closed before message
+# completed" 로 실패 → 같은 conn 의 원장 쓰기가 "invalid state, started with Txn" 으로 연쇄 실패.
+
+
+class _StubConnLost(_StubConnRaisesValueError):
+    HRANA_MSG = "Hrana: `http error: `connection closed before message completed``"
+
+
+def _lost_then_reconnect(store, monkeypatch):
+    """store 를 Turso 처럼 만들고, conn 을 '끊긴' stub 으로, _reconnect 는 새 로컬 conn 으로."""
+    import sqlite3
+
+    good = sqlite3.connect(store.db_path)
+    calls = []
+    store.is_turso = True
+    store._conn = _StubConnLost()
+
+    def _reconnect():
+        calls.append(1)
+        store._conn = good
+        return True
+
+    monkeypatch.setattr(store, "_reconnect", _reconnect)
+    return calls
+
+
+@pytest.mark.skipif(ValueError not in storage_mod._DB_ERRORS, reason="libsql 없는 환경")
+def test_put_state_reconnects_and_retries_once_on_conn_lost(store, monkeypatch):
+    calls = _lost_then_reconnect(store, monkeypatch)
+    assert store.put_state("ns", "k", {"v": 1}) is True
+    assert calls == [1]
+    assert store.get_state("ns", "k") == {"v": 1}
+    store.put_json("ns", "c", {"v": 2})                 # 새 conn 으로 정상 — 추가 재연결 없음
+    assert calls == [1] and store.get_json("ns", "c", TTL) == {"v": 2}
+
+
+@pytest.mark.skipif(ValueError not in storage_mod._DB_ERRORS, reason="libsql 없는 환경")
+def test_cache_write_reconnects_on_conn_lost(store, monkeypatch):
+    calls = _lost_then_reconnect(store, monkeypatch)
+    store.put_json("ns", "c", {"v": 3})
+    assert calls == [1] and store.get_json("ns", "c", TTL) == {"v": 3}
+
+
+@pytest.mark.skipif(ValueError not in storage_mod._DB_ERRORS, reason="libsql 없는 환경")
+def test_write_no_retry_for_other_errors_or_local(store, monkeypatch):
+    """연결 끊김이 아닌 오류, 또는 로컬 sqlite3 면 재연결하지 않고 기존 best-effort 실패."""
+    calls = []
+    monkeypatch.setattr(store, "_reconnect", lambda: calls.append(1) or True)
+    store.is_turso = True
+    store._conn = _StubConnRaisesValueError()            # 기본 문구(stream not found)는 끊김이라 교체
+    store._conn.HRANA_MSG = "Hrana: api error: status=400 (SQLITE_CONSTRAINT)"
+    assert store.put_state("ns", "k", {"v": 1}) is False
+    store.is_turso = False
+    store._conn = _StubConnLost()
+    assert store.put_state("ns", "k", {"v": 1}) is False
+    assert calls == []
+
+
+@pytest.mark.skipif(ValueError not in storage_mod._DB_ERRORS, reason="libsql 없는 환경")
+def test_write_gives_up_after_one_retry_or_failed_reconnect(store, monkeypatch):
+    calls = []
+    store.is_turso = True
+    store._conn = _StubConnLost()
+    monkeypatch.setattr(store, "_reconnect", lambda: calls.append(1) or True)   # 재연결해도 계속 끊김
+    assert store.put_state("ns", "k", {"v": 1}) is False
+    monkeypatch.setattr(store, "_reconnect", lambda: calls.append(2) or False)  # 재연결 불가
+    assert store.put_state("ns", "k", {"v": 1}) is False
+    assert calls == [1, 2]
+
+
+def test_conn_lost_markers_cover_observed_messages():
+    assert storage_mod._is_conn_lost(ValueError(
+        "Hrana: `http error: `connection closed before message completed``"))
+    assert storage_mod._is_conn_lost(ValueError(
+        "connection has reached an invalid state, started with Txn"))
+    assert storage_mod._is_conn_lost(ValueError(
+        "sync error: http dispatch error: connection closed before message completed"))
+    assert not storage_mod._is_conn_lost(ValueError("UNIQUE constraint failed: state.namespace"))

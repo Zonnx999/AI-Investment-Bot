@@ -67,14 +67,14 @@ API 키는 모두 프로젝트 루트의 `.env` 파일에 저장 — gitignore �
 - **실전 예외 처리** — broad `except Exception` 금지. 단 layered 패턴의 최후 fallback 자리는 예외이며 `# noqa: BLE001` 주석 필수.
 - **logging 모듈 사용** — 진단/에러는 `logger.*`. `print()` 는 사용자 대시보드 출력(stdout deliverable)에만 사용.
 - **모듈 독립 테스트 가능** — 다른 모듈 없이도 import + 실행 가능해야 함.
-- **테스트 그린 유지** — 작업 후 `python -m pytest` (오프라인) 통과 필수. 2026-10-09 실측: **1,134개, 약 40초** — libsql 설치 환경(CI·프로젝트 `.venv` — `.[dev,hosting]`)은 전부 통과, 미설치 환경은 libsql 전용 3개가 스킵돼 1,131 통과 / 3 스킵 (autopull 시나리오 테스트가 git/bash 를 실제로 돌려서 예전보다 느림). 새 로직에는 테스트 추가 (네트워크 없는 테스트만 — 합성 데이터/로컬 서버). CI(`.github/workflows/ci.yml`, 잡 이름 `pytest`)가 같은 스위트를 `requirements.lock` 환경에서 돌리고, 서버 autopull 은 이 잡이 녹색인 코드 커밋만 배포한다.
+- **테스트 그린 유지** — 작업 후 `python -m pytest` (오프라인) 통과 필수. 2026-10-27 실측: **1,139개, 약 46초** — libsql 설치 환경(CI·프로젝트 `.venv` — `.[dev,hosting]`)은 전부 통과, 미설치 환경은 libsql 전용 7개가 스킵돼 1,132 통과 / 7 스킵 (autopull 시나리오 테스트가 git/bash 를 실제로 돌려서 예전보다 느림). 새 로직에는 테스트 추가 (네트워크 없는 테스트만 — 합성 데이터/로컬 서버). CI(`.github/workflows/ci.yml`, 잡 이름 `pytest`)가 같은 스위트를 `requirements.lock` 환경에서 돌리고, 서버 autopull 은 이 잡이 녹색인 코드 커밋만 배포한다.
 
 ### 4.3 새 기능 짜기 전 — 코드 오딧 우선
 영향 받는 파일들 먼저 Read 하고, 영향도 분석 후 작업 시작. 추측 금지.
 
 ### 4.4 모듈 책임 분리 원칙
 - `src/http.py` — 표준 HTTP 세션 (retry/backoff, 타임아웃 강제, API 키 마스킹, 풀링)
-- `src/storage.py` — SQLite/Turso 캐시 (`@cached` 데코레이터, TTL, best-effort — 캐시 장애가 파이프라인을 막지 않음) + state 테이블. 연결 상태 API: `init_sync`("local"|"ok"|"error"|"timeout"|"offline")·`degraded`·`require_remote(what)`·`put_state -> bool`·`sync -> str`
+- `src/storage.py` — SQLite/Turso 캐시 (`@cached` 데코레이터, TTL, best-effort — 캐시 장애가 파이프라인을 막지 않음) + state 테이블. 연결 상태 API: `init_sync`("local"|"ok"|"error"|"timeout"|"offline")·`degraded`·`require_remote(what)`·`put_state -> bool`·`sync -> str`. 쓰기는 `write(fn)` 경유 — Turso 연결 끊김(`connection closed`·`invalid state` 등)이면 같은 레플리카로 재연결 후 1회 재시도(fn 은 멱등이어야 함)
 - `src/data_fetcher.py` — **모든** 외부 API 호출 전담 (다른 모듈은 여기서만 데이터 받음). 전 함수 투명 캐싱, `QUANT_BOT_CACHE` 로 제어
 - `src/macro_analyzer.py` — 거시 조망, 자산 간 분석, 시장 국면
 - `src/risk_engine.py` — 종목/자산 리스크 계산

@@ -167,6 +167,9 @@ def test_record_send_uses_tuple_params_single_statement(fresh_db, monkeypatch):
             self._s = s
             self.conn = ConnSpy(s.conn)
 
+        def write(self, fn):                 # Storage.write 경유 쓰기도 스파이 conn 으로
+            return fn(self.conn)
+
         def __getattr__(self, n):
             return getattr(self._s, n)
 

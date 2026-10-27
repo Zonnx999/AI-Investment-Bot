@@ -65,6 +65,22 @@ except ImportError:
 # 공개 별칭 — 다른 모듈(ledger·export_dashboard·check_backtest)은 이 이름을 쓴다(비공개 이름 의존 제거).
 DB_ERRORS = _DB_ERRORS
 
+# Turso(Hrana) 연결이 원격에서 끊겼을 때의 libsql 오류 문구 (소문자 부분일치).
+# 실사고 2026-10-19·21: 발송 직후 첫 쓰기가 "connection closed before message completed" 로 실패하고,
+# 같은 conn 의 다음 쓰기(원장)는 "connection has reached an invalid state, started with Txn" 로 연쇄 실패.
+# 같은 conn 재시도는 소용없음 → 재연결 후 1회 재시도 (Storage.write).
+_CONN_LOST_MARKERS = (
+    "connection closed",
+    "invalid state",
+    "http dispatch error",
+    "stream not found",
+)
+
+
+def _is_conn_lost(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return any(m in msg for m in _CONN_LOST_MARKERS)
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS cache (
     namespace  TEXT NOT NULL,
@@ -338,6 +354,45 @@ class Storage:
                            "(재시작 시 재동기화)")
         return result
 
+    def write(self, fn: Callable[[Any], Any]) -> Any:
+        """쓰기 1묶음 ``fn(conn)`` (execute + commit) 실행 — Turso 연결 끊김이면 재연결 후 1회 재시도.
+
+        ``fn`` 은 **멱등**이어야 한다 (INSERT OR REPLACE / OR IGNORE) — 첫 시도가 원격엔 반영됐는데
+        응답만 끊긴 경우에도 재시도가 안전해야 하므로. 연결 끊김이 아닌 오류·재시도 실패·재연결
+        불가는 원래 예외(_DB_ERRORS)를 그대로 올린다 → 호출부의 기존 best-effort 처리 유지.
+        """
+        try:
+            return fn(self._conn)
+        except _DB_ERRORS as e:
+            if not (self.is_turso and _is_conn_lost(e)):
+                raise
+            logger.warning("Turso 연결 끊김 — 재연결 후 1회 재시도: %s", e)
+            if not self._reconnect():
+                raise
+        return fn(self._conn)
+
+    def _reconnect(self) -> bool:
+        """같은 레플리카 파일로 libsql conn 을 새로 연다 (같은 프로세스 — §4.10 #9 규칙 유지).
+
+        libsql connect 는 GIL 을 쥔 채 행할 수 있어(§4.10 #18) 순수 파이썬 소켓 점검을 먼저 한다.
+        옛 conn 은 close 하지 않고 버린다 — 깨진 Txn 상태에서 close 가 원격 롤백을 시도하며 멈출 수 있어서.
+        """
+        url = settings.turso_database_url
+        if not url or not _remote_reachable(url):
+            logger.warning("Turso 재연결 생략 — 원격 도달 불가")
+            return False
+        try:
+            import libsql_experimental as libsql
+
+            self._conn = libsql.connect(
+                str(self.db_path), sync_url=url, auth_token=settings.turso_auth_token
+            )
+        except Exception:  # noqa: BLE001 — 재연결 실패는 원래 쓰기 오류로 보고 (호출부 best-effort)
+            logger.warning("Turso 재연결 실패", exc_info=True)
+            return False
+        logger.info("Turso 재연결 완료: %s", self.db_path)
+        return True
+
     @property
     def degraded(self) -> bool:
         """초기 pull 타임아웃으로 오프라인 파일에 강등됐는가 (발굴 종목·구독자 등 원격
@@ -419,12 +474,10 @@ class Storage:
 
     def _put_payload(self, namespace: str, key: str, kind: CacheKind, payload: str) -> None:
         try:
-            self._conn.execute(
+            params = (namespace, key, kind, payload, _utcnow().isoformat())
+            self.write(lambda c: (c.execute(
                 "INSERT OR REPLACE INTO cache (namespace, key, kind, payload, fetched_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (namespace, key, kind, payload, _utcnow().isoformat()),
-            )
-            self._conn.commit()
+                "VALUES (?, ?, ?, ?, ?)", params), c.commit()))
         except _DB_ERRORS:
             # best-effort — 캐시 장애가 파이프라인을 막지 않음 (§4.4). libsql 은
             # sqlite3.Error 가 아니라 ValueError 를 던짐 (§4.10 #9) → _DB_ERRORS 로 포착.
@@ -532,12 +585,10 @@ class Storage:
         반환: 성공 True / DB 오류로 실패 False (best-effort — 예외는 삼킴).
         호출부는 무시해도 되고(하위호환), 헬스 리포트는 state_write_ok 로 씀."""
         try:
-            self._conn.execute(
+            params = (namespace, key, json.dumps(obj, ensure_ascii=False), _utcnow().isoformat())
+            self.write(lambda c: (c.execute(
                 "INSERT OR REPLACE INTO state (namespace, key, payload, updated_at) "
-                "VALUES (?, ?, ?, ?)",
-                (namespace, key, json.dumps(obj, ensure_ascii=False), _utcnow().isoformat()),
-            )
-            self._conn.commit()
+                "VALUES (?, ?, ?, ?)", params), c.commit()))
         except _DB_ERRORS:
             # best-effort (§4.4) — libsql ValueError 포착 (§4.10 #9, get_state 와 대칭)
             logger.warning("상태 쓰기 실패 (%s/%s) — 무시", namespace, key, exc_info=True)

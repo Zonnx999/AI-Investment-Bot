@@ -549,8 +549,9 @@ def record_send(
         ph = "(" + ",".join("?" * len(_LEDGER_COLS)) + ")"
         sql = (f"INSERT OR IGNORE INTO signal_ledger ({', '.join(_LEDGER_COLS)}) VALUES "
                + ",".join([ph] * len(rows)))
-        conn.execute(sql, tuple(v for row in rows for v in row))
-        conn.commit()
+        params = tuple(v for row in rows for v in row)
+        # 연결 끊김이면 재연결 후 1회 재시도 — INSERT OR IGNORE 라 재시도 멱등
+        get_storage().write(lambda c: (c.execute(sql, params), c.commit()))
         ok = True
         logger.info("원장 기록 %s %s: %d종목 (%s, %s)", m, sent_date, len(rows), source, rule_version)
     except (StorageError, *DB_ERRORS):
