@@ -132,7 +132,7 @@ journalctl -u quant-digest@kr.service -n 30
   `--dry-run` 도 스키마 보장(`CREATE IF NOT EXISTS`·멱등 컬럼 추가)과 조회 캐시 저장은 할 수 있어서 사본으로 돌리는 것 — Turso 모드에선 이것도 원격 쓰기다.
 
 ### 5.4 유니버스 주간 재점수 `quant-universe.service` + `.timer`
-`build_universe.py --max-age 6` (discover + enrich, 7일 신선도 6일로 여유) · `QUANT_BOT_CACHE=off`(원격 캐시 쓰기 0) · `QUANT_BOT_SYNC_TIMEOUT=300` · 전용 레플리카 `data/universe_replica.db` + `flock data/.universe.lock` ·
+`build_universe.py --max-age 3` (discover + enrich. 3일 = 주중 수동 재점수가 있어도 토요일 정기 회차가 건너뛰지 않게 — 6일이던 10/17 회차가 10/11 수동 실행 탓에 108종목만 보강된 사고) · `QUANT_BOT_CACHE=off`(원격 캐시 쓰기 0) · `QUANT_BOT_SYNC_TIMEOUT=300` · 전용 레플리카 `data/universe_replica.db` + `flock data/.universe.lock` ·
 `TimeoutStartSec=4h` · `MemoryMax=600M`(봇보다 먼저 OOM 대상, `OOMScoreAdjust=300`) · `Nice=10` · `IOSchedulingClass=idle` · 타이머 `Sat 10:00 Asia/Seoul`, `Persistent=true`. `[Install]` 이 없으므로 `quant-universe.service` 는 직접 enable 하지 않고 **타이머만 enable**.
 - 재점수 직전·직후에 유니버스 스냅샷(`universe_snapshots`)이 저장됨(훅) — 원장의 순위 IC 에 쓰임. 스냅샷은 로컬 레플리카를 읽으므로 **직후 스냅샷 전에 `sync()`** 를 해서 방금 쓴 점수가 클라우드와 합쳐진 뒤에 찍는다.
 - **`ExecStartPost` = 레플리카 미리 pull**: `flock -w 900 data/.digest.lock` 아래 `QUANT_BOT_DB_PATH=…/digest_replica.db QUANT_BOT_SYNC_TIMEOUT=1200 … scripts/warm_replica.py`, `-` 접두라 실패는 무시(재점수 자체는 성공).

@@ -67,7 +67,7 @@ DISCOVER_CHUNK = 200                      # 발굴 upsert 배치 크기 (execute
 ABORT_AFTER_RATE_LIMITS = 5               # 연속 429 N회면 보강 루프 중단
 KR_MIN_LIST_SIZE = 1500                   # KRX 일별 목록이 이보다 작으면 'not_listed' 판정 보류
 # 재보강 누락 행 — 시장 기준일(보강 행 updated_at 날짜의 중앙값)보다 이만큼(일) 이상 뒤처진 행은
-# 후보(scan/pick_top)에서 뺀다 (RVQ-1). 주간 배치(토 10:00, --max-age 6)는 모든 행을 매주 다시
+# 후보(scan/pick_top)에서 뺀다 (RVQ-1). 주간 배치(토 10:00, --max-age 3)는 모든 행을 매주 다시
 # 점수화하므로, 정상 배치 안의 날짜 차이는 0~1일이고 '직전 배치에서 갱신 못 한 행' 은 정확히 7일
 # 뒤처진다 (no_data·DataFetchError·상폐/피인수·DART 미제출). 이런 옛 점수가 새 점수와 순위를 다투고,
 # 다이제스트의 min(후보 기준일) 노후 판정을 그 1행이 시장 전체 '후보 보류' 로 끌고 가는 것을 막는다.
