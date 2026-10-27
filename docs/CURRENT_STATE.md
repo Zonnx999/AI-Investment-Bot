@@ -69,7 +69,7 @@
 - **봇 명령** (소유자 승인제 멀티유저): `/stock <티커> [us|kr|crypto]`(점수·근거·기준일·제외 사유, 같은 코드가 여러 시장이면 시장 지정) · `/scan [us|kr] [개수]`(다이제스트와 같은 선정) ·
   `/ledger [us|kr]`(원장 성과, **평문**) · `/news <티커>` · `/menu` · 소유자 `/approve` `/deny` `/pending` `/subscribers` `/announce` · 가입 요청 인라인 [승인][거절] 버튼.
   조회 명령(`/stock`·`/scan`·`/ledger`)이 든 배치는 **처리 전에 최신 상태를 pull** — 마지막 sync 후 300초 이상일 때만, 초기 pull 강등 중엔 생략, 실패는 삼키고 로컬 레플리카로 응답
-  (다이제스트·재점수가 방금 쓴 데이터를 봇이 바로 반영. 워치독 300초 예산에 최대 ~65초 = sync 타임아웃 60 + 소켓 사전점검 5 가 더해질 수 있음).
+  (다이제스트·재점수가 방금 쓴 데이터를 봇이 바로 반영). 메시지가 없어도 900초마다 **유휴 pull** — 델타가 쌓여 `/stock` 이 4분 걸린 2026-10-26 사고 방지. 큰 델타 pull 은 sync 타임아웃(60초)으로 못 끊고(GIL) 워치독 300초 예산을 거의 다 쓸 수 있음.
 - **대시보드** (https://zonnx999.github.io/AI-Investment-Bot/ ): `dashboard/index.html` 5탭 + payload 에 `data_as_of`·`fund_asof`/`price_asof`·`excluded`·`eligible_count`, 중립 어휘, 예측 탭 '검증 미통과 · 참고용'.
   숫자 필드는 `num()`/`isNum()` 헬퍼로만 `innerHTML` 에 보간(유한한 숫자만, 그 외 '—')해 JSON 에 문자열이 섞여도 마크업이 주입되지 않음.
   ⚠️ **GitHub Actions "Dashboard Export" 는 현재 중단 상태** — 07-03 부터 연속 실패, 마지막 성공 07-10, 60일 무활동으로 GitHub 이 자동 비활성화(`disabled_inactivity`). 워크플로 수리는 이 브랜치에 포함, **수동 재활성화 필요**(`DEPLOYMENT.md` 배포 순서).

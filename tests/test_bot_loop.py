@@ -347,3 +347,48 @@ def test_query_pull_failure_does_not_kill_loop(fresh_db, owner_set, monkeypatch)
     monkeypatch.setattr(bot, "_now", lambda: next(times))
     assert bot.main() == 0                             # 사전 pull 예외에도 루프 생존
     assert sent == ["send"]                            # 조회 응답은 그대로 나감
+
+
+# ---------------- 유휴 pull (2026-10-26 /stock 4분 지연) ----------------
+# 메시지가 없는 폴링 주기에도 IDLE_PULL_SEC(900초)마다 pull — 레플리카 델타를 늘 작게 유지.
+
+
+def test_idle_pull_after_900s_without_messages(fresh_db, owner_set, monkeypatch):
+    bot = _load_bot()
+    events = _run_batches_with_clock(bot, monkeypatch, [[]], [0.0, 1000.0, 1000.0])
+    assert events == ["sync"]
+
+
+def test_no_idle_pull_before_900s(fresh_db, owner_set, monkeypatch):
+    bot = _load_bot()
+    events = _run_batches_with_clock(bot, monkeypatch, [[], []], [0.0, 500.0, 899.0])
+    assert events == []
+
+
+def test_idle_pull_skipped_while_degraded_at_start(fresh_db, owner_set, monkeypatch):
+    bot = _load_bot()
+    monkeypatch.setattr(storage_mod.get_storage(), "init_sync", "timeout")
+    events = _run_batches_with_clock(bot, monkeypatch, [[]], [0.0, 5000.0, 5000.0])
+    assert events == []
+
+
+def test_idle_pull_resets_query_pull_timer(fresh_db, owner_set, monkeypatch):
+    """유휴 pull 직후(100초) 조회 명령은 사전 pull 없이 바로 응답 — 배치 끝 sync 만."""
+    bot = _load_bot()
+    batches = [[], [_msg_update(1, 1, "/stock AAPL")]]
+    events = _run_batches_with_clock(bot, monkeypatch, batches, [0.0, 1000.0, 1000.0, 1100.0, 1100.0])
+    assert events == ["sync", "respond", "send", "sync"]   # 유휴 pull → 응답 → 배치 끝 sync
+
+
+def test_slow_pull_logged_at_info(fresh_db, owner_set, monkeypatch, caplog):
+    import logging
+
+    bot = _load_bot()
+    store = storage_mod.get_storage()
+    ticks = iter([0.0, 37.5])
+    monkeypatch.setattr(bot.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(type(store), "sync", lambda self: "ok")
+    with caplog.at_level(logging.DEBUG):
+        bot._timed_sync(store, "조회 전")
+    rec = [r for r in caplog.records if "조회 전 pull" in r.getMessage()]
+    assert rec and rec[0].levelno == logging.INFO and "37.5s (ok)" in rec[0].getMessage()

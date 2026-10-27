@@ -19,6 +19,7 @@ Phase 11b — 상시 인터랙티브 봇 (폴링 워커).
 
 from __future__ import annotations
 
+import logging
 import os
 import socket
 import time
@@ -45,6 +46,11 @@ DEGRADED_EXIT_CODE = 3
 # 로컬 레플리카가 반영하게 한다. 마지막 sync 후 이 초 이상 지났을 때만 (Turso 왕복 남용 방지).
 QUERY_PULL_MIN_SEC = 300
 QUERY_PULL_KINDS = ("stock", "scan", "ledger")
+# 메시지가 없을 때도 마지막 sync 후 이 초가 지나면 pull — 레플리카가 며칠치 델타(주간 재점수 ≈3,000행)를
+# 쌓아 두었다가 다음 /stock 에서 한꺼번에 받느라 4분 걸린 사고(2026-10-26) 방지. 델타를 늘 작게 유지.
+IDLE_PULL_SEC = 900
+# pull 이 이 초 이상 걸리면 INFO 로 남김 (그 미만은 DEBUG) — 응답 지연 원인 확인용
+SLOW_SYNC_LOG_SEC = 10.0
 
 
 _GATE_MSG = "🔒 구독자 전용입니다. /start 로 가입 요청 후 소유자 승인을 받으면 이용할 수 있어요."
@@ -93,11 +99,34 @@ def _pull_before_query(store, updates: list[dict], last_sync: float) -> float:
     now = _now()
     if now - last_sync < QUERY_PULL_MIN_SEC or not _has_query_command(updates):
         return last_sync
-    try:
-        store.sync()
-    except Exception:  # noqa: BLE001 — 동기화 장애가 조회 응답·폴링 루프를 막지 않도록
-        logger.warning("조회 전 sync 실패 — 로컬 레플리카로 응답", exc_info=True)
+    _timed_sync(store, "조회 전")
     return now
+
+
+def _timed_sync(store, why: str) -> None:
+    """store.sync() 1회 + 소요 시간 로그. 실패는 로그만 (조회 응답·폴링 루프를 막지 않음).
+
+    소요 시간은 time.monotonic 으로 직접 잰다 — _now 는 테스트가 시각을 주입하는 지점이라 건드리지 않음.
+    """
+    t0 = time.monotonic()
+    try:
+        result = store.sync()
+    except Exception:  # noqa: BLE001 — 동기화 장애가 조회 응답·폴링 루프를 막지 않도록
+        logger.warning("%s sync 실패 — 로컬 레플리카로 진행", why, exc_info=True)
+        return
+    elapsed = time.monotonic() - t0
+    level = logging.INFO if elapsed >= SLOW_SYNC_LOG_SEC else logging.DEBUG
+    logger.log(level, "%s pull %.1fs (%s)", why, elapsed, result)
+
+
+def _idle_pull(store, last_sync: float) -> float:
+    """메시지 없는 폴링 주기에 마지막 sync 후 IDLE_PULL_SEC 이 지났으면 pull. 새 last_sync 반환."""
+    now = _now()
+    if now - last_sync < IDLE_PULL_SEC:
+        return last_sync
+    _sd_notify("WATCHDOG=1")                         # 큰 델타 pull 직전 하트비트 (WatchdogSec 여유 확보)
+    _timed_sync(store, "유휴")
+    return _now()
 
 
 def _sd_notify(state: str) -> None:
@@ -168,6 +197,9 @@ def run() -> NoReturn:
             continue
 
         if not updates:
+            # 강등(오프라인 파일) 중에는 pull 대상이 없음 — 재시작이 복구 수단
+            if restart_at is None:
+                last_sync = _idle_pull(store, last_sync)
             continue
 
         # 0) 버튼(reply keyboard) 라벨 → 명령으로 정규화 — 조회·구독 파싱이 모두 같은 명령을
@@ -176,6 +208,11 @@ def run() -> NoReturn:
             msg = u.get("message") or u.get("edited_message")
             if msg and msg.get("text") in bot_commands.BUTTON_TO_COMMAND:
                 msg["text"] = bot_commands.BUTTON_TO_COMMAND[msg["text"]]
+        # 응답 지연 진단용 — 조회 명령 수신 시각이 로그에 남아야 pull 소요와 대조할 수 있다
+        n_query = sum(1 for u in updates if _has_query_command([u]))
+        if n_query:
+            logger.info("조회 명령 %d건 수신 (마지막 sync %.0fs 전)", n_query,
+                        time.monotonic() - last_sync)
 
         # 1) 콜백 쿼리 (인라인 [승인][거절] 버튼) — 소유자 검증·응답·편집은 handle_callback 이
         #    전담. per-update try/except 로 poison callback 이 루프를 죽이지 않게 함.

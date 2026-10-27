@@ -86,7 +86,11 @@ sudo systemctl start quant-alert@autopull.service
 - libsql 쓰기는 GIL 을 쥔 채 원격 왕복하므로 네트워크 블랙홀 시 프로세스가 '살아있지만 얼어붙음' — `Restart=always` 는 못 잡고 워치독이 최종 안전망 (`CLAUDE.md §4.10 (18)`).
 - 초기 pull 이 타임아웃으로 오프라인 파일에 강등돼 뜨면 600초 응답만 하다가 `exit 3` 으로 자진 종료 → systemd 가 재시작해 Turso 를 다시 프로브. 강등 중 처리한 구독 요청은 그 파일에만 남아 버려질 수 있음(알려진 한계, `scripts/bot.py` docstring).
 - **조회 명령 전 pull**: `/stock`·`/scan`·`/ledger` 가 든 배치는 처리 **전에** `sync()` 1회 — 다이제스트·재점수가 클라우드에 쓴 최신 상태를 봇의 로컬 레플리카가 반영하게 함. 마지막 sync 후 300초 이상일 때만(Turso 왕복 남용 방지),
-  강등 중(위 `exit 3` 대기 구간)엔 생략, 실패는 삼키고 로컬 레플리카로 응답. 워치독 300초 예산에 **최대 ~65초**(`QUANT_BOT_SYNC_TIMEOUT=60` + 소켓 사전점검 5초)가 더해질 수 있다 — 여유는 있지만 `WatchdogSec` 을 줄일 때는 이 값을 감안할 것.
+  강등 중(위 `exit 3` 대기 구간)엔 생략, 실패는 삼키고 로컬 레플리카로 응답.
+- **유휴 pull**: 메시지가 없는 폴링 주기에도 마지막 sync 후 900초(`IDLE_PULL_SEC`)가 지나면 `sync()` 1회 — 레플리카 델타를 늘 작게 유지.
+  사고(2026-10-26): 10/23 이후 조회가 없어 봇 레플리카가 주간 재점수(≈3,000행)를 포함한 사흘치 델타를 쌓았고, 다음 `/stock` 의 사전 pull 이 그걸 한꺼번에 받느라 **약 4분** 뒤에 응답했다.
+  `QUANT_BOT_SYNC_TIMEOUT=60` 은 이 지연을 못 끊는다 — libsql 이 GIL 을 쥔 채 받는 동안 감시 스레드가 깨어나지 못함(§4.10 18). 큰 델타 pull 은 워치독 300초 예산을 거의 다 쓰므로 `WatchdogSec` 을 줄이지 말 것.
+  로그: 조회 명령 수신은 INFO `조회 명령 N건 수신 (마지막 sync Ns 전)`, pull 소요는 10초 이상이면 INFO `조회 전 pull 37.2s (ok)`/`유휴 pull …` (그 미만은 DEBUG, `logs/quant_bot.log`).
 ```
 sudo systemctl status quant-bot --no-pager
 journalctl -u quant-bot -f
